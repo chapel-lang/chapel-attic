@@ -1189,7 +1189,6 @@ FnSymbol::FnSymbol(const char* initName) :
   formals(),
   setter(NULL),
   retType(dtUnknown),
-  where(NULL),
   retExprType(NULL),
   body(new BlockStmt()),
   thisTag(INTENT_BLANK),
@@ -1205,6 +1204,8 @@ FnSymbol::FnSymbol(const char* initName) :
   valueFunction(NULL),
   codegenUniqueNum(1),
   doc(NULL),
+  where(NULL),
+  constraints(NULL),
   partialCopySource(NULL),
   retSymbol(NULL)
 {
@@ -2554,3 +2555,44 @@ VarSymbol* newTemp(const char* name, Type* type) {
 VarSymbol* newTemp(Type* type) {
   return newTemp((const char*)NULL, type);
 }
+
+/*
+ * Concepts
+ */
+
+InterfaceSymbol::InterfaceSymbol() : Symbol(E_InterfaceSymbol, NULL), typeVar(NULL), body(NULL) {
+  gInterfaceSymbols.add(this);
+}
+
+InterfaceSymbol::InterfaceSymbol(const char* name, ArgSymbol* typeVar, BlockStmt* body) :
+  Symbol(E_InterfaceSymbol, name), typeVar(new DefExpr(typeVar)), body(body) {
+  
+  gInterfaceSymbols.add(this);
+}
+
+InterfaceSymbol* InterfaceSymbol::copyInner(SymbolMap* map) {
+  return new InterfaceSymbol(this->name, static_cast<ArgSymbol*>(this->typeVar->sym), this->body);
+}
+
+GenRet InterfaceSymbol::codegen() {
+  return GenRet();
+}
+
+void InterfaceSymbol::replaceChild(BaseAST* old_ast, BaseAST* new_ast) {
+  return;
+}
+
+InterfaceSymbol* ModuleSymbol::findInterfaceSymbol(const char* iname) const {
+  InterfaceSymbol* isym = this->block->findInterfaceSymbol(iname);
+  
+  if (isym == NULL) {
+    isym = this->initFn->findInterfaceSymbol(iname);
+  }
+  
+  return isym;
+}
+
+InterfaceSymbol* FnSymbol::findInterfaceSymbol(const char* iname) const {
+  return this->body->findInterfaceSymbol(iname);
+}
+

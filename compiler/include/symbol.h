@@ -24,6 +24,7 @@ class BlockStmt;
 class Immediate;
 class BasicBlock;
 class IteratorInfo;
+class Constraint;
 
 enum RetTag {
   RET_VALUE,
@@ -201,7 +202,6 @@ class FnSymbol : public Symbol {
   AList formals;
   DefExpr* setter; // implicit setter argument to var functions
   Type* retType;
-  BlockStmt* where;
   BlockStmt* retExprType;
   BlockStmt* body;
   IntentTag thisTag;
@@ -219,6 +219,13 @@ class FnSymbol : public Symbol {
                            // resolve and used in cullOverReferences)
   int codegenUniqueNum;
   const char *doc;
+  
+  /*
+   * Both of these pointers may be NULL, or one may be NULL and the other
+   * non-NULL; they can not both be non-NULL.
+   */
+  BlockStmt* where;
+  Vec<Constraint*>* constraints;
   
   /// Used to keep track of symbol substitutions during partial copying.
   SymbolMap partialCopyMap;
@@ -270,6 +277,8 @@ class FnSymbol : public Symbol {
   ArgSymbol* getFormal(int i); // return ith formal
 
   bool tag_generic();
+  
+  InterfaceSymbol* findInterfaceSymbol(const char* iname) const;
 };
 
 
@@ -283,6 +292,22 @@ class EnumSymbol : public Symbol {
   
   bool isParameter(void);
   Immediate* getImmediate(void);
+};
+
+
+class InterfaceSymbol : public Symbol {
+  public:
+  
+  DefExpr* typeVar;
+  BlockStmt* body;
+  
+  InterfaceSymbol();
+  InterfaceSymbol(const char* name, ArgSymbol* typeVar, BlockStmt* body);
+
+  DECLARE_SYMBOL_COPY(InterfaceSymbol);
+  
+  GenRet codegen();
+  void replaceChild(BaseAST* old_ast, BaseAST* new_ast);
 };
 
 
@@ -310,6 +335,8 @@ class ModuleSymbol : public Symbol {
   Vec<AggregateType*> getClasses();
   void replaceChild(BaseAST* old_ast, BaseAST* new_ast);
   void codegenDef();
+  
+  InterfaceSymbol* findInterfaceSymbol(const char* iname) const;
 };
 
 

@@ -1,0 +1,35 @@
+=====================================================
+Notes for adding new AST types to the Chapel compiler
+=====================================================
+
+Overview
+--------
+
+This document describes some of the steps you need to take to add a new type of
+AST node to the Chapel compiler.
+
+Adding a node
+-------------
+
+1. Add the class definition to baseAST.h, expr.h, stmt.h, or symbol.h.  You may
+   create a new header file for your class if it inherits directly from
+   BaseAST.
+
+2. Forward declare your class.  If your new node type is used by another type
+   of node you may need to forward declare it in one of the above listed files.
+
+3. Add an enum element to the AstTag enum defined in baseAST.h.  Be careful, as
+   the order in which the tags are delcared matters to functions such as
+   isExpr() and isSymbol().
+
+4. Extend the necessary macros.  Several macros are used to automate the
+   definition of various variables, types, and functions.  Notable macros:
+     * foreach_ast_sep : baseAST.h
+     * AST_CHILDREN_CALL : baseAST.h
+
+5. Use the DECLARE_COPY or DECLARE_SYMBOL_COPY macro in your class definition.
+
+6. Add the new AST node's name to the astTagName array in baseAST.cpp.
+
+7. Define RTTI tester and caster using the def_is_ast and def_to_ast macros in
+   baseAST.h.

@@ -9,6 +9,8 @@
 #include "type.h"
 #include "config.h"
 
+#include "concepts.h"
+
 static void
 checkControlFlow(Expr* expr, const char* context) {
   Vec<const char*> labelSet; // all labels in expr argument
@@ -1752,7 +1754,7 @@ FnSymbol* buildFunctionSymbol(FnSymbol* fn, const char* name,
 // buildFunctionDecl($4, $6, $7, $8, $9, @$.comment);
 BlockStmt*
 buildFunctionDecl(FnSymbol* fn, RetTag optRetTag, Expr* optRetType,
-                  Expr* optWhere, BlockStmt* optFnBody, char *docs)
+                  WhereUnion* optWhere, BlockStmt* optFnBody, char *docs)
 {
   // This clause can be removed when the old _extern keyword is obsoleted. <hilde>
 
@@ -1772,9 +1774,15 @@ buildFunctionDecl(FnSymbol* fn, RetTag optRetTag, Expr* optRetType,
 
   if (optWhere)
   {
-    if (fn->hasFlag(FLAG_EXTERN))
+    if (fn->hasFlag(FLAG_EXTERN) && optWhere->isValid())
       USR_FATAL_CONT(fn, "Extern functions cannot have where clauses.");
-    fn->where = new BlockStmt(optWhere);
+    
+    if (optWhere->isExpr()) {
+      fn->where = new BlockStmt(optWhere->getExpr());
+      
+    } else if (optWhere->isCons()) {
+      fn->constraints = optWhere->getCons();
+    }
   }
 
   if (optFnBody)
@@ -2096,4 +2104,21 @@ BlockStmt* handleConfigTypes(BlockStmt* blk) {
     }
   }
   return blk;
+}
+
+DefExpr* buildInterfaceDefExpr(const char* interName, const char* typeVarName, BlockStmt* body) {
+  ArgSymbol* typeVar = new ArgSymbol(INTENT_BLANK, typeVarName, dtAny);
+  typeVar->addFlag(FLAG_TYPE_VARIABLE);
+  
+  return new DefExpr(new InterfaceSymbol(interName, typeVar, body));
+}
+
+ImplExpr* buildImplExpr(const char* interName, Expr* typeExpr) {
+  ImplExpr* retval = new ImplExpr(interName, typeExpr);
+  
+  return retval;
+}
+
+Constraint* buildConstraint(const char* interName, Expr* typeVar) {
+  return new Constraint(interName, typeVar);
 }

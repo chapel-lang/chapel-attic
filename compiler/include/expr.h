@@ -247,4 +247,24 @@ GenRet createTempVarWith(GenRet v);
 GenRet codegenDeref(GenRet toDeref);
 GenRet codegenLocalDeref(GenRet toDeref);
 
+/*
+ * Concepts
+ */
+
+
+class ImplExpr : public Expr {
+  public:
+  
+  const char* interfaceName;
+  Expr* typeExpr;
+  
+  ImplExpr();
+  ImplExpr(const char* interfaceName, Expr* typeExpr);
+  
+  DECLARE_COPY(ImplExpr);
+  
+  GenRet codegen();
+  void replaceChild(Expr* old_ast, Expr* new_ast);
+};
+
 #endif

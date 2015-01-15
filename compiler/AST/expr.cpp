@@ -5581,6 +5581,7 @@ Expr* getFirstExpr(Expr* expr) {
   case E_SymExpr:
   case E_UnresolvedSymExpr:
   case E_DefExpr:
+  case E_ImplExpr:
     return expr;
   case E_BlockStmt:
     AST_RET_CHILD(BlockStmt, blockInfo);
@@ -5719,3 +5720,31 @@ new_Expr(const char* format, va_list vl) {
   INT_ASSERT(stack.n == 1);
   return stack.v[0];
 }
+
+/*
+ * Concepts
+ */
+
+ImplExpr::ImplExpr() : Expr(E_ImplExpr), interfaceName(NULL), typeExpr(NULL) {
+   gImplExprs.add(this);
+}
+
+
+ImplExpr::ImplExpr(const char* interfaceName, Expr* typeExpr) :
+  Expr(E_ImplExpr), interfaceName(interfaceName), typeExpr(typeExpr) {
+  
+  gImplExprs.add(this);
+}
+
+ImplExpr* ImplExpr::copyInner(SymbolMap* map) {
+  return new ImplExpr(this->interfaceName, this->typeExpr);
+}
+
+GenRet ImplExpr::codegen() {
+  return GenRet();
+}
+
+void ImplExpr::replaceChild(Expr* old_ast, Expr* new_ast) {
+  return;
+}
+

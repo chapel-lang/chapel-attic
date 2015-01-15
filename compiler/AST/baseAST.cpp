@@ -45,10 +45,10 @@ void printStatistics(const char* pass) {
 
   int nStmt = nCondStmt + nBlockStmt + nGotoStmt;
   int kStmt = kCondStmt + kBlockStmt + kGotoStmt + kExternBlockStmt;
-  int nExpr = nUnresolvedSymExpr + nSymExpr + nDefExpr + nCallExpr + nNamedExpr;
-  int kExpr = kUnresolvedSymExpr + kSymExpr + kDefExpr + kCallExpr + kNamedExpr;
-  int nSymbol = nModuleSymbol+nVarSymbol+nArgSymbol+nTypeSymbol+nFnSymbol+nEnumSymbol+nLabelSymbol;
-  int kSymbol = kModuleSymbol+kVarSymbol+kArgSymbol+kTypeSymbol+kFnSymbol+kEnumSymbol+kLabelSymbol;
+  int nExpr = nUnresolvedSymExpr + nSymExpr + nDefExpr + nCallExpr + nNamedExpr + nImplExpr;
+  int kExpr = kUnresolvedSymExpr + kSymExpr + kDefExpr + kCallExpr + kNamedExpr + kImplExpr;
+  int nSymbol = nModuleSymbol+nVarSymbol+nArgSymbol+nTypeSymbol+nFnSymbol+nEnumSymbol+nLabelSymbol+nInterfaceSymbol;
+  int kSymbol = kModuleSymbol+kVarSymbol+kArgSymbol+kTypeSymbol+kFnSymbol+kEnumSymbol+kLabelSymbol+kInterfaceSymbol;
   int nType = nPrimitiveType+nEnumType+nAggregateType;
   int kType = kPrimitiveType+kEnumType+kAggregateType;
 
@@ -343,6 +343,7 @@ const char* astTagName[E_BaseAST+1] = {
   "CondStmt",
   "GotoStmt",
   "ExternBlockStmt",
+  "ImplExpr",
   "Expr",
 
   "ModuleSymbol",
@@ -352,6 +353,7 @@ const char* astTagName[E_BaseAST+1] = {
   "FnSymbol",
   "EnumSymbol",
   "LabelSymbol",
+  "InterfaceSymbol",
   "Symbol",
 
   "PrimitiveType",

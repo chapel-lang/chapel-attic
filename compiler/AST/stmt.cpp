@@ -768,3 +768,16 @@ ExternBlockStmt::copyInner(SymbolMap* map) {
   return copy;
 }
 
+InterfaceSymbol* BlockStmt::findInterfaceSymbol(const char* iname) const {
+  for_alist(expr, this->body) {
+    if (isDefExpr(expr)) {
+      DefExpr* dexpr = static_cast<DefExpr*>(expr);
+      if (isInterfaceSymbol(dexpr->sym) && strcmp(dexpr->sym->name, iname) == 0) {
+        return static_cast<InterfaceSymbol*>(dexpr->sym);
+      }
+    }
+  }
+  
+  return NULL;
+}
+

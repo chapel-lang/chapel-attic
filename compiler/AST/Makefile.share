@@ -4,7 +4,8 @@ AST_SRCS = \
 	baseAST.cpp \
 	bb.cpp \
 	build.cpp \
-    checkAST.cpp \
+  checkAST.cpp \
+  concepts.cpp \
 	dominator.cpp\
 	expr.cpp \
 	iterator.cpp \

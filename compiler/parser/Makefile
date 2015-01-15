@@ -31,7 +31,7 @@ lex.yy.cpp: chapel.lex chapel.tab.h
 
 chapel.tab.h chapel.tab.cpp: chapel.ypp
 	bison --defines=chapel.tab.h -v -t $<
-	@if [ `grep "conflicts:" chapel.output | wc -l` -ne 0 ]; then echo "PROBLEM: chapel.y contains conflicts"; exit 1; fi;
+	@if [ `grep "conflicts:" chapel.output | wc -l` -ne 0 ]; then echo "PROBLEM: chapel.ypp contains conflicts"; exit 1; fi;
 
 
 FORCE:

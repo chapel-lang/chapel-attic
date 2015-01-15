@@ -2,6 +2,7 @@
 #define _BUILD_H_
 
 #include "alist.h"
+#include "concepts.h"
 #include "expr.h"
 #include "stmt.h"
 #include "symbol.h"
@@ -92,7 +93,7 @@ FnSymbol* buildLambda(FnSymbol *fn);
 FnSymbol* buildFunctionSymbol(FnSymbol* fn, const char* name,
                               IntentTag thisTag, const char* class_name);
 BlockStmt* buildFunctionDecl(FnSymbol* fn, RetTag optRetTag, Expr* optRetType,
-                             Expr* optWhere, BlockStmt* optFnBody, char *docs);
+                             WhereUnion* optWhere, BlockStmt* optFnBody, char *docs);
 BlockStmt* buildLocalStmt(Expr* stmt);
 BlockStmt* buildOnStmt(Expr* expr, Expr* stmt);
 BlockStmt* buildBeginStmt(CallExpr* byref_vars, Expr* stmt);
@@ -104,5 +105,10 @@ BlockStmt* buildExternBlockStmt(const char* c_code);
 CallExpr* buildPreDecIncWarning(Expr* expr, char sign);
 BlockStmt* convertTypesToExtern(BlockStmt*);
 BlockStmt* handleConfigTypes(BlockStmt*);
+
+// Concepts related builders
+DefExpr*    buildInterfaceDefExpr(const char* interName, const char* typeVarName, BlockStmt* body);
+ImplExpr*   buildImplExpr(const char* interName, Expr* typeVar);
+Constraint* buildConstraint(const char* interName, Expr* typeVar);
 
 #endif

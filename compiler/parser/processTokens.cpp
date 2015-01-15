@@ -4,6 +4,7 @@
 #include "misc.h"
 #include "processTokens.h"
 #include "yy.h"
+#include "concepts.h"
 #ifndef MODULE_FINDER
 #include "chapel.tab.h"
 #else

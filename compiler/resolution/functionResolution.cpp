@@ -24,6 +24,8 @@
 #include "symbol.h"
 #include "../ifa/prim_data.h"
 
+#include "view.h"
+
 // Allow disambiguation tracing to be controlled by the command-line option
 // --explain-verbose.
 #define ENABLE_TRACING_OF_DISAMBIGUATION 1
@@ -6103,10 +6105,67 @@ computeStandardModuleSet() {
 }
 
 
+//static InterfaceSymbol* findInterfaceSymbol(const char* iname, Symbol* scope) {
+//  
+//  InterfaceSymbol* idecl = NULL;
+//  
+//  if (scope == NULL) {
+//    return NULL;
+//    
+//  } else if (isModuleSymbol(scope)) {
+//    idecl = static_cast<ModuleSymbol*>(scope)->findInterfaceSymbol(iname);
+//    
+//  } else if (isFnSymbol(scope)) {
+//    idecl = static_cast<FnSymbol*>(scope)->findInterfaceSymbol(iname);
+//    
+//  }
+//  
+//  if (idecl != NULL) {
+//    return idecl;
+//    
+//  } else if (scope->defPoint != NULL) {
+//    return findInterfaceSymbol(iname, scope->defPoint->parentSymbol);
+//    
+//  } else {
+//    return NULL;
+//  }
+//}
+
+
+//static void resolveImplements(void) {
+//  forv_Vec(ImplExpr, impl, gImplExprs) {
+//    printf("Resolving implements statement:\n");
+//    print_view(impl);
+//    
+//    InterfaceSymbol* isym = findInterfaceSymbol(impl->interfaceName, impl->parentSymbol);
+//    
+//    if (isym != NULL) {
+//      printf("Found interface %s\n", impl->interfaceName);
+//      print_view(isym);
+//      
+//      printf("Type expression:\n");
+//      print_view(impl->typeExpr);
+//      
+//    } else {
+//      printf("Couldn't find interface named %s\n", impl->interfaceName);
+//    }
+//  }
+//}
+
+
 void
 resolve() {
   parseExplainFlag(fExplainCall, &explainCallLine, &explainCallModule);
-
+  
+  forv_Vec(InterfaceSymbol, isym, gInterfaceSymbols) {
+    print_view(isym);
+  }
+  
+  forv_Vec(ImplExpr, impl, gImplExprs) {
+    printf("Implements Expr: %s\n", impl->interfaceName);
+    print_view(impl);
+  }
+  
   computeStandardModuleSet();
 
   // call _nilType nil so as to not confuse the user
@@ -6124,6 +6183,9 @@ resolve() {
 
   resolveUses(mainModule);
   resolveUses(printModuleInitModule);
+  
+  // NOTE: For some reason the typeExpr symbol gets erased during resolveFns.
+//  resolveImplements();
 
   resolveFns(chpl_gen_main);
   USR_STOP();
@@ -6139,7 +6201,7 @@ resolve() {
   resolveOther();
   insertDynamicDispatchCalls();
 
-  insertReturnTemps(); // must be done before pruneResolvedTree is called.
+  insertReturnTemps(); // must be done before pruneResolvedTree is called.s
 
   pruneResolvedTree();
 
@@ -6161,7 +6223,11 @@ resolve() {
   }
   visibleFunctionMap.clear();
   visibilityBlockCache.clear();
-
+  
+  forv_Vec(InterfaceSymbol, isym, gInterfaceSymbols) {
+    isym->defPoint->remove();
+  }
+  
   resolved = true;
 }
 

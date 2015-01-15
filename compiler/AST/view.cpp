@@ -218,6 +218,14 @@ view_ast(BaseAST* ast, bool number = false, int mark = -1, int indent = 0) {
     if (number)
       printf("%d ", ast->id);
     printf("%s", astTagName[expr->astTag]);
+    
+    if (isInterfaceSymbol(ast)) {
+      printf(" %s", toInterfaceSymbol(ast)->name);
+    }
+    
+    if (isImplExpr(ast)) {
+      printf(" %s", toImplExpr(ast)->interfaceName);
+    }
 
     if (isBlockStmt(expr))
       if (FnSymbol* fn = toFnSymbol(expr->parentSymbol))

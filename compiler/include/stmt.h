@@ -45,6 +45,8 @@ class BlockStmt : public Expr {
 
   void addUse(ModuleSymbol* mod);
   void removeUse(ModuleSymbol* mod);
+  
+  InterfaceSymbol* findInterfaceSymbol(const char* iname) const;
 };
 
 
@@ -116,5 +118,11 @@ void verifyNcleanRemovedIterResumeGotos();
 
 extern Map<GotoStmt*,GotoStmt*> copiedIterResumeGotos;
 void verifyNcleanCopiedIterResumeGotos();
+
+/*
+ * Concepts Classes and Functions
+ */
+
+
 
 #endif

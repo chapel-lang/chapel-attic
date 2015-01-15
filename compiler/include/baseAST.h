@@ -44,7 +44,9 @@
   macro(BlockStmt) sep                             \
   macro(CondStmt) sep                              \
   macro(GotoStmt) sep                              \
-  macro(ExternBlockStmt)
+  macro(ExternBlockStmt) sep                       \
+  macro(InterfaceSymbol) sep                     \
+  macro(ImplExpr)
 
 #define foreach_ast(macro)                         \
   foreach_ast_sep(macro, ;)
@@ -106,6 +108,7 @@ enum AstTag {
   E_CondStmt,
   E_GotoStmt,
   E_ExternBlockStmt,
+  E_ImplExpr,
   E_Expr,
 
   E_ModuleSymbol,
@@ -115,12 +118,15 @@ enum AstTag {
   E_FnSymbol,
   E_EnumSymbol,
   E_LabelSymbol,
+  E_InterfaceSymbol,
   E_Symbol,
 
   E_PrimitiveType,
   E_EnumType,
   E_AggregateType,
   E_Type,
+
+  E_Constraint,
 
   E_BaseAST
 };
@@ -279,6 +285,8 @@ def_is_ast(LabelSymbol)
 def_is_ast(PrimitiveType)
 def_is_ast(EnumType)
 def_is_ast(AggregateType)
+def_is_ast(ImplExpr)
+def_is_ast(InterfaceSymbol)
 #undef def_is_ast
 
 //
@@ -309,6 +317,8 @@ def_to_ast(PrimitiveType)
 def_to_ast(EnumType)
 def_to_ast(AggregateType)
 def_to_ast(Type)
+def_to_ast(ImplExpr)
+def_to_ast(InterfaceSymbol)
 #undef def_to_ast
 //
 // traversal macros
@@ -381,6 +391,13 @@ def_to_ast(Type)
   case E_AggregateType:                                                 \
     AST_CALL_LIST(_a, AggregateType, fields, call, __VA_ARGS__);        \
     AST_CALL_LIST(_a, AggregateType, inherits, call, __VA_ARGS__);      \
+    break;                                                              \
+  case E_InterfaceSymbol:                                               \
+    AST_CALL_CHILD(_a, InterfaceSymbol, typeVar, call, __VA_ARGS__);    \
+    AST_CALL_CHILD(_a, InterfaceSymbol, body, call, __VA_ARGS__);       \
+    break;                                                              \
+  case E_ImplExpr:                                                      \
+    AST_CALL_CHILD(_a, ImplExpr, typeExpr, call, __VA_ARGS__);          \
     break;                                                              \
   default:                                                              \
     break;                                                              \

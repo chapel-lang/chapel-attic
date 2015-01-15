@@ -55,6 +55,9 @@
   Flag flag;
   ProcIter procIter;
   FlagSet* flagSet;
+  
+  WhereUnion* pwhereu;
+  Vec<Constraint*>* vpcon;
 };
 
 //
@@ -70,7 +73,8 @@
 %token TALIGN TATOMIC TBEGIN TBREAK TBY
 %token TCLASS TCOBEGIN TCOFORALL TCONFIG TCONST TCONTINUE
 %token TDELETE TDMAPPED TDO TDOMAIN TELSE TENUM TEXPORT TEXTERN
-%token TFOR TFORALL TIF TIN TINDEX TINLINE TINOUT TITER
+%token TFOR TFORALL TIF TIMPLEMENTS
+%token TIN TINDEX TINLINE TINOUT TINTERFACE TITER
 %token TLABEL TLAMBDA TLET TLOCAL TMINUSMINUS TMODULE
 %token TNEW TNIL TNOINIT TON TOTHERWISE TOUT
 %token TPARAM TPLUSPLUS TPRAGMA TPRIMITIVE TPROC
@@ -164,7 +168,7 @@
 %type <pexpr> zippered_iterator
 %type <pexpr> fun_expr call_expr dot_expr lhs_expr unary_op_expr binary_op_expr
 %type <pexpr> parenthesized_expr expr actual_expr
-%type <pexpr> literal_expr opt_where_part
+%type <pexpr> literal_expr
 %type <pexpr> stmt_level_expr type_level_expr
 %type <pexpr> ident_expr for_expr cond_expr nil_expr io_expr new_expr let_expr
 %type <pexpr> reduce_expr scan_expr reduce_scan_op_expr opt_init_expr opt_init_type var_arg_expr
@@ -178,6 +182,14 @@
 %type <pfnsymbol> fn_decl_stmt_inner formal_ls opt_formal_ls req_formal_ls
 %type <procIter> proc_or_iter
 %type <pfnsymbol> linkage_spec
+
+// Constrained Generics Types
+
+%type <pblockstmt> implements_stmt interface_decl_stmt
+%type <vpcon> constraint_ls
+%type <pwhereu> opt_where_part
+
+%type <pexpr> type_expr
 
 %% 
 
@@ -295,6 +307,12 @@ class_level_stmt:
 | enum_decl_stmt
 | type_alias_decl_stmt
 | var_decl_stmt
+| interface_decl_stmt
+| implements_stmt
+;
+
+implements_stmt:
+  TIMPLEMENTS ident TLP type_expr TRP { $$ = buildChapelStmt(buildImplExpr($2, $4)); }
 ;
 
 extern_block_stmt:
@@ -473,7 +491,7 @@ lambda_decl_expr:
       if ($6)
         $3->retExprType = new BlockStmt($6, BLOCK_SCOPELESS);
       if ($7)
-        $3->where = new BlockStmt($7);
+        $3->where = new BlockStmt($7->getExpr());
       $3->insertAtTail($8);
       $$ = new DefExpr(buildLambda($3));
     }
@@ -497,6 +515,7 @@ linkage_spec:
 | TEXTERN ident { $$ = new FnSymbol($2); $$->addFlag(FLAG_EXTERN);  
                   $$->addFlag(FLAG_LOCAL_ARGS);
                   @$.comment = yylloc.comment; yylloc.comment = NULL;}
+;
 
 fn_decl_stmt:
   linkage_spec proc_or_iter
@@ -554,6 +573,22 @@ fn_decl_stmt_inner:
       $$ = buildFunctionSymbol($5, $4, $1, $2);
       $$->addFlag(FLAG_ASSIGNOP);
     }
+;
+
+interface_decl_stmt:
+  TINTERFACE ident TLP ident TRP TLCBR class_level_stmt_ls TRCBR { $$ = buildChapelStmt(buildInterfaceDefExpr($2, $4, $7)); }
+;
+
+constraint_ls:
+  ident TLP type_expr TRP {
+    $$ = new Vec<Constraint*>();
+    $$->add(buildConstraint($1, $3));
+  }
+  
+| constraint_ls TCOMMA ident TLP type_expr TRP {
+    $$ = $1;
+    $$->add(buildConstraint($3, $5));
+  }
 ;
 
 fn_ident:
@@ -686,8 +721,9 @@ var_arg_expr:
 ;
 
 opt_where_part:
-               { $$ = NULL; }
-| TWHERE expr  { $$ = $2; }
+                                   { $$ = new WhereUnion();   }
+| TWHERE expr                      { $$ = new WhereUnion($2); }
+| TWHERE TIMPLEMENTS constraint_ls { $$ = new WhereUnion($3); }
 ;
 
 module_decl_stmt:
@@ -957,6 +993,11 @@ type_level_expr:
     { $$ = new CallExpr("chpl__atomicType", $2); }
 | TSYNC expr
     { $$ = new CallExpr( "_syncvar", $2); }
+;
+
+type_expr:
+  type_level_expr { $$ = $1;         }
+| array_type      { $$ = toExpr($1); }
 ;
 
 for_expr:

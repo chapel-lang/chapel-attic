@@ -2,6 +2,7 @@
 #define _LEXYACC_H_
 
 #include "build.h"
+#include "concepts.h"
 #include "countTokens.h"
 #include "driver.h"
 #include "expr.h"
