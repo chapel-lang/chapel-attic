@@ -21,6 +21,7 @@
 #include "chpl-privatization.h"
 #include "chpl-mem.h"
 #include "chpl-qsbr.h"
+#include "chpl-tasks.h"
 #include <pthread.h>
 #include <stdbool.h>
 
@@ -28,10 +29,10 @@
   TODO: Make calls to check for TLS 'unlikely' as it only happens once.
 */
 
+static int64_t chpl_capPrivateObjects = 0;
 static chpl_sync_aux_t privatizationSync;
 
 chpl_privateObject_t* chpl_privateObjects = NULL;
-static int64_t chpl_capPrivateObjects = 0;
 
 void chpl_privatization_init(void) {
     chpl_sync_initAux(&privatizationSync);
@@ -53,11 +54,6 @@ static inline int64_t max(int64_t a, int64_t b) {
 // elements. Be __very__ careful if you have to update it.
 void chpl_newPrivatizedClass(void* v, int64_t pid) {
   chpl_sync_lock(&privatizationSync);
-  // if we're out of space, double (or more) the array size
-  if (pid >= chpl_capPrivateObjects) {
-    void** tmp;
-    void** old;
-    int64_t oldCap;
 
   // initialize array to a default size
   if (chpl_privateObjects == NULL) {

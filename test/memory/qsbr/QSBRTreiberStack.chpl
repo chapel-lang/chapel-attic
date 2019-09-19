@@ -14,7 +14,7 @@ class node {
 var head : atomic localPtr;
 
 inline proc addr2node(addr) {
-	return __primitive("cast", node, addr);
+	return __primitive("cast", node?, addr);
 }
 
 inline proc node2addr(node) {
@@ -23,7 +23,7 @@ inline proc node2addr(node) {
 
 proc push(val) {
 	local {
-		var n = new node(val);
+		var n = new unmanaged node(val);
 		var h : localPtr;
 		do {
 			h = head.read();
@@ -39,7 +39,7 @@ proc pop() : bool {
 		do {
 			h = head.read();
 			if h == 0 then return false; 
-			n = addr2node(h).next.read();
+			n = addr2node(h)!.next.read();
 		} while (!head.compareExchangeStrong(h, n));
 
 		extern proc chpl_qsbr_defer_deletion(c_void_ptr);
