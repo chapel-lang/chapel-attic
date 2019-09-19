@@ -57,6 +57,7 @@
 #include "chpl-mem-array.h"
 #include "chplmemtrack.h"
 #include "chpl-prefetch.h"
+#include "chpl-qsbr.h"
 #include "chpl-privatization.h"
 #include "chpl-string.h"
 #include "chplsys.h"

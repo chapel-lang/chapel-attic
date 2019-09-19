@@ -1,15 +1,15 @@
 /*
  * Copyright 2004-2019 Cray Inc.
  * Other additional copyright holders may be indicated within.
- * 
+ *
  * The entirety of this work is licensed under the Apache License,
  * Version 2.0 (the "License"); you may not use this file except
  * in compliance with the License.
- * 
+ *
  * You may obtain a copy of the License at
- * 
+ *
  *     http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -20,15 +20,27 @@
 #include "chplrt.h"
 #include "chpl-privatization.h"
 #include "chpl-mem.h"
-#include "chpl-tasks.h"
+#include "chpl-qsbr.h"
+#include <pthread.h>
+#include <stdbool.h>
 
-static int64_t chpl_capPrivateObjects = 0;
+/*
+  TODO: Make calls to check for TLS 'unlikely' as it only happens once.
+*/
+
 static chpl_sync_aux_t privatizationSync;
 
 chpl_privateObject_t* chpl_privateObjects = NULL;
+static int64_t chpl_capPrivateObjects = 0;
 
 void chpl_privatization_init(void) {
     chpl_sync_initAux(&privatizationSync);
+
+    // Initialize...
+    chpl_capPrivateObjects = 1024;
+    chpl_privateObjects =
+        chpl_mem_allocManyZero(chpl_capPrivateObjects, sizeof(void *),
+                           CHPL_RT_MD_COMM_PRV_OBJ_ARRAY, 0, 0);
 }
 
 static inline int64_t max(int64_t a, int64_t b) {
@@ -41,6 +53,11 @@ static inline int64_t max(int64_t a, int64_t b) {
 // elements. Be __very__ careful if you have to update it.
 void chpl_newPrivatizedClass(void* v, int64_t pid) {
   chpl_sync_lock(&privatizationSync);
+  // if we're out of space, double (or more) the array size
+  if (pid >= chpl_capPrivateObjects) {
+    void** tmp;
+    void** old;
+    int64_t oldCap;
 
   // initialize array to a default size
   if (chpl_privateObjects == NULL) {
@@ -53,6 +70,7 @@ void chpl_newPrivatizedClass(void* v, int64_t pid) {
     // if we're out of space, double (or more) the array size
     if (pid >= chpl_capPrivateObjects) {
       chpl_privateObject_t* tmp;
+      chpl_privateObject_t* old = chpl_privateObjects;
       int64_t oldCap;
 
       oldCap = chpl_capPrivateObjects;
@@ -64,8 +82,8 @@ void chpl_newPrivatizedClass(void* v, int64_t pid) {
       chpl_memcpy((void*)tmp, (void*)chpl_privateObjects,
                   (oldCap)*sizeof(chpl_privateObject_t));
       chpl_privateObjects = tmp;
-      // purposely leak old copies of chpl_privateObject to avoid the need to
-      // lock chpl_getPrivatizedClass; TODO: fix with lock free data structure
+      // Defer deletion of old privatization table.
+      chpl_qsbr_defer_deletion(old);
     }
   }
   chpl_privateObjects[pid].obj = v;
@@ -89,4 +107,11 @@ int64_t chpl_numPrivatizedClasses(void) {
   }
   chpl_sync_unlock(&privatizationSync);
   return ret;
+}
+
+// Clean up all resources for memory checkers.
+void chpl_privatization_exit(void) {
+  // Destroy last instance
+  chpl_mem_free(chpl_privateObjects, 0, 0);
+  chpl_privateObjects = NULL;
 }
