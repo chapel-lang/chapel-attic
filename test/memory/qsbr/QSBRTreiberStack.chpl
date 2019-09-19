@@ -28,7 +28,7 @@ proc push(val) {
 		do {
 			h = head.read();
 			n.next.write(h);
-		} while (!head.compareExchangeStrong(h, node2addr(n)));
+		} while (!head.compareAndSwap(h, node2addr(n)));
 	}
 }
 
@@ -40,7 +40,7 @@ proc pop() : bool {
 			h = head.read();
 			if h == 0 then return false; 
 			n = addr2node(h)!.next.read();
-		} while (!head.compareExchangeStrong(h, n));
+		} while (!head.compareAndSwap(h, n));
 
 		extern proc chpl_qsbr_defer_deletion(c_void_ptr);
 		chpl_qsbr_defer_deletion(addr2node(h) : c_void_ptr);

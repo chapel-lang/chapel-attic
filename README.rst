@@ -42,6 +42,8 @@ TODO for QSBR
 
 1. Need better integration with uGNI and GASNet communication layer
 2. Needs more rigorous testing for portability.
+3. Rebasing may have introduced some new bugs, such as a segmentation fault occurring when the chapel program is exiting in test/memory/qsbr/disableQSBR.chpl and test/distributions/privatization/deferDeletion.chpl
+
 
 License
 -------
