@@ -15,23 +15,34 @@ QTHREAD_INSTALL_DIR = $(QTHREAD_ABS_DIR)/$(QTHREAD_INSTALL_SUBDIR)
 QTHREAD_BUILD_DIR = $(QTHREAD_ABS_DIR)/$(QTHREAD_BUILD_SUBDIR)
 QTHREAD_DIR = $(QTHREAD_ABS_DIR)
 
-ifeq ($(CHPL_MAKE_TARGET_PLATFORM),cray-xt)
-CHPL_QTHREAD_CFG_OPTIONS += --host=x86_64-pc-linux-gnu --build=x86_64-suse-linux-gnu
-endif
-
-ifeq ($(CHPL_MAKE_TARGET_ARCH),knc)
-CHPL_QTHREAD_CFG_OPTIONS += --host=x86_64-unknown-linux-gnu
-ifeq ($(CHPL_MAKE_TARGET_COMPILER),intel)
-CFLAGS += -mmic
-endif
-endif
-
-ifneq (, $(filter $(CHPL_MAKE_TARGET_PLATFORM),cray-xe cray-xk cray-xc))
-CHPL_QTHREAD_CFG_OPTIONS += --host=x86_64-pc-linux-gnu --build=x86_64-suse-linux-gnu
+#
+# Cray X* builds are cross-compilations
+#
+ifneq (, $(filter cray-x%,$(CHPL_MAKE_TARGET_PLATFORM)))
+CHPL_QTHREAD_CFG_OPTIONS += --host=$(shell uname -m)-cle-linux-gnu
+else ifneq ($(CHPL_MAKE_HOST_PLATFORM),$(CHPL_MAKE_TARGET_PLATFORM))
+CHPL_QTHREAD_CFG_OPTIONS += --host=$(CHPL_MAKE_TARGET_PLATFORM)-unknown-linux-gnu
 endif
 
 ifeq ($(CHPL_MAKE_HWLOC),hwloc)
 CHPL_QTHREAD_CFG_OPTIONS += --with-topology=hwloc --with-hwloc=$(HWLOC_INSTALL_DIR)
+endif
+ifeq ($(CHPL_MAKE_HWLOC),system)
+CHPL_QTHREAD_CFG_OPTIONS += --with-topology=hwloc
+endif
+
+
+# Have qthreads use Chapel's allocator, unless directed not to
+ifeq (, $(call isTrue, $(CHPL_QTHREAD_NO_CHPL_ALLOC)))
+CHPL_QTHREAD_CFG_OPTIONS += --with-alloc=chapel
+CFLAGS += -I$(CHPL_MAKE_HOME)/runtime/include/mem/$(CHPL_MAKE_MEM)/
+CFLAGS += -I$(CHPL_MAKE_HOME)/runtime/include/
+ifeq ($(CHPL_MAKE_MEM),jemalloc)
+CFLAGS += -I$(JEMALLOC_INCLUDE_DIR)
+RUNTIME_LFLAGS += -L$(JEMALLOC_LIB_DIR)
+RUNTIME_LFLAGS += -ljemalloc
+RUNTIME_LFLAGS += $(shell $(JEMALLOC_BIN_DIR)/jemalloc-config --libs)
+endif
 endif
 
 # enable oversubscription for testing
@@ -53,10 +64,10 @@ endif
 CHPL_QTHREAD_CFG_OPTIONS += --enable-static --disable-shared
 
 # determine which scheduler to use. Default to nemesis, except for numa where
-# we want sherwood. Override with a user provided option if they requested one
+# we want distrib. Override with a user provided option if they requested one
 SCHEDULER = nemesis
-ifeq ($(CHPL_MAKE_LOCALE_MODEL),numa)
-SCHEDULER = sherwood
+ifneq ($(CHPL_MAKE_LOCALE_MODEL),flat)
+SCHEDULER = distrib
 endif
 ifneq (, $(CHPL_QTHREAD_SCHEDULER))
 SCHEDULER = $(CHPL_QTHREAD_SCHEDULER)
@@ -100,22 +111,57 @@ qthread-config: FORCE
 # ahead in version numbers as that which was used when packaging the
 # Qthreads release
 #
-	cd $(QTHREAD_SUBDIR) && find . -name "*.m4" | xargs touch configure.ac
-	sleep 2
+	cd $(QTHREAD_SUBDIR) && touch -c configure.ac
+	cd $(QTHREAD_SUBDIR) && find . -name "*.m4" | xargs touch
+	sleep 1
+	cd $(QTHREAD_SUBDIR) && touch -c aclocal.m4
+	sleep 1
 	cd $(QTHREAD_SUBDIR) && touch configure
-	sleep 2
 	cd $(QTHREAD_SUBDIR) && find . -name "*.in" | xargs touch
+
 #
 # Then configure
 #
 	mkdir -p $(QTHREAD_BUILD_DIR)
-	cd $(QTHREAD_BUILD_DIR) && $(QTHREAD_SUBDIR)/configure CC='$(CC)' CFLAGS='$(CFLAGS)' CXX='$(CXX)'  CXXFLAGS='$(CFLAGS)' --prefix=$(QTHREAD_INSTALL_DIR) --enable-interfaces=chapel CHPL_HOME=$(CHPL_MAKE_HOME) $(CHPL_QTHREAD_CFG_OPTIONS) 
+	cd $(QTHREAD_BUILD_DIR) \
+	&& $(QTHREAD_SUBDIR)/configure CC='$(CC)' CFLAGS='$(CFLAGS)' \
+	       CXX='$(CXX)'  CXXFLAGS='$(CFLAGS)' LDFLAGS='$(RUNTIME_LFLAGS)' \
+	       --prefix=$(QTHREAD_INSTALL_DIR) $(CHPL_QTHREAD_CFG_OPTIONS)
 
 qthread-build: FORCE
 	cd $(QTHREAD_BUILD_DIR) && $(MAKE)
 	cd $(QTHREAD_BUILD_DIR) && $(MAKE) install
 
-qthread: qthread-config qthread-build
+#
+# The two variables here answer different questions even though they're
+# set using the same logic.  For the first, the question is "Will remote
+# caching work with this Qthreads build?", which is true iff qthreads do
+# not move from one worker to another (thus invalidating TLS).  For the
+# second, it's "Is there only one worker per shepherd?", which changes
+# how the shim sets certain QT_* environment variables to parameterize
+# Qthreads behavior.  These two questions have the same scheduler-based
+# answer now, but that may not always be true.  If and when it's not,
+# we'll need separate checks to set them.
+#
+ifeq ($(SCHEDULER),$(findstring $(SCHEDULER),lifo mtsfifo mutexfifo nemesis))
+SUPPORTS_REMOTE_CACHE = 1
+ONE_WORKER_PER_SHEPHERD = 1
+else ifeq ($(SCHEDULER),$(findstring $(SCHEDULER),distrib nottingham sherwood))
+SUPPORTS_REMOTE_CACHE = 0
+ONE_WORKER_PER_SHEPHERD = 0
+else
+$(error Unrecognized Qthreads scheduler '$(SCHEDULER)')
+endif
+
+qthread-chapel-h: FORCE
+	echo "#define CHPL_QTHREAD_SUPPORTS_REMOTE_CACHE" \
+	     $(SUPPORTS_REMOTE_CACHE) \
+	     > $(QTHREAD_INSTALL_DIR)/include/qthread-chapel.h
+	echo "#define CHPL_QTHREAD_SCHEDULER_ONE_WORKER_PER_SHEPHERD" \
+	     $(ONE_WORKER_PER_SHEPHERD) \
+	     >> $(QTHREAD_INSTALL_DIR)/include/qthread-chapel.h
+
+qthread: qthread-config qthread-build qthread-chapel-h
 
 qthread-reconfig:
 	cd $(QTHREAD_SUBDIR) && autoreconf -f -i

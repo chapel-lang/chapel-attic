@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2014 Cray Inc.
+ * Copyright 2004-2018 Cray Inc.
  * Other additional copyright holders may be indicated within.
  * 
  * The entirety of this work is licensed under the Apache License,
@@ -54,7 +54,7 @@ module ChapelTaskTable {
   record chpldev_Task {
     var state     : taskState;
     var lineno    : uint(32);
-    var filename  : c_string;
+    var filename  : int(32);
     var tl_info   : uint(64);
   }
   
@@ -63,7 +63,7 @@ module ChapelTaskTable {
     var map : [dom] chpldev_Task;
   }
   
-  pragma "private"
+  pragma "locale private"
   var chpldev_taskTable : chpldev_taskTable_t;
   
   //----------------------------------------------------------------------{
@@ -99,7 +99,7 @@ module ChapelTaskTable {
   
   export proc chpldev_taskTable_add(taskID   : chpl_taskID_t,
                                     lineno   : uint(32),
-                                    filename : c_string,
+                                    filename : int(32),
                                     tl_info  : uint(64))
   {
     if (chpldev_taskTable == nil) then return;
@@ -153,12 +153,16 @@ module ChapelTaskTable {
   
   export proc chpldev_taskTable_print() 
   {
+    extern proc chpl_lookupFilename(idx: int(32)): c_string;
+
     if (chpldev_taskTable == nil) then return;
   
     for taskID in chpldev_taskTable.dom {
-      stderr.writeln("- ", chpldev_taskTable.map[taskID].filename,
-                     ":",  chpldev_taskTable.map[taskID].lineno,
-                     " is ", chpldev_taskTable.map[taskID].state);
+      try! stderr.writeln(
+             "- ",
+             chpl_lookupFilename(chpldev_taskTable.map[taskID].filename):string,
+             ":",  chpldev_taskTable.map[taskID].lineno,
+             " is ", chpldev_taskTable.map[taskID].state);
     }
   }
   

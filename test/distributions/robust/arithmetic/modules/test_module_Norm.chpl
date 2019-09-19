@@ -6,7 +6,7 @@ use Norm;
 
 config const is2D2Norm = false;
 
-var rng = new RandomStream(314159265);
+var rng = makeRandomStream(314159265, eltType=real(64), algorithm=RNG.NPB);
 
 rng.fillRandom(R1D);
 rng.fillRandom(R2D);
@@ -84,9 +84,9 @@ doNorm(R2D32, 3);
 
 
 writeln("Vector norm aliased arrays");
-var aR1D => R1D;
-var aR2D => R2D;
-var aR2D32 => R2D32;
+ref aR1D = R1D;
+ref aR2D = R2D;
+ref aR2D32 = R2D32;
 writeln("\tR1D:");
 doNorm(aR1D, 1);
 writeln("\tR2D:");
@@ -103,16 +103,16 @@ const TD1D: domain(1) = Space1.translate(-o5);
 const TD2D: domain(2) = Space2.translate(-o5,-o5);
 const TD2D32: domain(2,int(32)) = Space2D32.translate(-o5:int(32),-o5:int(32));
 writeln("\tR1D:");
-foo(TD1D, R1D, 1);
+foo(TD1D, R1D.reindex(TD1D), 1);
 writeln("\tR2D:");
-foo(TD2D, R2D, 2);
+foo(TD2D, R2D.reindex(TD2D), 2);
 writeln("\tR2D32:");
-foo(TD2D32, R2D32, 3);
+foo(TD2D32, R2D32.reindex(TD2D32), 3);
 
 
 writeln("Vector norm rank changed arrays (baseline)");
-var rcT1D => R2D(Dom2D.dim(1), n2-o5);
-var rcT2D => R3D(Dom3D.dim(1), Dom3D.dim(2), n3/2);
+ref rcT1D = R2D(Dom2D.dim(1), n2-o5);
+ref rcT2D = R3D(Dom3D.dim(1), Dom3D.dim(2), n3/2);
 const rcDom1D: domain(1) dmapped Dist1D = Dom2D.dim(1);
 const rcDom2D: domain(2) dmapped Dist2D = {Dom3D.dim(1), Dom3D.dim(2)};
 var rcR1D: [rcDom1D] real;
@@ -132,3 +132,5 @@ writeln("\trcR1D:");
 doNorm(rcR1D, 1);
 writeln("\trcR2D:");
 doNorm(rcR2D, 2);
+
+delete rng;

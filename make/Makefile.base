@@ -1,14 +1,14 @@
-# Copyright 2004-2014 Cray Inc.
+# Copyright 2004-2018 Cray Inc.
 # Other additional copyright holders may be indicated within.
-# 
+#
 # The entirety of this work is licensed under the Apache License,
 # Version 2.0 (the "License"); you may not use this file except
 # in compliance with the License.
-# 
+#
 # You may obtain a copy of the License at
-# 
+#
 #     http://www.apache.org/licenses/LICENSE-2.0
-# 
+#
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -26,6 +26,12 @@
 isTrue = $(filter yes Yes YES y Y true True TRUE t T, $(1))
 
 MAKEFLAGS = --no-print-directory
+
+
+#
+# Don't let CONFIG_SITE mess up our third-party/ builds.
+#
+unexport CONFIG_SITE
 
 ifndef CHPL_MAKE_HOST_TARGET
 CHPL_MAKE_HOST_TARGET = --host
@@ -47,7 +53,7 @@ endif
 # CHPL_MAKE_LAUNCHER="amudprun"
 # CHPL_MAKE_TIMERS="generic"
 # CHPL_MAKE_HOST_MEM="cstdlib"
-# CHPL_MAKE_TARGET_MEM="dlmalloc"
+# CHPL_MAKE_TARGET_MEM="jemalloc"
 # CHPL_MAKE_MAKE="gmake"
 # CHPL_MAKE_ATOMICS="intrinsics"
 # CHPL_MAKE_NETWORK_ATOMICS="none"
@@ -61,11 +67,16 @@ endif
 # CHPL_MAKE_COMPILER_SUBDIR=linux64.gnu.loc-flat.wide-struct.llvm-none
 # CHPL_MAKE_RUNTIME_SUBDIR=linux64.gnu.loc-flat.udp.everything.tasks-fifo.pthreads.tmr-generic.mem-default.atomics-intrinsics.none.gmp-none.hwloc-none.re-none.wide-struct.fs-none
 # CHPL_MAKE_LAUNCHER_SUBDIR=linux64.gnu.loc-flat.udp.everything.tasks-fifo.pthreads.launch-amudprun.tmr-generic.mem-default.atomics-intrinsics.none.wide-struct
+# CHPL_MAKE_JEMALLOC_UNIQ_CFG_PATH etc
+# CHPL_MAKE_THIRD_PARTY_LINK_ARGS
 # Don't recompute the settings every time!
 ifndef CHPL_MAKE_SETTINGS_NO_NEWLINES
 # ... but it involves a little bit of Make-craziness because
 # $(shell) changes newlines into spaces.
-export CHPL_MAKE_SETTINGS_NO_NEWLINES = $(shell $(CHPL_MAKE_HOME)/util/printchplenv --make | tr '\n' '|' )
+# Evaluate all of the definitions in CHPL_MAKE_ALL_VARS before running
+# printchplenv in order to pass the existing values from the compiler forward
+
+export CHPL_MAKE_SETTINGS_NO_NEWLINES := $(shell $(CHPL_MAKE_ALL_VARS) $(CHPL_MAKE_HOME)/util/printchplenv --all --internal --no-tidy --make | tr '\n' '|' )
 endif
 
 # This really needs TWO newlines!
@@ -83,6 +94,9 @@ endef
 # Now eval our settings to set the Make variables to
 # set all of the CHPL_MAKE_... configuration-based variables!
 $(eval $(CHPL_MAKE_SETTINGS))
+
+# Try this to debug issues with CHPL_MAKE_* variables
+# $(info $(CHPL_MAKE_SETTINGS_NO_NEWLINES))
 
 # Now do some minor situational clean-ups.
 
@@ -108,38 +122,61 @@ endif
 #
 # default CFLAGS, based on other settings
 #
+# Two notes about this section:
+#  1. It relies on the variables being defined with '=' vs ':='
+#     since DEPEND_CFLAGS etc is declared in the compiler
+#     section below. (But we could probably move this down...)
+#  2. CFLAGS, CXXFLAGS, and LDFLAGS can be set on the command line, like
+#        make CFLAGS=-g
+#     In that event, these append operations are ignored and the
+#     command line variable has precedence.
 ifeq ($(DEPEND), 1)
 CFLAGS += $(DEPEND_CFLAGS)
+CXXFLAGS += $(DEPEND_CFLAGS)
 endif
 
 ifeq ($(DEBUG), 1)
 CFLAGS += $(DEBUG_CFLAGS)
+CXXFLAGS += $(DEBUG_CFLAGS)
 endif
 
 ifeq ($(OPTIMIZE), 1)
 CFLAGS += $(OPT_CFLAGS)
+CXXFLAGS += $(OPT_CFLAGS)
 endif
 
 ifeq ($(PROFILE), 1)
 CFLAGS += $(PROFILE_CFLAGS)
+CXXFLAGS += $(PROFILE_CFLAGS)
 LDFLAGS += $(PROFILE_LFLAGS)
 endif
+
+# These variables are for C flags that are really coming from the C compiler
+# itself or from or 3rd-party configurations.
+# They might be set it make/compiler Makefiles or in third-party Makefiles
+# for example.
+CHPL_MAKE_BASE_CFLAGS =
+CHPL_MAKE_BASE_LFLAGS =
 
 #
 # Third-party package stuff
 #
-THIRD_PARTY_DIR = $(CHPL_MAKE_HOME)/third-party
+ifdef CHPL_MAKE_THIRD_PARTY
+  THIRD_PARTY_DIR = $(CHPL_MAKE_THIRD_PARTY)
+else
+  THIRD_PARTY_DIR = $(CHPL_MAKE_HOME)/third-party
+endif
 
-include $(THIRD_PARTY_DIR)/creoleparser/Makefile.include
 include $(THIRD_PARTY_DIR)/gasnet/Makefile.include
-include $(THIRD_PARTY_DIR)/dlmalloc/Makefile.include
 include $(THIRD_PARTY_DIR)/massivethreads/Makefile.include
 include $(THIRD_PARTY_DIR)/qthread/Makefile.include
-include $(THIRD_PARTY_DIR)/tcmalloc/Makefile.include
+include $(THIRD_PARTY_DIR)/jemalloc/Makefile.include
 include $(THIRD_PARTY_DIR)/gmp/Makefile.include
 include $(THIRD_PARTY_DIR)/hwloc/Makefile.include
 include $(THIRD_PARTY_DIR)/re2/Makefile.include
 include $(THIRD_PARTY_DIR)/llvm/Makefile.include-$(CHPL_MAKE_LLVM)
+include $(THIRD_PARTY_DIR)/fltk/Makefile.include
+include $(THIRD_PARTY_DIR)/libunwind/Makefile.include
 
 -include $(THIRD_PARTY_DIR)/Makefile.devel.include
 
@@ -160,7 +197,7 @@ printplatform:
 	@echo "CHPL_MAKE_THREADS         = $(CHPL_MAKE_THREADS)"
 	@echo "CHPL_MAKE_TIMERS          = $(CHPL_MAKE_TIMERS)"
 	@echo "CHPL_MAKE_COMM            = $(CHPL_MAKE_COMM)"
-	@echo "CHPL_MAKE_COMM_SUBSTRATE  = $(CHPL_MAKE_COMM_SUBSTRATE)"    
+	@echo "CHPL_MAKE_COMM_SUBSTRATE  = $(CHPL_MAKE_COMM_SUBSTRATE)"
 	@echo "CHPL_MAKE_LAUNCHER        = $(CHPL_MAKE_LAUNCHER)"
 	@echo "CHPL_MAKE_MEM             = $(CHPL_MAKE_MEM)"
 	@echo "CHPL_MAKE_ATOMICS         = $(CHPL_MAKE_ATOMICS)"
@@ -168,7 +205,7 @@ printplatform:
 #
 # use: make print-X to print the value of the variable X
 #
-print-%: ; @echo $* is $($*)
+print-%: ; @echo "$*" is "$($*)"
 
 
 # OBJ_SUBDIR is used in compiler/
@@ -180,7 +217,10 @@ print-%: ; @echo $* is $($*)
 #
 GEN_SUBDIR = gen
 PLAT_COMPILER_SUBDIR = $(CHPL_MAKE_HOST_PLATFORM)/$(CHPL_MAKE_COMPILER)
-OBJ_SUBDIR = $(GEN_SUBDIR)/$(CHPL_MAKE_COMPILER_SUBDIR)
+
+COMPILER_BUILD = $(COMPILER_ROOT)/../build/compiler/$(CHPL_MAKE_COMPILER_SUBDIR)
+OBJ_SUBDIR = $(COMPILER_BUILD)/$(COMPILER_SUBDIR)
+
 OBJ_SUBDIR_TIMESTAMP = $(OBJ_SUBDIR)/.timestamp
 OBJ_SUBDIR_MADE = $(OBJ_SUBDIR_TIMESTAMP)
 OBJ_SUBDIR_SAFESLASH = $(subst /,\\/, $(OBJ_SUBDIR))
@@ -190,8 +230,16 @@ OBJ_SUBDIR_SAFESLASH = $(subst /,\\/, $(OBJ_SUBDIR))
 	@mkdir -p $*
 	@-touch $*/.timestamp
 
-RUNTIME_OBJDIR = $(GEN_SUBDIR)/$(CHPL_MAKE_RUNTIME_SUBDIR)
-LAUNCHER_OBJDIR = $(GEN_SUBDIR)/$(CHPL_MAKE_LAUNCHER_SUBDIR)
+RUNTIME_BUILD = $(RUNTIME_ROOT)/../build/runtime/$(CHPL_MAKE_RUNTIME_SUBDIR)
+RUNTIME_OBJDIR = $(RUNTIME_BUILD)/$(RUNTIME_SUBDIR)
+RUNTIME_OBJ_DIR_STAMP = $(RUNTIME_OBJ_DIR)/.timestamp
+
+LAUNCHER_BUILD = $(RUNTIME_ROOT)/../build/runtime-launch/$(CHPL_MAKE_LAUNCHER_SUBDIR)
+LAUNCHER_OBJDIR = $(LAUNCHER_BUILD)/$(RUNTIME_SUBDIR)
+LAUNCHER_OBJ_DIR_STAMP = $(LAUNCHER_OBJ_DIR)/.timestamp
+
+# These are for use only when building the Chapel runtime,
+# since otherwise the lib directory should be CHPL_MAKE_RUNTIME_LIB
 LIB_RT_DIR = lib/$(CHPL_MAKE_RUNTIME_SUBDIR)
 LIB_LN_DIR = lib/$(CHPL_MAKE_LAUNCHER_SUBDIR)
 
@@ -199,11 +247,12 @@ LIB_LN_DIR = lib/$(CHPL_MAKE_LAUNCHER_SUBDIR)
 CHPL_BIN_DIR = $(CHPL_MAKE_HOME)/bin/$(CHPL_MAKE_HOST_PLATFORM)
 CHPL = $(CHPL_BIN_DIR)/chpl$(EXE_SUFFIX)
 CHPLDOC = $(CHPL_BIN_DIR)/chpldoc$(EXE_SUFFIX)
+CHPLIPE = $(CHPL_BIN_DIR)/chpl-ipe$(EXE_SUFFIX)
 
 
 #
 # default tools
-# 
+#
 ifndef CHPL_TAGS_UTIL
 ifeq ($(CHPL_EDITOR),vim)
 CHPL_TAGS_UTIL = ctags
@@ -229,7 +278,7 @@ ECHO = echo
 #
 # by default, no executable suffix
 #
-EXE_SUFFIX = 
+EXE_SUFFIX =
 
 
 #

@@ -25,31 +25,31 @@ class GridSolution {
   
 
   //|\''''''''''''''''''''|\
-  //| >    constructor    | >
+  //| >    initializer    | >
   //|/....................|/
   
-  proc GridSolution (grid: Grid) {
+  proc init (grid: Grid) {
     this.grid = grid;
     old_data =     new GridVariable(grid = grid);
     current_data = new GridVariable(grid = grid);
   }
   // /|''''''''''''''''''''/|
-  //< |    constructor    < |
+  //< |    initializer    < |
   // \|....................\|
   
   
   
   //|\'''''''''''''''''''|\
-  //| >    destructor    | >
+  //| >  deinitializer   | >
   //|/...................|/
   
-  proc ~GridSolution () 
+  proc deinit () 
   {
     delete old_data;
     delete current_data;
   }
   // /|'''''''''''''''''''/|
-  //< |    destructor    < |
+  //< |  deinitializer   < |
   // \|...................\|
   
   

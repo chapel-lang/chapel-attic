@@ -1,40 +1,49 @@
 Initializing Modules:
    ChapelStandard
-    ChapelBase
+    CPtr
+    CString
     String
-     CString
+     SysCTypes
+     StringCasts
+    ChapelDebugPrint
+    ChapelBase
     MemConsistency
     Atomics
-    NetworkAtomics
-    AtomicsCommon
-    NewString
-     BaseStringType
     ChapelThreads
     ChapelTuple
     ChapelRange
+    ChapelTaskDataHelp
     LocaleModel
-     ChapelLocale
-     DefaultRectangular
-      DSIUtil
-      ChapelArray
-     ChapelNumLocales
-     Sys
-      SysBasic
-       SysCTypes
+     LocaleModelHelpFlat
+      LocaleModelHelpSetup
+       ChapelLocale
+       DefaultRectangular
+        DSIUtil
+        ChapelArray
+         Sort
+       ChapelNumLocales
+       Sys
+        SysBasic
+      LocaleModelHelpRuntime
+     LocaleModelHelpMem
     LocalesArray
     ChapelDistribution
      List
     ChapelIO
      IO
-      Error
-      Regexp
+      SysError
+      FormattedIO
+       Regexp
     LocaleTree
     DefaultAssociative
     ChapelTaskTable
     MemTracking
     ChapelUtil
+    ChapelError
     ChapelDynDispHack
-    Types
-    CommDiagnostics
+    ChapelTaskData
+    Assert
+    AlignedTSupport
+    RangeChunk
    printModuleInitOrder
     moduleInitTest

@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2014 Cray Inc.
+ * Copyright 2004-2018 Cray Inc.
  * Other additional copyright holders may be indicated within.
  *
  * The entirety of this work is licensed under the Apache License,
@@ -23,11 +23,15 @@
 #include "bitVec.h"
 #include "CForLoop.h"
 #include "DoWhileStmt.h"
+#include "driver.h"
 #include "ForLoop.h"
 #include "stlUtil.h"
 #include "stmt.h"
 #include "view.h"
 #include "WhileDoStmt.h"
+
+#include <queue>
+
 
 int                                          BasicBlock::nextID     = 0;
 BasicBlock*                                  BasicBlock::basicBlock = NULL;
@@ -71,7 +75,10 @@ void BasicBlock::buildBasicBlocks(FnSymbol* fn) {
 
   fn->basicBlocks->push_back(BasicBlock::steal());
 
-  INT_ASSERT(verifyBasicBlocks(fn));
+  removeEmptyBlocks(fn);
+
+  if (fVerify)
+    INT_ASSERT(verifyBasicBlocks(fn));
 }
 
 BasicBlock* BasicBlock::steal() {
@@ -108,9 +115,7 @@ void BasicBlock::buildBasicBlocks(FnSymbol* fn, Expr* stmt, bool mark) {
 
       // add the condition expr at the loop top
       } else if (WhileDoStmt* whileDoStmt = toWhileDoStmt(stmt)) {
-        SymExpr* condExpr = whileDoStmt->condExprGet();
-
-        INT_ASSERT(condExpr);
+        SymExpr* condExpr = whileDoStmt->condExprForTmpVariableGet();
 
         append(condExpr, true);
 
@@ -141,9 +146,7 @@ void BasicBlock::buildBasicBlocks(FnSymbol* fn, Expr* stmt, bool mark) {
         }
 
       } else if (DoWhileStmt* doWhileStmt = toDoWhileStmt(stmt)) {
-        SymExpr* condExpr = doWhileStmt->condExprGet();
-
-        INT_ASSERT(condExpr);
+        SymExpr* condExpr = doWhileStmt->condExprForTmpVariableGet();
 
         append(condExpr, true);
       }
@@ -199,16 +202,19 @@ void BasicBlock::buildBasicBlocks(FnSymbol* fn, Expr* stmt, bool mark) {
     thread(thenBottom, basicBlock);
 
   } else if (GotoStmt* s = toGotoStmt(stmt)) {
-    LabelSymbol* label = toLabelSymbol(toSymExpr(s->label)->var);
+    LabelSymbol* label = toLabelSymbol(toSymExpr(s->label)->symbol());
 
     if (BasicBlock* bb = labelMaps.get(label)) {
+      // Thread this block to its destination label.
       thread(basicBlock, bb);
 
     } else {
+      // Set up goto map, so this block's successor can be back-patched later.
       std::vector<BasicBlock*>* vbb = gotoMaps.get(label);
 
-      if (!vbb)
+      if (vbb == NULL) {
         vbb = new std::vector<BasicBlock*>();
+      }
 
       vbb->push_back(basicBlock);
 
@@ -216,29 +222,35 @@ void BasicBlock::buildBasicBlocks(FnSymbol* fn, Expr* stmt, bool mark) {
     }
 
     append(s, mark); // Put the goto at the end of its block.
+
+    // We need a new block, so we can not thread the one containing the goto to
+    // this new one.  There is a break in the flow.  If the new block does not
+    // begin with a label, it is unreachable and can be removed.
     restart(fn);
 
   } else {
-    DefExpr*      def = toDefExpr(stmt);
-    Vec<BaseAST*> asts;
+    DefExpr*              def = toDefExpr(stmt);
+    std::vector<BaseAST*> asts;
 
     collect_asts(stmt, asts);
 
-    forv_Vec(BaseAST, ast, asts) {
+    for_vector(BaseAST, ast, asts) {
       if (CallExpr* call = toCallExpr(ast)) {
         // mark function calls as essential
-        if (call->isResolved() != NULL)
+        if (call->resolvedFunction() != NULL) {
           mark = true;
 
         // mark essential primitives as essential
-        else if (call->primitive && call->primitive->isEssential)
+        } else if (call->primitive && call->primitive->isEssential) {
           mark = true;
 
         // mark assignments to global variables as essential
-        else if (call->isPrimitive(PRIM_MOVE) || call->isPrimitive(PRIM_ASSIGN)) {
+        } else if (call->isPrimitive(PRIM_MOVE) ||
+                 call->isPrimitive(PRIM_ASSIGN)) {
           if (SymExpr* se = toSymExpr(call->get(1))) {
-            if (se->var->type->refType == NULL)
+            if (se->symbol()->type->refType == NULL) {
               mark = true;
+            }
           }
         }
       }
@@ -251,6 +263,7 @@ void BasicBlock::buildBasicBlocks(FnSymbol* fn, Expr* stmt, bool mark) {
         BasicBlock* top = basicBlock;
 
         restart(fn);
+
         thread(top, basicBlock);
       }
 
@@ -270,6 +283,22 @@ void BasicBlock::buildBasicBlocks(FnSymbol* fn, Expr* stmt, bool mark) {
       labelMaps.put(label, basicBlock);
     } else {
       append(stmt, mark);
+
+      // For the sake of live variable analysis, a yield ends one block and
+      // begins another.  For now, we just thread one block into the next.
+      // We could get fancier and thread the block containing the yield to the
+      // end of the function and the start of the function to the block
+      // following the yield, but just putting in a block break is good enough
+      // for now.
+      if (CallExpr* call = toCallExpr(stmt)) {
+        if (call->isPrimitive(PRIM_YIELD)) {
+          BasicBlock* curr = basicBlock;
+
+          restart(fn);
+
+          thread(curr, basicBlock);
+        }
+      }
     }
   }
 }
@@ -291,6 +320,73 @@ void BasicBlock::thread(BasicBlock* src, BasicBlock* dst) {
   src->outs.push_back(dst);
 }
 
+// Removes a block from the basic block structure by traversing its lists of
+// predecessors and successors and removing any back-links.
+// The caller must then remove this block from any container and free it.
+void BasicBlock::remove() {
+  for_vector(BasicBlock, pred, this->ins) {
+    BasicBlockVector& pred_outs = pred->outs;
+
+    // Look for this block in the list of successors of this predecessor.
+    BasicBlockVector::iterator i;
+
+    for (i = pred_outs.begin(); i != pred_outs.end(); ++i) {
+      if (*i == this)
+        break;
+    }
+
+    // This block is in the list, right?
+    INT_ASSERT(i != pred_outs.end());
+
+    pred_outs.erase(i);
+  }
+
+  for_vector(BasicBlock, succ, this->outs) {
+    BasicBlockVector&          succ_ins = succ->ins;
+    BasicBlockVector::iterator i;
+
+    // Look for this block in the list of predecessors of this successor.
+    for (i = succ_ins.begin(); i != succ_ins.end(); ++i)
+      if (*i == this)
+        break;
+
+    INT_ASSERT(i != succ_ins.end());
+
+    succ_ins.erase(i);
+  }
+}
+
+// Look for and remove empty blocks with no predecessor and whose successor is
+// the next block in sequence.  These blocks get created when a block ends in a
+// goto statement and the enclosing construct calls restart immediately.
+// We have to wait until basic block analysis is done, because we don't know if
+// a block has predecessors until after threading is performed, and this is
+// sometimes delayed.
+void BasicBlock::removeEmptyBlocks(FnSymbol* fn) {
+  // Create a new vector that contains just the items we want to preserve.
+  int               newId     = 0;
+  BasicBlockVector* newBlocks = new BasicBlockVector();
+
+  for_vector(BasicBlock, bb, *fn->basicBlocks) {
+    // Look for empty blocks with no predecessors.
+    if (bb->ins.size() == 0 && bb->exprs.size() == 0) {
+      // This block will be removed.  It is no longer a predecessor of anyone,
+      // so we must update the back links.
+      bb->remove();
+
+      delete bb;
+    } else {
+      bb->id = newId++;
+
+      newBlocks->push_back(bb);
+    }
+  }
+
+  delete fn->basicBlocks;
+
+  fn->basicBlocks = newBlocks;
+}
+
 // Returns true if the basic block structure is OK, false otherwise.
 bool BasicBlock::verifyBasicBlocks(FnSymbol* fn) {
   for_vector(BasicBlock, bb, *fn->basicBlocks) {
@@ -305,6 +401,15 @@ bool BasicBlock::verifyBasicBlocks(FnSymbol* fn) {
 bool BasicBlock::isOK() {
   // Ensure exprs[] and marks[] are same length
   if (exprs.size() != marks.size())
+    return false;
+
+  // Every empty interior block must have a predecessor.
+  // Non-empty blocks with no predecessors are dead code, which may be
+  // removed by a client of BB analysis.  These dead blocks cannot be
+  // identified without BB analysis, so non-empty blocks with no
+  // predecessors are valid.
+  if (ins.size() == 0 &&
+      exprs.size() == 0)
     return false;
 
   // Expressions must be live (non-NULL);
@@ -345,6 +450,66 @@ bool BasicBlock::isOK() {
   return true;
 }
 
+
+// This routine removes unreachable (interior) blocks from the flow graph
+// without modifying the underlying AST.  It is a workaround for the fact that
+// dead block removal does not succeed in removing all unreachable blocks from
+// the tree.
+void BasicBlock::ignoreUnreachableBlocks(FnSymbol* fn) {
+  BasicBlockSet     reachable;
+  int               newId     = 0;
+  BasicBlockVector* newBlocks = new BasicBlockVector();
+
+  BasicBlock::getReachableBlocks(fn, reachable);
+
+  for_vector(BasicBlock, bb, *fn->basicBlocks) {
+    if (reachable.count(bb)) {
+      // Add reachable blocks to the new BB vector.
+      bb->id = newId++;
+
+      newBlocks->push_back(bb);
+
+    } else {
+      // Remove unreachable blocks from the flow graph.
+      bb->remove();
+    }
+  }
+
+  delete fn->basicBlocks;
+
+  fn->basicBlocks = newBlocks;
+}
+
+
+// Populates the passed-in basic block set with blocks that are reachable from
+// the root (block 0).  The blocks which are not in this set are unreachable
+// and may be removed.
+void BasicBlock::getReachableBlocks(FnSymbol* fn, BasicBlockSet& reachable) {
+  // We set up a work queue to perform a BFS on reachable blocks, and seed it
+  // with the first block in the function.
+  std::queue<BasicBlock*> workQueue;
+
+  workQueue.push((*fn->basicBlocks)[0]);
+
+  // Then we iterate until there are no more blocks to visit.
+  while (!workQueue.empty()) {
+    // Fetch and remove the next block.
+    BasicBlock* bb = workQueue.front();
+
+    workQueue.pop();
+
+    // Ignore it if we've already seen it.
+    if (reachable.count(bb) == 0) {
+      // Otherwise, mark it as reachable,
+      // and append all of its successors to the work queue.
+      reachable.insert(bb);
+
+      for_vector(BasicBlock, out, bb->outs)
+        workQueue.push(out);
+    }
+  }
+}
+
 void BasicBlock::buildLocalsVectorMap(FnSymbol*          fn,
                                       Vec<Symbol*>&      locals,
                                       Map<Symbol*, int>& localMap) {
@@ -377,7 +542,7 @@ void BasicBlock::backwardFlowAnalysis(FnSymbol*             fn,
     iterate = false;
 
     for_vector(BasicBlock, bb, *fn->basicBlocks) {
-      for (int j = 0; j < IN[i]->ndata; j++) {
+      for (size_t j = 0; j < IN[i]->ndata; j++) {
         unsigned int new_in  = (OUT[i]->data[j] & ~KILL[i]->data[j]) | GEN[i]->data[j];
         unsigned int new_out = 0;
 
@@ -440,7 +605,7 @@ void BasicBlock::forwardFlowAnalysis(FnSymbol*             fn,
     BasicBlock* bb     = (*fn->basicBlocks)[i];
     bool        change = false;
 
-    for (int j = 0; j < IN[i]->ndata; j++) {
+    for (size_t j = 0; j < IN[i]->ndata; j++) {
       if (bb->ins.size() > 0) {
         unsigned int new_in = (intersect) ? (unsigned int) (-1) : 0;
 
@@ -521,8 +686,8 @@ void BasicBlock::printDefsVector(std::vector<SymExpr*> defs, Map<SymExpr*,int>& 
   for_vector(SymExpr, def, defs) {
     printf("%2d: %s[%d] in %d\n",
            defMap.get(def),
-           def->var->name,
-           def->var->id,
+           def->symbol()->name,
+           def->symbol()->id,
            def->getStmtExpr()->id);
   }
 
@@ -535,7 +700,7 @@ void BasicBlock::printLocalsVectorSets(std::vector<BitVec*>& sets, Vec<Symbol*> 
   for_vector(BitVec, set, sets) {
     printf("%2d: ", i);
 
-    for (int j = 0; j < set->size(); j++) {
+    for (size_t j = 0; j < set->size(); j++) {
       if (set->get(j))
         printf("%s[%d] ", locals.v[j]->name, locals.v[j]->id);
     }
@@ -554,7 +719,7 @@ void BasicBlock::printBitVectorSets(std::vector<BitVec*>& sets) {
   for_vector(BitVec, set, sets) {
     printf("%2d: ", i);
 
-    for (int j = 0; j < set->size(); j++) {
+    for (size_t j = 0; j < set->size(); j++) {
       printf("%d", (set->get(j)) ? 1 : 0);
       if ((j+1) % 10 == 0) printf(" ");
     }

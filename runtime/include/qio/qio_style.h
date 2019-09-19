@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2014 Cray Inc.
+ * Copyright 2004-2018 Cray Inc.
  * Other additional copyright holders may be indicated within.
  * 
  * The entirety of this work is licensed under the Apache License,
@@ -40,8 +40,10 @@ typedef uint8_t style_char_t;
 #define QIO_STYLE_ELEMENT_TUPLE 5
 #define QIO_STYLE_ELEMENT_BYTE_ORDER 6
 #define QIO_STYLE_ELEMENT_IS_NATIVE_BYTE_ORDER 7
+#define QIO_STYLE_ELEMENT_SKIP_UNKNOWN_FIELDS 8
 
 
+// If these values change, also change iostringformat in IO.chpl
 #define QIO_STRING_FORMAT_WORD 0
 #define QIO_STRING_FORMAT_BASIC 1
 #define QIO_STRING_FORMAT_CHPL 2
@@ -95,11 +97,11 @@ typedef struct qio_style_s {
                       // For string printing, min_width is in
                       //   *screen positions*. If you want to print
                       //   a specific number of bytes, use binary I/O.
-  uint32_t max_width_columns; // maxiumum field width in screen positions; default is UINT32_MAX.
+  uint32_t max_width_columns; // maximum field width in screen positions; default is UINT32_MAX.
                               // (used when printing)
-  uint32_t max_width_characters; // maxiumum field width in characters; default is UINT32_MAX.
+  uint32_t max_width_characters; // maximum field width in characters; default is UINT32_MAX.
                                  // (used when scanning)
-  uint32_t max_width_bytes; // maxiumum field width in bytes; default is UINT32_MAX.
+  uint32_t max_width_bytes; // maximum field width in bytes; default is UINT32_MAX.
                             // (used when scanning)
 
 
@@ -129,7 +131,7 @@ typedef struct qio_style_s {
   style_char_t positive_char; // normally '+'
   style_char_t negative_char; // normally '-'
   style_char_t i_char; // normally 'i', suffix for imaginary numbers
-  uint8_t prefix_base; // read/write integral values preceeded by base prefix 0x 0b
+  uint8_t prefix_base; // read/write integral values preceded by base prefix 0x 0b
                     // (if not base 10). When scanning, the base prefix is
                     // always allowed if base==0 (ie determine base from #).
                     // prefix_base does not apply to floating-point values
@@ -141,19 +143,41 @@ typedef struct qio_style_s {
   style_char_t pad_char; // pad with this character.; should be ' ' or '0'
                  // (but don't use '0' when leftjustify=1)
   uint8_t showplus; // 0 == nothing before positive numbers
-                 // 1 == write positive numbers preceeded by positive_char
-                 // 2 == write positive numbers preceeded by pad_char
+                 // 1 == write positive numbers preceded by positive_char
+                 // 2 == write positive numbers preceded by pad_char
   uint8_t uppercase; // numeric stuff is uppercase
   uint8_t leftjustify; // 1 == left, 0 == right
 
-  // floating point options
-  uint8_t showpoint; // integer floating point values include a decimal point
-                     // with some level of precision (maybe just . or maybe .00000 for %g)
-  uint8_t showpointzero;  // integer floating point values get a .0
-                          // if they would otherwise have be printed without a .0
+  // more numeric options that make the most sense for floating point but
+  // also apply to integers. Thes only apply to printing (not reading).
+  uint8_t showpoint; // floating point values with no fractional portion
+                     // will get a decimal point
+                     // with some level of precision (maybe just . or maybe
+                     // .00000 for %g). This applies also to integers.
+                     // when reading, this number has no impact on floating
+                     // point values, but for integers it causes any \.0*
+                     // to be consumed after the number.
 
+  uint8_t showpointzero;  // floating point values with no fractional portion
+                          // get a .0 if they would otherwise have be printed
+                          // without a .0
+                          // Since this setting exists to distinguish
+                          // printed floating point values from printed
+                          // integers, it does not apply to integers. You could
+                          // use precision = 1 for that.
+                          // Also, it has no impact on numbers printed with
+                          // an exponent for the same reason.
+
+  // numeric printing and scanning choice
   int32_t precision; // for floating point, number after decimal point.
-                     // or number of significant digits in realfmt 2.
+                     // or number of significant digits in realfmt 0.
+                     // for integers, this is always the number
+                     // of .000 zeros to print
+                     // when reading, this number has no impact on floating
+                     // point values, but for integers it causes any \.0*
+                     // to be consumed after the number when precision > 0.
+
+  // realfmt does not apply to integers.
   uint8_t realfmt; //0 -> print with %g; 1 -> print with %f; 2 -> print with %e
 
   // Other data type choices
@@ -183,6 +207,12 @@ typedef struct qio_style_s {
   // QIO_TUPLE_FORMAT_CHPL make it look like (a,b,c)
   // QIO_TUPLE_FORMAT_JSON make it look like a JSON array [1,2]
   uint8_t tuple_style;
+
+  // If this is set, skip any unknown record/class fields
+  // when reading (ie the data to read might have more fields
+  // than a record, and the additional fields will be ignored).
+  uint8_t skip_unknown_fields;
+
 } qio_style_t;
 
 typedef qio_style_t _qio_style_ptr_t;
@@ -203,7 +233,7 @@ void qio_style_init_default(qio_style_t* s)
 
   s->binary = 0;
   s->byteorder = QIO_NATIVE;
-  s->str_style = -10;
+  s->str_style = -0xff00; // to EOF
 
   s->min_width_columns = 0;
   s->max_width_columns = UINT32_MAX;

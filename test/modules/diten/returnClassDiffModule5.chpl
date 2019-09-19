@@ -1,3 +1,4 @@
+pragma "error mode fatal"
 module M1 {
   var a = 1;
   class C {
@@ -5,7 +6,7 @@ module M1 {
     proc foo() {
       return a+b;
     }
-    proc writeThis(f: Writer) {
+    proc writeThis(f) {
       f.writeln("How does this get found?");
       f.write("{a = ", a, ", b = ", b, "}");
     }

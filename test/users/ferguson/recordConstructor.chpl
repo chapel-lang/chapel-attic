@@ -5,11 +5,12 @@ proc doit():int {
 
 record R {
   var x:int = doit();
-  proc R() {
+  proc init() {
+    this.initDone();
     writeln("R constructor");
     x = 15;
   }
-  proc ~R() {
+  proc deinit() {
     writeln("R destructor");
   }
 }

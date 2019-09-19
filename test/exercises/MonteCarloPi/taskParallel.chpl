@@ -20,7 +20,7 @@ writeln("Number of tasks     = ", tasks);
 //
 var counts: [0..#tasks] int;
 coforall tid in 0..#tasks {
-  var rs = new RandomStream(seed, parSafe=false);
+  var rs = new NPBRandomStream(real, seed, parSafe=false);
   const nPerTask = n/tasks,
         extras = n%tasks;
   rs.skipToNth(2*(tid*nPerTask + (if tid < extras then tid else extras)) + 1);
@@ -39,4 +39,4 @@ coforall tid in 0..#tasks {
 //
 var count = + reduce counts;
 
-writeln("Approximation of pi = ", format("#.#######", count * 4.0 / n));
+writef("Approximation of pi = %{#.#######}\n", count * 4.0 / n);

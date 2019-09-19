@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2014 Cray Inc.
+ * Copyright 2004-2018 Cray Inc.
  * Other additional copyright holders may be indicated within.
  *
  * The entirety of this work is licensed under the Apache License,
@@ -38,6 +38,8 @@
 //
 
 module LocalesArray {
+  use ChapelStandard;
+
   // Initialize the rootLocale
   chpl_init_rootLocale();
 
@@ -47,8 +49,8 @@ module LocalesArray {
   // we set up the version on all other locales during LocaleModel
   // initialization (see chpl_rootLocaleInitPrivate()).  The copy for
   // locale 0 is set up here for the declaration.
-  pragma "private"
-  var Locales => (rootLocale:RootLocale).getDefaultLocaleArray();
+  pragma "locale private"
+  const ref Locales = (rootLocale:RootLocale).getDefaultLocaleArray();
 
   // We don't use the same private "trick" as with Locales above with
   // LocaleSpace/ because it's small enough to not matter.

@@ -1,15 +1,15 @@
 /*
- * Copyright 2004-2014 Cray Inc.
+ * Copyright 2004-2018 Cray Inc.
  * Other additional copyright holders may be indicated within.
- * 
+ *
  * The entirety of this work is licensed under the Apache License,
  * Version 2.0 (the "License"); you may not use this file except
  * in compliance with the License.
- * 
+ *
  * You may obtain a copy of the License at
- * 
+ *
  *     http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -23,11 +23,20 @@
 #ifndef LAUNCHER
 
 #include <stdint.h>
+#include "chplcgfns.h"
 #include "chpltypes.h"
 #include "chpl-tasks-prvdata.h"
 
 #ifdef CHPL_TASKS_MODEL_H
 #include CHPL_TASKS_MODEL_H
+#endif
+
+// CHPL_TASKS_MODEL_H must define the task bundle header type,
+// chpl_task_bundle_t.
+typedef chpl_task_bundle_t* chpl_task_bundle_p;
+
+#ifdef __cplusplus
+extern "C" {
 #endif
 
 
@@ -50,9 +59,9 @@
 void      chpl_sync_lock(chpl_sync_aux_t *);
 void      chpl_sync_unlock(chpl_sync_aux_t *);
 void      chpl_sync_waitFullAndLock(chpl_sync_aux_t *,
-                                       int32_t, c_string);
+                                       int32_t, int32_t);
 void      chpl_sync_waitEmptyAndLock(chpl_sync_aux_t *,
-                                        int32_t, c_string);
+                                        int32_t, int32_t);
 void      chpl_sync_markAndSignalFull(chpl_sync_aux_t *);     // and unlock
 void      chpl_sync_markAndSignalEmpty(chpl_sync_aux_t *);    // and unlock
 chpl_bool chpl_sync_isFull(void *, chpl_sync_aux_t *);
@@ -64,26 +73,26 @@ void      chpl_sync_destroyAux(chpl_sync_aux_t *);
 
 typedef chpl_sync_aux_t chpl_single_aux_t;
 
-static ___always_inline
+static inline
 void chpl_single_lock(chpl_sync_aux_t * s) { chpl_sync_lock(s); }
-static ___always_inline
+static inline
 void chpl_single_unlock(chpl_sync_aux_t * s) { chpl_sync_unlock(s); }
-static ___always_inline
+static inline
 void chpl_single_waitFullAndLock(chpl_sync_aux_t * s,
-                                 int32_t lineno, c_string filename) {
+                                 int32_t lineno, int32_t filename) {
   chpl_sync_waitFullAndLock(s,lineno,filename);
 }
-static ___always_inline
+static inline
 void chpl_single_markAndSignalFull(chpl_sync_aux_t * s) {
   chpl_sync_markAndSignalFull(s);
 }
-static ___always_inline
+static inline
 chpl_bool chpl_single_isFull(void *val_ptr, chpl_sync_aux_t *s) {
   return chpl_sync_isFull(val_ptr, s);
 }
-static ___always_inline
+static inline
 void chpl_single_initAux(chpl_sync_aux_t * s) { chpl_sync_initAux(s); }
-static ___always_inline
+static inline
 void chpl_single_destroyAux(chpl_sync_aux_t * s) { chpl_sync_destroyAux(s); }
 
 
@@ -103,6 +112,9 @@ void chpl_task_exit(void);        // called by the main task
 // thread) in order to be responsive and not be held up by other
 // user-level tasks. returns 0 on success, nonzero on failure.
 //
+// The caller of this function is responsible for ensuring that
+// *arg remains available to the task as long as it is needed.
+//
 int chpl_task_createCommTask(chpl_fn_p fn, void* arg);
 
 //
@@ -116,10 +128,10 @@ void chpl_task_callMain(void (*chpl_main)(void));
 //
 // The following is an optional callback into the tasking layer from
 // the main task indicating that the standard internal modules have
-// been initialized.  It gives the tasking layer the ability to make
-// use of functionality in the internal modules (like the task
-// tracking table) which are not yet available in
-// chpl_task_callMain().
+// been initialized.  It gives the tasking layer the ability to wait
+// to make use of functionality in the internal modules (like the task
+// tracking table) which are not yet available at the time of the call
+// to chpl_task_callMain().
 //
 #ifndef CHPL_TASK_STD_MODULES_INITIALIZED
 #define CHPL_TASK_STD_MODULES_INITIALIZED()
@@ -136,29 +148,59 @@ typedef struct chpl_task_list* chpl_task_list_p;
 // makes sure all the tasks have at least started.  freeTaskList()
 // just reclaims space associated with the list.
 //
+// Note that the tasking layer must generally copy the arguments
+// as it cannot assume anything about the lifetime of that memory.
 void chpl_task_addToTaskList(
          chpl_fn_int_t,      // function to call for task
-         void*,              // argument to the function
+         chpl_task_bundle_t*,// argument to the function
+         size_t,             // length of the argument
          c_sublocid_t,       // desired sublocale
-         chpl_task_list_p*,  // task list
+         void**,             // task list
          c_nodeid_t,         // locale (node) where task list resides
          chpl_bool,          // is begin{} stmt?  (vs. cobegin or coforall)
          int,                // line at which function begins
-         c_string);          // name of file containing functions
-void chpl_task_processTaskList(chpl_task_list_p);
-void chpl_task_executeTasksInList(chpl_task_list_p);
-void chpl_task_freeTaskList(chpl_task_list_p);
+         int32_t);           // name of file containing function
+void chpl_task_executeTasksInList(void**);
+
+//
+// Call a chpl_ftable[] function in a task.
+//
+// This is a convenience function for use by the module code, in which
+// we have function table indices rather than function pointers.
+//
+// Note that the tasking layer must generally copy the arguments
+// as it cannot assume anything about the lifetime of that memory.
+//
+void chpl_task_taskCallFTable(chpl_fn_int_t fid,      // ftable[] entry to call
+                              chpl_task_bundle_t* arg,// function arg
+                              size_t arg_size,        // length of arg
+                              c_sublocid_t subloc,    // desired sublocale
+                              int lineno,             // source line
+                              int32_t filename);      // source filename
+
+// In some cases, we are not worried about the "function number" (fid)
+
+#define FID_NONE -1
 
 //
 // Launch a task that is the logical continuation of some other task,
 // but on a different locale.  This is used to invoke the body of an
 // "on" statement.
 //
-void chpl_task_startMovedTask(chpl_fn_p,          // function to call
-                              void*,              // function arg
+// Note that the tasking layer must generally copy the arguments
+// as it cannot assume anything about the lifetime of that memory.
+//
+// The chpl_fn_int_t and chpl_fn_p arguments are stored into the
+// task bundle as requested_fid and requested_fn respectively. If both
+// are provided, the function pointer will be used. In this way,
+// the comms layer can use task-wrapper functions.
+void chpl_task_startMovedTask(chpl_fn_int_t,      // ftable[] entry
+                              chpl_fn_p,          // function to call
+                              chpl_task_bundle_t*,// function arg
+                              size_t,             // length of arg in bytes
                               c_sublocid_t,       // desired sublocale
-                              chpl_taskID_t,      // task identifier
-                              chpl_bool);         // serial state
+                              chpl_taskID_t      // task identifier
+                             );
 
 //
 // Get and set the current task's sublocale.  Setting the sublocale
@@ -186,20 +228,45 @@ c_sublocid_t chpl_task_getRequestedSubloc(void);
 chpl_taskID_t chpl_task_getId(void);
 
 //
-// Yield.
+// Checks whether two task IDs are the same
+//
+chpl_bool chpl_task_idEquals(chpl_taskID_t, chpl_taskID_t);
+
+//
+// Returns the string representation of task ID
+// The string returned is the same buffer passed as argument
+// In case of an error NULL is returned
+//
+char* chpl_task_idToString(
+               char *,         //buffer on which ID is written
+               size_t,         //length of the buffer in bytes
+               chpl_taskID_t); //Task ID
+
+//
+// Yields the current thread to another task. Will conditionally invoke
+// a QSBR checkpoint periodically via a thread-local counter. As a checkpoint
+// is invoked, it is not safe to access QSBR-protected data obtained prior to
+// calling this function. 
 //
 void chpl_task_yield(void);
 
 //
 // Suspend.
 //
-void chpl_task_sleep(int);
+void chpl_task_sleep(double);
 
 //
-// Get and set dynamic serial state.
+// (Optional) Invoked by a thread that may be idle for an
+// indefinite amount of time. Currently used by tasking layers
+// which detect that the work queue has been depleted for a while.
 //
-chpl_bool chpl_task_getSerial(void);
-void      chpl_task_setSerial(chpl_bool);
+void chpl_task_threadOnPark(void);
+
+//
+// (Optional) Invoked by a thread that invoked 'chpl_task_threadOnPark' 
+// after they are no longer idle.
+//
+void chpl_task_threadOnUnpark(void);
 
 // The type for task private data, chpl_task_prvData_t,
 // is defined in chpl-tasks-prvdata.h in order to support
@@ -208,6 +275,45 @@ void      chpl_task_setSerial(chpl_bool);
 // Get pointer to task private data.
 #ifndef CHPL_TASK_GET_PRVDATA_IMPL_DECL
 chpl_task_prvData_t* chpl_task_getPrvData(void);
+#endif
+
+#ifndef CHPL_TASK_GET_PRVBUNDLE_IMPL_DECL
+chpl_task_bundle_t* chpl_task_getPrvBundle(void);
+#endif
+
+// Get the Chapel module-code managed task private data portion
+// of a task bundle.
+static inline
+chpl_task_ChapelData_t* chpl_task_getBundleChapelData(chpl_task_bundle_t* b)
+{
+  // this code assumes each chpl_task_bundle_t has a state field
+  // of type chpl_task_ChapelData_t.
+  return &b->state;
+}
+
+//
+// Get Chapel module-code managed task private data
+//
+static inline
+chpl_task_ChapelData_t* chpl_task_getChapelData(void)
+{
+  chpl_task_bundle_t* prv = chpl_task_getPrvBundle();
+  return chpl_task_getBundleChapelData(prv);
+}
+
+
+//
+// Can this tasking layer support remote caching?
+//
+// (In practice this answers: "Are tasks bound to specific pthreads
+// or, if not, does the tasking layer make memory consistency calls
+// whenever it might move a task from one pthread to another?"  Remote
+// caching uses pthread-specific data (TLS) extensively, so it turns
+// itself off when it's used with a tasking layer that can't support
+// that.)
+//
+#ifndef CHPL_TASK_SUPPORTS_REMOTE_CACHE_IMPL_DECL
+int chpl_task_supportsRemoteCache(void);
 #endif
 
 //
@@ -238,17 +344,6 @@ size_t chpl_task_getCallStackSize(void);
 // not including any that have already started running.
 //
 uint32_t chpl_task_getNumQueuedTasks(void);
-
-//
-// returns the number of tasks that are running on the current locale,
-// including any that may be blocked waiting for something.
-// Note that the value returned could be larger than the limit on the maximum
-// number of threads, since a thread could be "suspended," particularly if it
-// is waiting at the end of a cobegin, e.g.  In this case, it could be
-// executing a task inside the cobegin, so in effect the same thread would be
-// executing more than one task.
-//
-uint32_t chpl_task_getNumRunningTasks(void);
 
 //
 // returns the number of tasks that are blocked waiting on a sync or single
@@ -300,14 +395,29 @@ size_t chpl_task_getDefaultCallStackSize(void);
 // These are service functions provided to the runtime by the module
 // code.
 //
-extern void chpl_taskRunningCntInc(int64_t _ln, c_string _fn);
-extern void chpl_taskRunningCntDec(int64_t _ln, c_string _fn);
+extern void chpl_taskRunningCntInc(int64_t _ln, int32_t _fn);
+extern void chpl_taskRunningCntDec(int64_t _ln, int32_t _fn);
+extern void chpl_taskRunningCntReset(int64_t _ln, int32_t _fn);
+
+#ifdef __cplusplus
+} // end extern "C"
+#endif
+
+#include "chpl-tasks-callbacks.h"
 
 #else // LAUNCHER
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 typedef void chpl_sync_aux_t;
 typedef chpl_sync_aux_t chpl_single_aux_t;
 #define chpl_task_exit()
+
+#ifdef __cplusplus
+} // end extern "C"
+#endif
 
 #endif // LAUNCHER
 

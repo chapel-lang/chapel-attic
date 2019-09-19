@@ -1,15 +1,15 @@
 /*
- * Copyright 2004-2014 Cray Inc.
+ * Copyright 2004-2018 Cray Inc.
  * Other additional copyright holders may be indicated within.
- * 
+ *
  * The entirety of this work is licensed under the Apache License,
  * Version 2.0 (the "License"); you may not use this file except
  * in compliance with the License.
- * 
+ *
  * You may obtain a copy of the License at
- * 
+ *
  *     http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -23,8 +23,10 @@
 #include "chpl.h"
 
 class CallExpr;
+class Expr;
 class Type;
 class VarSymbol;
+class QualifiedType;
 
 enum PrimitiveTag {
   PRIM_UNKNOWN = 0,    // use for any primitives not in this list
@@ -32,13 +34,21 @@ enum PrimitiveTag {
   PRIM_ACTUALS_LIST,
   PRIM_NOOP,
   PRIM_MOVE,
+
   PRIM_INIT,
+  PRIM_INIT_FIELD,
+  PRIM_INIT_MAYBE_SYNC_SINGLE_FIELD,
+  PRIM_INIT_VAR,
   PRIM_NO_INIT,
   PRIM_TYPE_INIT,       // Used in a context where only a type is needed.
                         // Establishes the type of the result without
                         // generating code.
+
   PRIM_REF_TO_STRING,
   PRIM_RETURN,
+  PRIM_THROW,
+  PRIM_TRY_EXPR,
+  PRIM_TRYBANG_EXPR,
   PRIM_YIELD,
   PRIM_UNARY_MINUS,
   PRIM_UNARY_PLUS,
@@ -73,6 +83,7 @@ enum PrimitiveTag {
   PRIM_AND_ASSIGN,
   PRIM_OR_ASSIGN,
   PRIM_XOR_ASSIGN,
+  PRIM_REDUCE_ASSIGN,
 
   PRIM_MIN,
   PRIM_MAX,
@@ -95,42 +106,15 @@ enum PrimitiveTag {
 
   PRIM_ADDR_OF,             // set a reference to a value
   PRIM_DEREF,               // dereference a reference
+  PRIM_SET_REFERENCE,       // set a reference
 
   PRIM_LOCAL_CHECK,         // assert that a wide ref is on this locale
-
-  PRIM_SYNC_INIT,
-  PRIM_SYNC_DESTROY,
-  PRIM_SYNC_LOCK,
-  PRIM_SYNC_UNLOCK,
-  PRIM_SYNC_WAIT_FULL,
-  PRIM_SYNC_WAIT_EMPTY,
-  PRIM_SYNC_SIGNAL_FULL,
-  PRIM_SYNC_SIGNAL_EMPTY,
-  PRIM_SINGLE_INIT,
-  PRIM_SINGLE_DESTROY,
-  PRIM_SINGLE_LOCK,
-  PRIM_SINGLE_UNLOCK,
-  PRIM_SINGLE_WAIT_FULL,
-  PRIM_SINGLE_SIGNAL_FULL,
-
-  PRIM_WRITEEF,
-  PRIM_WRITEFF,
-  PRIM_WRITEXF,
-  PRIM_READFE,
-  PRIM_READFF,
-  PRIM_READXX,
-  PRIM_SYNC_IS_FULL,
-  PRIM_SINGLE_WRITEEF,
-  PRIM_SINGLE_READFF,
-  PRIM_SINGLE_READXX,
-  PRIM_SINGLE_IS_FULL,
 
   PRIM_GET_END_COUNT,
   PRIM_SET_END_COUNT,
 
-  PRIM_PROCESS_TASK_LIST,
-  PRIM_EXECUTE_TASKS_IN_LIST,
-  PRIM_FREE_TASK_LIST,
+  PRIM_GET_DYNAMIC_END_COUNT,  // get/set end count for 'begin' -
+  PRIM_SET_DYNAMIC_END_COUNT,  // manipulates task-local storage
 
   PRIM_GET_SERIAL,              // get serial state
   PRIM_SET_SERIAL,              // set serial state to true or false
@@ -144,20 +128,22 @@ enum PrimitiveTag {
   PRIM_CAST,
   PRIM_DYNAMIC_CAST,
   PRIM_TYPEOF,
-  PRIM_USE,
+  PRIM_STATIC_TYPEOF,
+  PRIM_SCALAR_PROMOTION_TYPE,
   PRIM_USED_MODULES_LIST,       // used modules in BlockStmt::modUses
   PRIM_TUPLE_EXPAND,
   PRIM_TUPLE_AND_EXPAND,
 
   PRIM_CHPL_COMM_GET,           // Direct calls to the Chapel comm layer
   PRIM_CHPL_COMM_PUT,           // may eventually add others (e.g., non-blocking)
+  PRIM_CHPL_COMM_ARRAY_GET,
+  PRIM_CHPL_COMM_ARRAY_PUT,
   PRIM_CHPL_COMM_REMOTE_PREFETCH,
   PRIM_CHPL_COMM_GET_STRD,      // Direct calls to the Chapel comm layer for strided comm
   PRIM_CHPL_COMM_PUT_STRD,      //  may eventually add others (e.g., non-blocking)
 
   PRIM_ARRAY_ALLOC,
   PRIM_ARRAY_FREE,
-  PRIM_ARRAY_FREE_ELTS,
   PRIM_ARRAY_GET,
   PRIM_ARRAY_GET_VALUE,
   PRIM_ARRAY_SHIFT_BASE_POINTER,
@@ -188,21 +174,22 @@ enum PrimitiveTag {
   PRIM_BLOCK_LOCAL,             // BlockStmt::blockInfo - local block
   PRIM_BLOCK_UNLOCAL,           // BlockStmt::blockInfo - unlocal local block
 
-  PRIM_FORALL_LOOP,             // BlockStmt::byrefVars - forall loop body
   PRIM_TO_LEADER,
   PRIM_TO_FOLLOWER,
   PRIM_TO_STANDALONE,
-
-  PRIM_DELETE,
 
   PRIM_CALL_DESTRUCTOR,         // call destructor on type (do not free)
 
   PRIM_LOGICAL_FOLDER,          // Help fold logical && and ||
 
+  PRIM_WIDE_MAKE,               // create a wide pointer from
+                                // (type, localeID, addr)
+
   PRIM_WIDE_GET_LOCALE,         // Returns the "locale" portion of a wide pointer.
 
   PRIM_WIDE_GET_NODE,           // Get just the node portion of a wide pointer.
   PRIM_WIDE_GET_ADDR,           // Get just the address portion of a wide pointer.
+  PRIM_IS_WIDE_PTR,             // Returns true if the symbol is represented by a wide pointer.
 
   PRIM_ON_LOCALE_NUM,           // specify a particular localeID for an on clause.
 
@@ -215,12 +202,11 @@ enum PrimitiveTag {
 
   PRIM_INT_ERROR,
 
-  PRIM_CAPTURE_FN,
+  PRIM_CAPTURE_FN_FOR_CHPL,
+  PRIM_CAPTURE_FN_FOR_C,
   PRIM_CREATE_FN_TYPE,
 
   PRIM_STRING_COPY,
-  PRIM_STRING_FROM_C_STRING,
-  PRIM_C_STRING_FROM_STRING,
   PRIM_CAST_TO_VOID_STAR,       // Cast the object argument to void*.
 
   PRIM_RT_ERROR,
@@ -234,8 +220,6 @@ enum PrimitiveTag {
 
   PRIM_FTABLE_CALL,
 
-  PRIM_IS_SYNC_TYPE,
-  PRIM_IS_SINGLE_TYPE,
   PRIM_IS_TUPLE_TYPE,
   PRIM_IS_STAR_TUPLE_TYPE,
   PRIM_SET_SVEC_MEMBER,
@@ -246,11 +230,22 @@ enum PrimitiveTag {
 
   PRIM_NUM_FIELDS,
   PRIM_FIELD_NUM_TO_NAME,
-  PRIM_FIELD_VALUE_BY_NUM,
-  PRIM_FIELD_ID_BY_NUM,
-  PRIM_FIELD_VALUE_BY_NAME,
+  PRIM_FIELD_NAME_TO_NUM,
+  PRIM_FIELD_BY_NUM,
+  PRIM_CLASS_NAME_BY_ID,
+  PRIM_ITERATOR_RECORD_FIELD_VALUE_BY_FORMAL,
+  PRIM_IS_EXTERN_CLASS_TYPE,
+  PRIM_IS_RECORD_TYPE,
   PRIM_IS_UNION_TYPE,
   PRIM_IS_ATOMIC_TYPE,
+  PRIM_IS_REF_ITER_TYPE,
+
+  PRIM_IS_POD,
+
+  PRIM_COERCE,
+
+  PRIM_CALL_RESOLVES,
+  PRIM_METHOD_CALL_RESOLVES,
 
   PRIM_ENUM_MIN_BITS,
   PRIM_ENUM_IS_SIGNED,
@@ -258,29 +253,45 @@ enum PrimitiveTag {
   PRIM_START_RMEM_FENCE,
   PRIM_FINISH_RMEM_FENCE,
 
+  PRIM_LOOKUP_FILENAME,   // Given an index, get a given filename (c_string)
+
+  PRIM_GET_COMPILER_VAR,
+
+  PRIM_STACK_ALLOCATE_CLASS,
+  PRIM_ZIP,
+  PRIM_REQUIRE,
+
+  PRIM_CHECK_ERROR, // used in error-handling conditional. args: error variable
+
   NUM_KNOWN_PRIMS
 };
 
 class PrimitiveOp { public:
-  PrimitiveTag tag;
-  const char *name;
-  Type *(*returnInfo)(CallExpr*);
-  bool isEssential; // has effects visible outside of the function
-  bool passLineno;  // pass line number and filename to this primitive
+  PrimitiveTag  tag;
+  const char*   name;
+  QualifiedType (*returnInfo)(CallExpr*);
+  bool          isEssential; // has effects visible outside of the function
+  bool          passLineno;  // pass line number and filename to this primitive
 
-  PrimitiveOp(PrimitiveTag atag, const char *aname, Type *(*areturnInfo)(CallExpr*));
+  PrimitiveOp(PrimitiveTag  atag,
+              const char*   aname,
+              QualifiedType (*areturnInfo)(CallExpr*));
 };
 
 extern HashMap<const char *, StringHashFns, PrimitiveOp *> primitives_map;
 
-extern PrimitiveOp* primitives[NUM_KNOWN_PRIMS];
+extern PrimitiveOp*     primitives[NUM_KNOWN_PRIMS];
 
-void printPrimitiveCounts(const char* passName);
-void initPrimitive();
-
-extern Map<const char*, VarSymbol*> memDescsMap;
 extern Vec<const char*> memDescsVec;
 
+void       printPrimitiveCounts(const char* passName);
+
+void       initPrimitive();
+
 VarSymbol* newMemDesc(const char* str);
+
+VarSymbol* newMemDesc(Type* type);
+
+bool       getSettingPrimitiveDstSrc(CallExpr* call, Expr** dest, Expr** src);
 
 #endif

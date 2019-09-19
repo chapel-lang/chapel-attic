@@ -1,7 +1,22 @@
-import os, re, subprocess
-from distutils.spawn import find_executable
+"""Utility functions for chplenv modules"""
+import os
+import subprocess
+import sys
+
+
+def error(msg, exception=Exception):
+    """Exception raising wrapper that differentiates developer-mode output"""
+    if os.environ.get('CHPL_DEVELOPER'):
+        raise exception(msg)
+    else:
+        sys.stderr.write('\nError: ')
+        sys.stderr.write(msg)
+        sys.stderr.write('\n')
+        sys.exit(1)
+
 
 def memoize(func):
+    """Function memoizing decorator"""
     cache = func.cache = {}
 
     def memoize_wrapper(*args, **kwargs):
@@ -13,41 +28,31 @@ def memoize(func):
     return memoize_wrapper
 
 
-@memoize
-def get_chpl_home():
-    chpl_home = os.environ.get('CHPL_HOME', '')
-    if not chpl_home:
-        dirname = os.path.dirname
-        chpl_home = dirname(dirname(dirname(os.path.realpath(__file__))))
-    return chpl_home
-
-@memoize
-def get_compiler_version(compiler):
-    if 'gnu' in compiler:
-        output = run_command(['gcc', '-dumpversion'])
-        match = re.search(r'(\d+\.\d+)', output)
-        if match:
-            return float(match.group(1))
-        else:
-            raise ValueError("Could not find the GCC version")
-    else:
-        return 0
-
 class CommandError(Exception):
+    """Custom exception for run_command errors"""
     pass
 
-# This could be replaced by subprocess.check_output, but that isn't available
-# until python 2.7 and we only have 2.6 on most machines :(
-def run_command(command, stdout=True, stderr=False):
-    process = subprocess.Popen(command,
-                               stdout=subprocess.PIPE,
-                               stderr=subprocess.PIPE)
-    output = process.communicate()
+
+def run_command(command, stdout=True, stderr=False, cmd_input=None):
+    """Command subprocess wrapper.
+       This should be the only invocation of subprocess in all chplenv scripts.
+       This could be replaced by subprocess.check_output, but that
+       is only available after Python 2.7, and we still support 2.6 :("""
+    try:
+        process = subprocess.Popen(command,
+                                   stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE,
+                                   stdin=subprocess.PIPE)
+    except OSError:
+        error("command not found: {0}".format(command[0]), OSError)
+
+    byte_cmd_input = str.encode(cmd_input) if cmd_input else None
+    output = process.communicate(input=byte_cmd_input)
     if process.returncode != 0:
-        raise CommandError(
-            "command `{0}` failed - output was \n{1}".format(command,
-                                                             output[1]))
+        error("command failed: {0}\noutput was:\n{1}".format(
+            command, output[1]), CommandError)
     else:
+        output = (output[0].decode(), output[1].decode())
         if stdout and stderr:
             return output
         elif stdout:
@@ -56,3 +61,21 @@ def run_command(command, stdout=True, stderr=False):
             return output[1]
         else:
             return ''
+
+def run_live_command(command):
+    """Run a command, yielding the merged output (stdout/stderr) as the process
+       runs rather than returning the output after the process finishes"""
+    try:
+        process = subprocess.Popen(command,
+                                   stdout=subprocess.PIPE,
+                                   stderr=subprocess.STDOUT)
+    except OSError:
+        error("command not found: {0}".format(command[0]), OSError)
+
+    for stdout_char in iter(lambda: process.stdout.read(1), str.encode("")):
+        yield stdout_char.decode()
+    process.stdout.close()
+    returncode = process.wait()
+
+    if returncode != 0:
+        error("command failed: {0}".format(command), CommandError)

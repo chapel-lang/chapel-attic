@@ -1,4 +1,4 @@
-# Copyright 2004-2014 Cray Inc.
+# Copyright 2004-2018 Cray Inc.
 # Other additional copyright holders may be indicated within.
 # 
 # The entirety of this work is licensed under the Apache License,
@@ -16,25 +16,38 @@
 # limitations under the License.
 
 # Suppress warning about variables used before defined
-CRAYPE_GEN_CFLAGS = -hnomessage=7212 -hipa2
+CRAYPE_GEN_CFLAGS = -hnomessage=7212
 
-NO_IEEE_FLOAT_GEN_CFLAGS = -hfp1
+# Suppress warnings about unsigned ints being compared to 0
+CRAYPE_GEN_CFLAGS += -hnomessage=186
+
+# Suppress warnings about needing the optimizer to handle
+# certain cases of __asm__
+CRAYPE_GEN_CFLAGS += -hnomessage=3140
+
+# Suppress warnings about floating-point value cannot be represented exactly.
+CRAYPE_GEN_CFLAGS += -hnomessage=1046
+
+# Could set CRAYPE_COMP_CXXFLAGS, CRAYPE_GEN_CFLAGS
+
+FAST_FLOAT_GEN_CFLAGS = -hfp2
 IEEE_FLOAT_GEN_CFLAGS = -hfp0
 
-# If this is not a --fast compilation or OPTIMIZE=1 is not set, use the cce
-# develop feature. It improves compiler time by throtting certain things in the
-# compiler that are known to add time. It is not the same as -O0. See the man
-# page for details.
-ifneq ($(OPTIMIZE),1)
-CFLAGS += -hdevelop
+CXX11_STD := -h std=c++11
+
+# If this is not a --fast compilation or OPTIMIZE=1 is not set, disable
+# optimizations for cce. This is done by default for other compilers and it
+# tends to improve the compiler performance.
+#
+# Another option for cce is the -hdevelop feature, which attempts to improve
+# compilation time by throttling certain things in the compiler that are known
+# to add time. For Chapel codes, -O0 tends to give the fastest compile times,
+# which is why it is used here. -hdevelop is something to look at in the future
+# if execution time becomes too slow with -O0.
+NO_OPT_CFLAGS += -O0
+
+ifdef CHPL_COMM_DEBUG
+CHPL_GASNET_MORE_CFLAGS += -O0 -UNDEBUG
 endif
 
-#
-# The current Cray compiler does not compile GASNet cleanly, so we have
-# to compile GASNet code using the gnu version instead
-#
-MODULECMD = /opt/modules/$(MODULE_VERSION)/bin/modulecmd sh
-
-ENSURE_GASNET_COMPATIBLE_COMPILER = eval `$(MODULECMD) swap PrgEnv-cray PrgEnv-gnu` &&
-
-include $(CHPL_MAKE_HOME)/make/compiler/Makefile.$(CHPL_MAKE_TARGET_PLATFORM)
+include $(CHPL_MAKE_HOME)/make/compiler/Makefile.cray-prgenv

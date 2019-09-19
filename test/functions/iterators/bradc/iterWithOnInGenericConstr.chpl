@@ -7,10 +7,18 @@ class C {
   type elemType;
   const dArray: [LocaleSpace] D(elemType);
 
-  proc C(type elemType, targetLocales: [?targetLocalesDomain] locale) {
+  proc init(type elemType, targetLocales: [?targetLocalesDomain] locale) {
+    this.elemType = elemType;
+    this.initDone();
     for locid in LocaleSpace do
       on Locales(locid) do
         dArray(locid) = new D(elemType);
+  }
+
+  proc deinit() {
+    for locid in LocaleSpace do
+      on Locales(locid) do
+        delete dArray(locid);
   }
 }
 

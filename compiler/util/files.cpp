@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2014 Cray Inc.
+ * Copyright 2004-2018 Cray Inc.
  * Other additional copyright holders may be indicated within.
  *
  * The entirety of this work is licensed under the Apache License,
@@ -18,21 +18,28 @@
  */
 
 // Get realpath on linux
+#ifdef __linux__
 #ifndef _XOPEN_SOURCE
 #define _XOPEN_SOURCE 600
 #endif
 #ifndef _XOPEN_SOURCE_EXTENDED
 #define _XOPEN_SOURCE_EXTENDED 1
 #endif
+#endif
 
 #include "files.h"
 
 #include "beautify.h"
 #include "driver.h"
+#include "llvmVer.h"
 #include "misc.h"
 #include "mysystem.h"
 #include "stringutil.h"
 #include "tmpdirname.h"
+
+#ifdef HAVE_LLVM
+#include "llvm/Support/FileSystem.h"
+#endif
 
 #include <pwd.h>
 #include <unistd.h>
@@ -41,16 +48,16 @@
 #include <cstdlib>
 #include <cerrno>
 #include <string>
+#include <map>
 
 #include <sys/types.h>
 #include <sys/stat.h>
 
-char               executableFilename[FILENAME_MAX + 1] = "a.out";
+char               executableFilename[FILENAME_MAX + 1] = "";
 char               saveCDir[FILENAME_MAX + 1]           = "";
 
-char               ccflags[256]                         = "";
-char               ldflags[256]                         = "";
-bool               ccwarnings                           = false;
+std::string ccflags;
+std::string ldflags;
 
 int                numLibFlags                          = 0;
 const char**       libFlag                              = NULL;
@@ -80,56 +87,91 @@ void addIncInfo(const char* incDir) {
 }
 
 void ensureDirExists(const char* dirname, const char* explanation) {
+#ifdef HAVE_LLVM
+  std::error_code err = llvm::sys::fs::create_directories(dirname);
+  if (err) {
+    USR_FATAL("creating directory %s failed: %s\n",
+              dirname,
+              err.message().c_str());
+  }
+#else
   const char* mkdircommand = "mkdir -p ";
   const char* command = astr(mkdircommand, dirname);
 
   mysystem(command, explanation);
+#endif
 }
 
 
-static void removeSpacesFromString(char* str)
+static void removeSpacesBackslashesFromString(char* str)
 {
   char* src = str;
   char* dst = str;
   while (*src != '\0')
   {
     *dst = *src++;
-    if (*dst != ' ')
+    if (*dst != ' ' && *dst != '\\')
         dst++;
   }
   *dst = '\0';
 }
 
 
+/*
+ * Find the default tmp directory. Try getting the tmp dir from the ISO/IEC
+ * 9945 env var options first, then P_tmpdir, then "/tmp".
+ */
+static const char* getTempDir() {
+  const char* possibleDirsInEnv[] = {"TMPDIR", "TMP", "TEMP", "TEMPDIR"};
+  for (unsigned int i = 0; i < (sizeof(possibleDirsInEnv) / sizeof(char*)); i++) {
+    const char* curDir = getenv(possibleDirsInEnv[i]);
+    if (curDir != NULL) {
+      return curDir;
+    }
+  }
+#ifdef P_tmpdir
+  return P_tmpdir;
+#else
+  return "/tmp";
+#endif
+}
+
+
+const char* makeTempDir(const char* dirPrefix) {
+  const char* tmpdirprefix = astr(getTempDir(), "/", dirPrefix);
+  const char* tmpdirsuffix = ".deleteme";
+
+  pid_t mypid = getpid();
+#ifdef DEBUGTMPDIR
+  mypid = 0;
+#endif
+
+  char mypidstr[MAX_CHARS_PER_PID];
+  snprintf(mypidstr, MAX_CHARS_PER_PID, "-%d", (int)mypid);
+
+  struct passwd* passwdinfo = getpwuid(geteuid());
+  const char* userid;
+  if (passwdinfo == NULL) {
+    userid = "anon";
+  } else {
+    userid = passwdinfo->pw_name;
+  }
+  char* myuserid = strdup(userid);
+  removeSpacesBackslashesFromString(myuserid);
+
+  const char* tmpDir = astr(tmpdirprefix, myuserid, mypidstr, tmpdirsuffix);
+  ensureDirExists(tmpDir, "making temporary directory");
+
+  free(myuserid); myuserid = NULL;
+
+  return tmpDir;
+}
+
 static void ensureTmpDirExists() {
   if (saveCDir[0] == '\0') {
     if (tmpdirname == NULL) {
-      const char* tmpdirprefix = "/tmp/chpl-";
-      const char* tmpdirsuffix = ".deleteme";
-
-      pid_t mypid = getpid();
-#ifdef DEBUGTMPDIR
-      mypid = 0;
-#endif
-
-      char mypidstr[MAX_CHARS_PER_PID];
-      snprintf(mypidstr, MAX_CHARS_PER_PID, "-%d", (int)mypid);
-
-      struct passwd* passwdinfo = getpwuid(geteuid());
-      const char* userid;
-      if (passwdinfo == NULL) {
-        userid = "anon";
-      } else {
-        userid = passwdinfo->pw_name;
-      }
-      char* myuserid = strdup(userid);
-      removeSpacesFromString(myuserid);
-
-      tmpdirname = astr(tmpdirprefix, myuserid, mypidstr, tmpdirsuffix);
+      tmpdirname = makeTempDir("chpl-");
       intDirName = tmpdirname;
-      ensureDirExists(intDirName, "making temporary directory");
-
-      free(myuserid); myuserid = NULL;
     }
   } else {
     if (intDirName != saveCDir) {
@@ -137,6 +179,42 @@ static void ensureTmpDirExists() {
       ensureDirExists(saveCDir, "ensuring --savec directory exists");
     }
   }
+}
+
+
+#if !defined(HAVE_LLVM) || HAVE_LLVM_VER < 50
+static
+void deleteDirSystem(const char* dirname) {
+  const char* cmd = astr("rm -rf ", dirname);
+  mysystem(cmd, astr("removing directory: ", dirname));
+}
+#endif
+
+#ifdef HAVE_LLVM
+static
+void deleteDirLLVM(const char* dirname) {
+#if HAVE_LLVM_VER >= 50
+  // LLVM 5 added remove_directories
+  std::error_code err = llvm::sys::fs::remove_directories(dirname, false);
+  if (err) {
+    USR_FATAL("removing directory %s failed: %s\n",
+              dirname,
+              err.message().c_str());
+  }
+#else
+  deleteDirSystem(dirname);
+#endif
+}
+#endif
+
+
+
+void deleteDir(const char* dirname) {
+#ifdef HAVE_LLVM
+  deleteDirLLVM(dirname);
+#else
+  deleteDirSystem(dirname);
+#endif
 }
 
 
@@ -155,10 +233,7 @@ void deleteTmpDir() {
         strcmp(tmpdirname, "//") == 0) {
       INT_FATAL("tmp directory name looks fishy");
     }
-    const char* rmdircommand = "rm -r ";
-    const char* command = astr(rmdircommand, tmpdirname);
-
-    mysystem(command, "removing temporary directory");
+    deleteDir(tmpdirname);
     tmpdirname = NULL;
   }
 #endif
@@ -194,12 +269,10 @@ const char* objectFileForCFile(const char* inputFilename) {
   return objFilename;
 }
 
-static FILE* openfile(const char* filename,
-                      const char* mode  = "w",
-                      bool        fatal = true) {
-  FILE* newfile;
-
-  newfile = fopen(filename, mode);
+FILE* openfile(const char* filename,
+               const char* mode,
+               bool        fatal) {
+  FILE* newfile = fopen(filename, mode);
 
   if (newfile == NULL) {
     const char* errorstr = "opening ";
@@ -207,7 +280,7 @@ static FILE* openfile(const char* filename,
                                 filename, ": ",
                                 strerror(errno));
 
-    if (fatal) {
+    if (fatal == true) {
       USR_FATAL(errormsg);
     }
   }
@@ -216,7 +289,7 @@ static FILE* openfile(const char* filename,
 }
 
 
-static void closefile(FILE* thefile) {
+void closefile(FILE* thefile) {
   if (fclose(thefile) != 0) {
     const char* errorstr = "closing file: ";
     const char* errormsg = astr(errorstr, strerror(errno));
@@ -243,22 +316,24 @@ void openCFile(fileinfo* fi, const char* name, const char* ext) {
     fi->filename = astr(name);
 
   fi->pathname = genIntermediateFilename(fi->filename);
-  fi->fptr = fopen(fi->pathname, "w");
-}
-
-void appendCFile(fileinfo* fi, const char* name, const char* ext) {
-  if (ext)
-    fi->filename = astr(name, ".", ext);
-  else
-    fi->filename = astr(name);
-
-  fi->pathname = genIntermediateFilename(fi->filename);
-  fi->fptr     = fopen(fi->pathname, "a+");
+  openfile(fi, "w");
 }
 
 void closeCFile(fileinfo* fi, bool beautifyIt) {
   fclose(fi->fptr);
-  if (beautifyIt && saveCDir[0])
+  //
+  // We should beautify if (1) we were asked to and (2) either (a) we
+  // were asked to save the C code or (b) we were asked to codegen cpp
+  // #line information (note that this can affect the output in the
+  // event of a failed C compilation whether or not the --savec option
+  // is used because a C codegen error will report the Chapel line #,
+  // which can be helpful.
+  //
+  // TODO: With some refactoring, we could simply do the #line part of
+  // beautify without also improving indentation and such which could
+  // save some time.
+  //
+  if (beautifyIt && (saveCDir[0] || printCppLineno))
     beautify(fi);
 }
 
@@ -283,7 +358,7 @@ void closeInputFile(FILE* infile) {
 }
 
 
-static const char** inputFilenames = {NULL};
+static const char** inputFilenames = NULL;
 
 
 static bool checkSuffix(const char* filename, const char* suffix) {
@@ -313,7 +388,7 @@ bool isChplSource(const char* filename) {
   return retval;
 }
 
-static bool isRecognizedSource(char* filename) {
+static bool isRecognizedSource(const char* filename) {
   return (isCSource(filename) ||
           isCHeader(filename) ||
           isObjFile(filename) ||
@@ -321,12 +396,15 @@ static bool isRecognizedSource(char* filename) {
 }
 
 
-void testInputFiles(int numFilenames, char* filename[]) {
-  inputFilenames = (const char**)malloc((numFilenames+1)*sizeof(char*));
-  int i;
+void addSourceFiles(int numNewFilenames, const char* filename[]) {
+  static int numInputFiles = 0;
+  int cursor = numInputFiles;
   char achar;
+  numInputFiles += numNewFilenames;
+  inputFilenames = (const char**)realloc(inputFilenames,
+                                         (numInputFiles+1)*sizeof(char*));
 
-  for (i = 0; i < numFilenames; i++) {
+  for (int i = 0; i < numNewFilenames; i++) {
     if (!isRecognizedSource(filename[i])) {
       USR_FATAL(astr("file '",
                      filename[i],
@@ -344,13 +422,33 @@ void testInputFiles(int numFilenames, char* filename[]) {
       closeInputFile(testfile);
     }
 
-    inputFilenames[i] = astr(filename[i]);
+    //
+    // Don't add the same file twice -- it's unnecessary and can mess
+    // up things like unprotected headers
+    //
+    bool duplicate = false;
+    const char* newFilename = astr(filename[i]);
+    for (int j = 0; j < cursor; j++) {
+      if (inputFilenames[j] == newFilename) {  // legal due to astr()
+        duplicate = true;
+        break;
+      }
+    }
+    if (duplicate) {
+      numInputFiles--;
+    } else {
+      inputFilenames[cursor++] = newFilename;
+    }
   }
+  inputFilenames[cursor] = NULL;
 
-  inputFilenames[i] = NULL;
-
-  if (!foundChplSource)
+  if (!foundChplSource && fUseIPE == false)
     USR_FATAL("Command line contains no .chpl source files");
+}
+
+void addSourceFile(const char* filename) {
+  const char* filenamearr[1] = {filename};
+  addSourceFiles(1, filenamearr);
 }
 
 
@@ -388,22 +486,61 @@ const char* createDebuggerFile(const char* debugger, int argc, char* argv[]) {
   return dbgfilename;
 }
 
-const std::string runUtilScript(const char* script) {
-  char buffer[256];
-  std::string result = "";
+std::string runPrintChplEnv(std::map<std::string, const char*> varMap) {
+  // Run printchplenv script, passing currently known CHPL_vars as well
+  std::string command = "";
 
-  FILE* pipe = popen(astr(CHPL_HOME, "/util/", script), "r");
-  if (!pipe) {
-    USR_FATAL(astr("running $CHPL_HOME/util/", script));
+  // Pass known variables in varMap into printchplenv by appending to command
+  for (std::map<std::string, const char*>::iterator ii=varMap.begin(); ii!=varMap.end(); ++ii)
+  {
+    command += ii->first + "=" + std::string(ii->second) + " ";
   }
 
+  // Toss stderr away until printchplenv supports a '--suppresswarnings' flag
+  command += std::string(CHPL_HOME) + "/util/printchplenv --all --internal --no-tidy --simple 2> /dev/null";
+
+  return runCommand(command);
+}
+
+std::string getVenvDir() {
+  // Runs `util/chplenv/chpl_home_utils.py --venv` and removes the newline
+
+  std::string command = "CHPL_HOME=" + std::string(CHPL_HOME) + " python ";
+  command += std::string(CHPL_HOME) + "/util/chplenv/chpl_home_utils.py --venv 2> /dev/null";
+
+  std::string venvDir = runCommand(command);
+  venvDir.erase(venvDir.find_last_not_of("\n\r")+1);
+
+  return venvDir;
+}
+
+bool compilingWithPrgEnv() {
+  return (strstr(CHPL_ORIG_TARGET_COMPILER, "cray-prgenv") != NULL);
+}
+
+std::string runCommand(std::string& command) {
+  // Run arbitrary command and return result
+  char buffer[256];
+  std::string result = "";
+  std::string error = "";
+
+  // Call command
+  FILE* pipe = popen(command.c_str(), "r");
+  if (!pipe) {
+    error = "running " + command;
+    USR_FATAL(error.c_str());
+  }
+
+  // Read output of command into result via buffer
   while (!feof(pipe)) {
     if (fgets(buffer, 256, pipe) != NULL) {
       result += buffer;
     }
   }
+
   if (pclose(pipe)) {
-    USR_FATAL(astr("'$CHPL_HOME/util/", script, "' did not run successfully"));
+    error = command + " did not run successfully";
+    USR_FATAL(error.c_str());
   }
 
   return result;
@@ -481,16 +618,36 @@ void genIncludeCommandLineHeaders(FILE* outfile) {
 }
 
 
-void codegen_makefile(fileinfo* mainfile, const char** tmpbinname, bool skip_compile_link) {
+void codegen_makefile(fileinfo* mainfile, const char** tmpbinname, bool skip_compile_link, const std::vector<const char*>& splitFiles) {
   fileinfo makefile;
   openCFile(&makefile, "Makefile");
   const char* tmpDirName = intDirName;
   const char* strippedExeFilename = stripdirectories(executableFilename);
   const char* exeExt = "";
   const char* tmpbin = "";
+  std::string chplmakeallvars = "\0";
+
 
   fprintf(makefile.fptr, "CHPL_MAKE_HOME = %s\n\n", CHPL_HOME);
-  fprintf(makefile.fptr, "TMPDIRNAME = %s\n", tmpDirName);
+  fprintf(makefile.fptr, "CHPL_MAKE_RUNTIME_LIB = %s\n\n", CHPL_RUNTIME_LIB);
+  fprintf(makefile.fptr, "CHPL_MAKE_RUNTIME_INCL = %s\n\n", CHPL_RUNTIME_INCL);
+  fprintf(makefile.fptr, "CHPL_MAKE_THIRD_PARTY = %s\n\n", CHPL_THIRD_PARTY);
+  fprintf(makefile.fptr, "TMPDIRNAME = %s\n\n", tmpDirName);
+
+  // Generate one variable containing all envMap information to pass to printchplenv
+  for (std::map<std::string, const char*>::iterator env=envMap.begin(); env!=envMap.end(); ++env)
+  {
+    const std::string& key = env->first;
+    const char* oldPrefix = "CHPL_";
+    const char* newPrefix = "CHPL_MAKE_";
+    INT_ASSERT(key.substr(0, strlen(oldPrefix)) == oldPrefix);
+    std::string keySuffix = key.substr(strlen(oldPrefix), std::string::npos);
+    std::string chpl_make_key = newPrefix + keySuffix;
+    chplmakeallvars += chpl_make_key + "=" + std::string(env->second) + "|";
+  }
+
+  fprintf(makefile.fptr, "\nexport CHPL_MAKE_SETTINGS_NO_NEWLINES := %s\n", chplmakeallvars.c_str());
+
 
   // LLVM builds just use the makefile for the launcher and
   // so want to skip the actual program generation.
@@ -504,42 +661,32 @@ void codegen_makefile(fileinfo* mainfile, const char** tmpbinname, bool skip_com
   }
   fprintf(makefile.fptr, "BINNAME = %s%s\n\n", executableFilename, exeExt);
   // BLC: This munging is done so that cp won't complain if the source
-  // and destination are the same file (e.g., a.out and ./a.out)
+  // and destination are the same file (e.g., myprogram and ./myprogram)
   tmpbin = astr(tmpDirName, "/", strippedExeFilename, ".tmp", exeExt);
   if( tmpbinname ) *tmpbinname = tmpbin;
   fprintf(makefile.fptr, "TMPBINNAME = %s\n", tmpbin);
   // BLC: We generate a TMPBINNAME which is the name that will be used
   // by the C compiler in creating the executable, and is in the
   // --savec directory (a /tmp directory by default).  We then copy it
-  // over to BINNAME -- the name given by the user, or a.out by
-  // default -- after linking is done.  As it turns out, this saves a
+  // over to BINNAME -- the name given by the user/default module's filename
+  // -- after linking is done.  As it turns out, this saves a
   // factor of 5 or so in time in running the test system, as opposed
   // to specifying BINNAME on the C compiler command line.
 
-  fprintf(makefile.fptr, "COMP_GEN_CFLAGS =");
-  if (ccwarnings) {
-    fprintf(makefile.fptr, " $(WARN_GEN_CFLAGS)");
-  }
-  if (debugCCode) {
-    fprintf(makefile.fptr, " $(DEBUG_CFLAGS)");
-  }
-  if (optimizeCCode) {
-    fprintf(makefile.fptr, " $(OPT_CFLAGS)");
-  }
-  if (specializeCCode) {
-    fprintf(makefile.fptr, " $(SPECIALIZE_CFLAGS)");
-  }
-  if (fieeefloat) {
-    fprintf(makefile.fptr, " $(IEEE_FLOAT_GEN_CFLAGS)");
-  } else {
-    fprintf(makefile.fptr, " $(NO_IEEE_FLOAT_GEN_CFLAGS)");
-  }
+  fprintf(makefile.fptr, "COMP_GEN_WARN = %i\n", ccwarnings);
+  fprintf(makefile.fptr, "COMP_GEN_DEBUG = %i\n", debugCCode);
+  fprintf(makefile.fptr, "COMP_GEN_OPT = %i\n", optimizeCCode);
+  fprintf(makefile.fptr, "COMP_GEN_SPECIALIZE = %i\n", specializeCCode);
+  fprintf(makefile.fptr, "COMP_GEN_FLOAT_OPT = %i\n", ffloatOpt);
+
+  fprintf(makefile.fptr, "COMP_GEN_USER_CFLAGS =");
+
   if (fLibraryCompile && (fLinkStyle==LS_DYNAMIC))
     fprintf(makefile.fptr, " $(SHARED_LIB_CFLAGS)");
   forv_Vec(const char*, dirName, incDirs) {
     fprintf(makefile.fptr, " -I%s", dirName);
   }
-  fprintf(makefile.fptr, " %s\n", ccflags);
+  fprintf(makefile.fptr, " %s\n", ccflags.c_str());
 
   fprintf(makefile.fptr, "COMP_GEN_LFLAGS =");
   if (!fLibraryCompile) {
@@ -553,7 +700,7 @@ void codegen_makefile(fileinfo* mainfile, const char** tmpbinname, bool skip_com
     else
       fprintf(makefile.fptr, " $(LIB_STATIC_FLAG)" );
   }
-  fprintf(makefile.fptr, " %s\n", ldflags);
+  fprintf(makefile.fptr, " %s\n", ldflags.c_str());
 
   fprintf(makefile.fptr, "TAGS_COMMAND = ");
   if (developer && saveCDir[0] && !printCppLineno) {
@@ -570,21 +717,19 @@ void codegen_makefile(fileinfo* mainfile, const char** tmpbinname, bool skip_com
 
   fprintf(makefile.fptr, "CHPLSRC = \\\n");
   fprintf(makefile.fptr, "\t%s \\\n\n", mainfile->pathname);
+  fprintf(makefile.fptr, "CHPLUSEROBJ = \\\n");
+  for(int i=0; i<(int)splitFiles.size(); i++)
+    fprintf(makefile.fptr, "\t%s \\\n", splitFiles[i]);
+  fprintf(makefile.fptr, "\n");
   genCFiles(makefile.fptr);
   genObjFiles(makefile.fptr);
   fprintf(makefile.fptr, "\nLIBS =");
   for (int i=0; i<numLibFlags; i++)
     fprintf(makefile.fptr, " %s", libFlag[i]);
+  if (fLinkStyle==LS_STATIC)
+      fprintf(makefile.fptr, " $(LIBMVEC)" );
   fprintf(makefile.fptr, "\n");
 
-  // MPF - we want to allow the runtime to make use of debug/optimize
-  // information
-  if (debugCCode) {
-    fprintf(makefile.fptr, "DEBUG = 1\n");
-  }
-  if (optimizeCCode) {
-    fprintf(makefile.fptr, "OPTIMIZE = 1\n");
-  }
   fprintf(makefile.fptr, "\n");
   fprintf(makefile.fptr, "\n");
 
@@ -604,191 +749,20 @@ void codegen_makefile(fileinfo* mainfile, const char** tmpbinname, bool skip_com
   closeCFile(&makefile, false);
 }
 
+const char* filenameToModulename(const char* filename) {
+  const char* moduleName = astr(filename);
+  const char* firstSlash = strrchr(moduleName, '/');
 
-static const char* searchPath(Vec<const char*> path, const char* filename,
-                              const char* foundfile = NULL,
-                              bool noWarn = false) {
-  forv_Vec(const char*, dirname, path) {
-    //    printf("searching %s\n", dirname);
-    const char* fullfilename = astr(dirname, "/", filename);
-    FILE* file = openfile(fullfilename, "r", false);
-    if (file != NULL) {
-      closefile(file);
-      if (foundfile == NULL) {
-        foundfile = fullfilename;
-      } else if (!noWarn) {
-        USR_WARN("Ambiguous module source file -- using %s over %s",
-                 cleanFilename(foundfile),
-                 cleanFilename(fullfilename));
-      }
-    }
-  }
-  return foundfile;
-}
-
-//
-// These are lists representing the internal, standard, user, and
-// flag-based (and envvar-based) paths respectively.  The last is
-// treated somewhat differently than the others in that -M flags are
-// handled first by the compiler, but should come after the user
-// paths, so are added into usrModPath as a post-processing pass.
-//
-static Vec<const char*> intModPath;
-static Vec<const char*> stdModPath;
-static Vec<const char*> usrModPath;
-static Vec<const char*> flagModPath;
-
-
-static void addUsrDirToModulePath(const char* dir) {
-  //
-  // a set representing the unique directories added to the path to
-  // avoid duplicates (for efficiency and clarity of error messages)
-  //
-  static Vec<const char*> modPathSet;
-
-  const char* uniquedir = astr(dir);
-  if (!modPathSet.set_in(uniquedir)) {
-    usrModPath.add(uniquedir);
-    modPathSet.set_add(uniquedir);
-  }
-}
-
-
-//
-// track directories specified via -M and CHPL_MODULE_PATH.
-//
-void addFlagModulePath(const char* newpath) {
-  const char* uniquedir = astr(newpath);
-  flagModPath.add(uniquedir);
-}
-
-
-//
-// Once we've added all filename-based directories to the user module
-// search path, we'll add all unique directories specified via -M and
-// CHPL_MODULE_PATH.
-//
-void addDashMsToUserPath() {
-  forv_Vec(const char*, dirname, flagModPath) {
-    addUsrDirToModulePath(dirname);
-  }
-}
-
-
-void setupModulePaths() {
-  const char* modulesRoot = 0;
-
-  if (fMinimalModules == true)
-    modulesRoot = "modules-minimal";
-
-  else if (fUseIPE == true)
-    modulesRoot = "modules-ipe";
-
-  else
-    modulesRoot = "modules";
-
-  intModPath.add(astr(CHPL_HOME, "/", modulesRoot, "/internal/localeModels/",
-                      CHPL_LOCALE_MODEL));
-  intModPath.add(astr(CHPL_HOME, "/", modulesRoot, "/internal/tasktable/",
-                      fEnableTaskTracking ? "on" : "off"));
-  intModPath.add(astr(CHPL_HOME, "/", modulesRoot, "/internal/threads/",
-                      CHPL_THREADS));
-  intModPath.add(astr(CHPL_HOME, "/", modulesRoot, "/internal/tasks/",
-                      CHPL_TASKS));
-  intModPath.add(astr(CHPL_HOME, "/", modulesRoot, "/internal/comm/",
-                      CHPL_COMM));
-  intModPath.add(astr(CHPL_HOME, "/", modulesRoot, "/internal"));
-
-  stdModPath.add(astr(CHPL_HOME, "/", modulesRoot, "/standard/gen/",
-                      CHPL_TARGET_PLATFORM,
-                      "-", CHPL_TARGET_COMPILER));
-
-  stdModPath.add(astr(CHPL_HOME, "/", modulesRoot, "/standard"));
-  stdModPath.add(astr(CHPL_HOME, "/", modulesRoot, "/layouts"));
-  stdModPath.add(astr(CHPL_HOME, "/", modulesRoot, "/dists"));
-  stdModPath.add(astr(CHPL_HOME, "/", modulesRoot, "/dists/dims"));
-
-  const char* envvarpath = getenv("CHPL_MODULE_PATH");
-
-  if (envvarpath) {
-    char path[FILENAME_MAX+1];
-    strncpy(path, envvarpath, FILENAME_MAX);
-    char* colon = NULL;
-
-    do {
-      char* start = colon ? colon+1 : path;
-      colon = strchr(start, ':');
-      if (colon) {
-        *colon = '\0';
-      }
-      addFlagModulePath(start);
-    } while (colon);
-  }
-}
-
-
-void addModulePathFromFilename(const char* origfilename) {
-  char dirname[FILENAME_MAX+1];
-  strncpy(dirname, origfilename, FILENAME_MAX);
-  char* lastslash = strrchr(dirname, '/');
-  if (lastslash != NULL) {
-    *lastslash = '\0';
-    addUsrDirToModulePath(dirname);
-    *lastslash = '/';
-  } else {
-    addUsrDirToModulePath(".");
-  }
-}
-
-
-const char* modNameToFilename(const char* modName,
-                              bool        isInternal,
-                              bool*       isStandard) {
-  const char* filename = astr(modName, ".chpl");
-  const char* fullfilename;
-  if (isInternal) {
-    fullfilename = searchPath(intModPath, filename, NULL, true);
-  } else {
-    fullfilename = searchPath(usrModPath, filename);
-    *isStandard = (fullfilename == NULL);
-    fullfilename = searchPath(stdModPath, filename, fullfilename);
-  }
-  return  fullfilename;
-}
-
-const char* stdModNameToFilename(const char* modName) {
-  const char* fullfilename = searchPath(stdModPath,
-                                        astr(modName, ".chpl"),
-                                        NULL);
-
-  if (fullfilename == NULL) {
-    USR_FATAL("Can't find standard module '%s'\n", modName);
+  if (firstSlash) {
+    moduleName = firstSlash + 1;
   }
 
-  return fullfilename;
+  return asubstr(moduleName, strrchr(moduleName, '.'));
 }
 
-
-static void helpPrintPath(Vec<const char*> path) {
-  forv_Vec(const char*, dirname, path) {
-    fprintf(stderr, "  %s\n", cleanFilename(dirname));
-  }
-}
-
-void printModuleSearchPath() {
-  fprintf(stderr, "module search dirs:\n");
-  if (developer) {
-    helpPrintPath(intModPath);
-  }
-  helpPrintPath(usrModPath);
-  helpPrintPath(stdModPath);
-  fprintf(stderr, "end of module search dirs\n");
-}
-
-void readArgsFromCommand(const char* cmd, std::vector<std::string> & args)
-{
+void readArgsFromCommand(std::string cmd, std::vector<std::string>& args) {
   // Gather information from compileline into clangArgs.
-  if(FILE* fd = popen(cmd,"r")) {
+  if(FILE* fd = popen(cmd.c_str(),"r")) {
     int ch;
     // Read arguments.
     while( (ch = getc(fd)) != EOF ) {
@@ -806,6 +780,69 @@ void readArgsFromCommand(const char* cmd, std::vector<std::string> & args)
       // First argument is the clang install directory...
       args.push_back(arg);
     }
+    fclose(fd);
+  }
+}
+
+void readArgsFromFile(std::string path, std::vector<std::string>& args) {
+
+  FILE* fd = fopen(path.c_str(), "r");
+  if (!fd)
+    USR_FATAL("Could not open file %s", path.c_str());
+
+  int ch;
+  // Read arguments.
+  while( (ch = getc(fd)) != EOF ) {
+    // Read the next argument.
+    // skip leading spaces
+    while( ch != EOF && isspace(ch) ) ch = getc(fd);
+    std::string arg;
+    arg.push_back(ch);
+    // read until space. TODO - handle quoting/spaces
+    ch = getc(fd);
+    while( ch != EOF && !isspace(ch) ) {
+      arg += ch;
+      ch = getc(fd);
+    }
+    args.push_back(arg);
+  }
+
+  fclose(fd);
+}
+
+// Expands variables like $CHPL_HOME in the string
+void expandInstallationPaths(std::string& s) {
+  const char* tofix[] = {"$CHPL_RUNTIME_LIB", CHPL_RUNTIME_LIB,
+                         "$CHPL_RUNTIME_INCL", CHPL_RUNTIME_INCL,
+                         "$CHPL_THIRD_PARTY", CHPL_THIRD_PARTY,
+                         "$CHPL_HOME", CHPL_HOME,
+                         NULL};
+
+  // For each of the patterns in tofix, find/replace all occurrences.
+  for (int j = 0; tofix[j] != NULL; j += 2) {
+
+    const char* key = tofix[j];
+    const char* val = tofix[j+1];
+    size_t key_len = strlen(key);
+    size_t val_len = strlen(val);
+
+    size_t off = 0;
+    while (true) {
+      off = s.find(key, off);
+      if (off == std::string::npos)
+        break; // no more occurrences to replace
+      s.replace(off, key_len, val);
+      off += val_len;
+    }
+  }
+}
+
+void expandInstallationPaths(std::vector<std::string>& args) {
+
+  for (size_t i = 0; i < args.size(); i++) {
+    std::string s = args[i];
+    expandInstallationPaths(s);
+    args[i] = s;
   }
 }
 
@@ -900,6 +937,21 @@ static int sys_getcwd(char** path_out)
   *path_out = buf;
   return 0;
 }
+
+
+/*
+ * Returns the current working directory. Does not report failures. Use
+ * sys_getcwd() if you need error reports.
+ */
+const char* getCwd() {
+  const char* result = getcwd(NULL, PATH_MAX);
+  if (result) {
+    return result;
+  } else {
+    return "";
+  }
+}
+
 
 // Find the path to the running program
 // (or return NULL if we couldn't figure it out).
@@ -1001,4 +1053,3 @@ bool isSameFile(const char* pathA, const char* pathB)
 
   return false;
 }
-

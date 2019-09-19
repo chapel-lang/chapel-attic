@@ -1,0 +1,2 @@
+inLoop.chpl:4: In initializer:
+inLoop.chpl:13: error: use of this.initDone() call in loop body

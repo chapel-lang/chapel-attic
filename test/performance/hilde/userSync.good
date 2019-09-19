@@ -3,4 +3,4 @@ Called visitLocales().
 Called visitLocales().
 Called visitLocales().
 Called visitLocales().
-(get = 40, get_nb = 0, get_nb_test = 0, get_nb_wait = 0, put = 8, fork = 4, fork_fast = 0, fork_nb = 4) (get = 5, get_nb = 0, get_nb_test = 0, get_nb_wait = 0, put = 2, fork = 2, fork_fast = 0, fork_nb = 0) (get = 5, get_nb = 0, get_nb_test = 0, get_nb_wait = 0, put = 2, fork = 2, fork_fast = 0, fork_nb = 0) (get = 5, get_nb = 0, get_nb_test = 0, get_nb_wait = 0, put = 2, fork = 2, fork_fast = 0, fork_nb = 0) (get = 5, get_nb = 0, get_nb_test = 0, get_nb_wait = 0, put = 2, fork = 2, fork_fast = 0, fork_nb = 0)
+(get = 36, put = 8, execute_on = 4, execute_on_nb = 4) (get = 3, put = 2, execute_on = 1, execute_on_fast = 1) (get = 3, put = 2, execute_on = 1, execute_on_fast = 1) (get = 3, put = 2, execute_on = 1, execute_on_fast = 1) (get = 3, put = 2, execute_on = 1, execute_on_fast = 1)

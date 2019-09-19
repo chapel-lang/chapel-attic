@@ -6,17 +6,14 @@ use Norm;
 
 // calculate C = C - A * B.
 proc dgemm(
-    p : int,    // number of rows in A
-    q : int,    // number of cols in A, number of rows in B
-    r : int,    // number of cols in B
-    A : [1..p, 1..q] ?t,
-    B : [1..q, 1..r] t,
-    C : [1..p, 1..r] t)
+    A : [?AD] ?t,
+    B : [?BD] t,
+    C : [?CD] t)
 {
     // Calculate (i,j) using a dot product of a row of A and a column of B.
-    for i in 1..p {
-        for j in 1..r {
-            for k in 1..q {
+    for i in AD.dim(1) {
+        for j in CD.dim(2) {
+            for k in AD.dim(2) {
                 C[i,j] -= A[i, k] * B[k, j];
             }
         }
@@ -158,8 +155,7 @@ proc LUFactorize(n : int, A : [1..n, 1..n+1] real, piv : [1..n] int) {
 
         // update trailing submatrix (if there)
         if(br.numIndices > 0) {
-            dgemm(trailingRows.length, blockRange.length, trailingCols.length,
-                  A(bl), A(tr), A(br));
+            dgemm(A(bl), A(tr), A(br));
           }
       }
 }
@@ -184,18 +180,19 @@ proc matrixMult(
 
 // given a matrix in A in form: [L, U] multiply the L and U parts into
 // a resulting matrix C.
-proc selfMult(n : int, A : [1..n,1..n] real, C : [1..n,1..n] real) {
+proc selfMult(n : int, A : [?D] real, C : [D] real) {
+    assert(D.dim(1) == D.dim(2));
     C = 0;
 
-    forall (i,j) in C.domain {
+    forall (i,j) in D {
         if(i <= j) {
-            for k in 1..i-1 {
+          for k in D.dim(1).low..i-1 {
                 C[i,j] += A[i,k] * A[k,j];
             }
             C[i,j] += A[i,j];
         }
         else if(j <= i){
-            for k in 1..j {
+          for k in D.dim(1).low..j {
                 C[i,j] += A[i,k] * A[k,j];
             }
         }
@@ -316,7 +313,7 @@ proc test_permuteMatrix(rprt = true) : bool {
     // little too meta here?)
 
     param n = 10;
-    var rand = new RandomStream();
+    var rand = new RandomStream(real);
 
     // this n by n array is filled so each element is assigned to its
     // row number. This test will permute these elements, keeping a pivot
@@ -352,7 +349,7 @@ proc test_permuteMatrix(rprt = true) : bool {
 }
 
 proc test_panelSolve(rprt = true) : bool {
-    var rand = new RandomStream();
+    var rand = new RandomStream(real);
 
     var piv : [1..8] int = [i in 1..8] i;
     var A : [1..8, 1..9] real =
@@ -373,9 +370,9 @@ proc test_panelSolve(rprt = true) : bool {
     // to test multiply the L and U parts of the top portion of the panel
     // (just the block) together and check that the result matches the
     // block on the original matrix when permuted.
-    var C : [1..blkSize, 1..blkSize] real;
     var blockD =
         {offset..offset+blkSize-1, offset..offset+blkSize-1};
+    var C : [blockD] real;
     selfMult(blkSize, A(blockD), C);
     permuteMatrix(AOrig, piv);
 
@@ -394,7 +391,7 @@ proc test_panelSolve(rprt = true) : bool {
 }
 
 proc test_updateBlockRow(rprt = true) : bool {
-    var rand = new RandomStream();
+    var rand = new RandomStream(real);
 
     // construct a matrix A = [X | Y], where X is an already LU-factorized
     // submatrix and Y is the block row we wish to update and test
@@ -474,7 +471,7 @@ proc test_LUFactorizeNorms(
 
 proc test_LUFactorize(rprt = true, seed = -1) : bool {
     // construct a matrix of random size with random values 
-    var rand = new RandomStream(seed);
+    var rand = new RandomStream(real, seed);
 
     var randomN : int = (rand.getNext() * 10):int + 1;
     var A : [1..randomN, 1..randomN+1] real;

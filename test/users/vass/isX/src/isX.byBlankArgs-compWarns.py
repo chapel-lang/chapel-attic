@@ -39,7 +39,7 @@ varList = [
   ("rng1", "range"),
   ("rng2", "range(uint(8), BoundedRangeType.boundedNone, true)"),
 
-  ("dmp",  "new dmap(new DefaultDist())"),
+  ("dmp",  "defaultDist"),
   ("dom1", "DomType1"),
   ("dom2", "DomType2"),
   ("arr1", "ArrType1"),
@@ -91,7 +91,7 @@ def compilerWarning(*args):
 # declare test()
 
 say("proc test(arg) {")
-say("  compilerWarning(typeToString(arg.type));")
+say("  compilerWarning(arg.type:string);")
 
 for pred in predList:
   say("  report(", pred,      "(arg), \"",      pred,      "\");")

@@ -83,9 +83,12 @@ export CHPL_TARGET_ARCH=none
 #       working tree (under $CHPL_HOME), and b) less specific to our file
 #       system hierarchy. (thomasvandoren, 2014-01-24)
 
+explicit_prefix=${CHPL_NIGHTLY_LOG_PREFIX}
 default_prefix=${TMPDIR:-/tmp}/chapel_logs
 cascade_prefix=/data/sea/chapel
-if [ -d $cascade_prefix ] ; then
+if [ -n "$explicit_prefix" ]; then
+    logdir_prefix=$explicit_prefix
+elif [ -d $cascade_prefix ] ; then
     logdir_prefix=$cascade_prefix
 else
     logdir_prefix=$default_prefix
@@ -101,20 +104,9 @@ export CHPL_NIGHTLY_CRON_LOGDIR=$CHPL_NIGHTLY_LOGDIR
 
 # It is tempting to use hostname --short, but macs only support the short form
 # of the argument.
-export CHPL_TEST_PERF_DIR=$logdir_prefix/NightlyPerformance/$(hostname -s)
-export CHPL_TEST_COMP_PERF_DIR=$logdir_prefix/NightlyPerformance/$(hostname -s)
-
-# When module function is available, ie on a cray, load the subversion module.
-if [ -f /etc/modules/bash ] ; then
-    log_info "Initializing module command."
-    source /etc/modules/bash
-
-    if [ -n "$(type module 2> /dev/null)" ] ; then
-        log_info "Loading subversion module."
-        # FIXME: Can we get rid of this in a github world?
-        #        (thomasvandoren, 2014-07-09)
-        module load cpkg all/append subversion
-    else
-        log_error "Failed to find module command after sourcing /etc/modules/bash."
-    fi
+if [ -z "$CHPL_TEST_PERF_DIR" ]; then
+    export CHPL_TEST_PERF_DIR=$logdir_prefix/NightlyPerformance/$(hostname -s)
+fi
+if [ -z "$CHPL_TEST_COMP_PERF_DIR" ]; then
+    export CHPL_TEST_COMP_PERF_DIR=$logdir_prefix/NightlyPerformance/$(hostname -s)
 fi

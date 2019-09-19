@@ -17,7 +17,7 @@ module test_fully_blocked_elemental_cholesky {
 
   proc main {
 
-    var Rand = new RandomStream ( seed = 314159) ;
+    var Rand = new RandomStream ( real, seed = 314159) ;
 
     const MatIdx = { index_base .. #n, index_base .. #n };
 
@@ -43,7 +43,7 @@ module test_fully_blocked_elemental_cholesky {
     writeln ("Parallel Environment");
     writeln ("   Number of Locales         : ", numLocales );
     if !reproducible_output then {
-      writeln ("   Number of cores per locale: ", Locales.numCores );
+      writeln ("   Number of cores per locale: ", Locales.numPUs() );
       writeln ("   Max tasking parallelism   : ", Locales.maxTaskPar );
     }
 
@@ -99,6 +99,8 @@ module test_fully_blocked_elemental_cholesky {
       check_factorization ( A, L );
     else
       writeln ("factorization failed for non-positive semi-definite matrix");
+
+    delete Rand;
    }
 
   proc check_factorization ( A : [], L : [] )

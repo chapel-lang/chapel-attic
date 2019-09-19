@@ -16,7 +16,7 @@ config const epsilon = 2.0 ** -51.0,
              threshold = 16.0;
 
 config const useRandomSeed = true,
-             seed = if useRandomSeed then SeedGenerator.currentTime else 314159265;
+             seed = if useRandomSeed then SeedGenerator.oddCurrentTime else 314159265;
 
 config const printParams = true,
              printArrays = false,
@@ -91,7 +91,7 @@ proc bitReverseShuffle(Vect: [?Dom]) {
 proc bitReverse(val: ?valType, revBits = 64) {
   param mask = 0x0102040810204080;
   const valReverse64 = bitMatMultOr(mask, bitMatMultOr(val:uint(64), mask)),
-        valReverse = bitRotLeft(valReverse64, revBits);
+        valReverse = rotl(valReverse64, revBits);
   return valReverse: valType;
 }
 

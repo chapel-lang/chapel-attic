@@ -15,7 +15,9 @@ proc vartype() type {
 
 class c {
   var v: vartype();
-  proc c() { if enabled then v = 5; }
+  proc init() { this.initDone(); if enabled then v = 5; }
 }
 
-writeln(new c());
+var foo = new c();
+writeln(foo);
+delete foo;

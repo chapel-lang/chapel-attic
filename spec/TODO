@@ -2,21 +2,30 @@ Types
 -----
 * add volatile types
 
+Compile-time machinery
+----------------------
+* consolidate compile-time stuff into a new chapter
+  - params
+  - types:
+    * type fns, type expressions
+    * conditional and select statements on type expressions
+  - compiler warning/error
+
 Classes
 -------
 * add destructors description
 * indicate that parentheses-less methods are statically dispatched,
   just like fields
+* Consider moving methods into a new chapter, since we can have methods
+  on integers or records. Consider a new cut at describing this intents.
+
+Conversions
+-----------
+* how does explicit real->int conversion treat the fractional part
+  (round or truncate, and in which direction)?
 
 Expressions
 -----------
-* move most of 10.5 into chapter 13 and replace with a forward
-  reference to the appropriate section of 13 (see
-  domains/ranges/classes/records for the precedent)
-
-* promote 10.5.1 and 10.5.2 (index expressions and member access
-  expressions) to top-level sections in chapter 10
-
 * the index expressions section should also have a pointer to the
   section that defines 'this' functions (wherever that is)
 
@@ -26,6 +35,8 @@ Expressions
 * add param prototypes for ! operator (and other operators whose
   param versions aren't documented?)
 
+* describe the semantics/meaning of hexadecimal real literals
+  (and presumably also non-hexadecimal literals too)
 
 Ranges
 ------
@@ -38,7 +49,7 @@ Functions
 ---------
 * need to make sure to explain the use of default values (and
   non-lvalue default values) for inout/out/ref arguments
-* move oveloading and resolution subsections to the end of the section
+* move overloading and resolution subsections to the end of the section
   *** this should be true after first class function stuff is removed.
 * define semantics of creating tuples with array components, etc.
 * define function resolution for type functions (perhaps by difference from
@@ -151,7 +162,7 @@ can make for this construct in the presence of optimizations...
 
 These are orthogonal.  I added an example.
 
-* add const intents to spec and define blank intents in terms of const
+* add const intents to spec and define default intents in terms of const
   intents (and "by reference" for arrays/domains):
 
   Steve's definition of const intents:
@@ -163,8 +174,8 @@ These are orthogonal.  I added an example.
   Brad's mental definition had been the same except:
   - records: pass by ref and disallow modification
 
-  Joint definition of blank intents:
-  - scalars, classes, records: same as blank:
+  Joint definition of default intents:
+  - scalars, classes, records: same as default:
   - domains/arrays: pass by ref and allow modification
 
 * Does spec talk about declaring methods for types other than
@@ -182,13 +193,8 @@ From meeting when David was here Sep 2008
 
 cleanups
 --------
-* dom & arr chapter (bradc)
 * iterators and promotion chapter -- unify
   - define "promoted expr"
-* add compile-time machinery chapter
-  - param stuff
-  - type fns
-  - comp warning/error
 * distributions text
 
 updates/changes

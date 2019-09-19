@@ -7,6 +7,7 @@ module search dirs:
   subdir4/subdir
   $CHPL_HOME/modules/standard/gen/...
   $CHPL_HOME/modules/standard
+  $CHPL_HOME/modules/packages
   $CHPL_HOME/modules/layouts
   $CHPL_HOME/modules/dists
   $CHPL_HOME/modules/dists/dims
@@ -20,21 +21,21 @@ Parsing module files:
   subdir2/bap.chpl
   subdir4/subdir/bax.chpl
   ./bah.chpl
-  $CHPL_HOME/modules/standard/startInitCommDiags.chpl
-  $CHPL_HOME/modules/standard/NewString.chpl
+  $CHPL_HOME/modules/standard/Assert.chpl
   $CHPL_HOME/modules/standard/Types.chpl
   $CHPL_HOME/modules/standard/Math.chpl
-  $CHPL_HOME/modules/standard/stopInitCommDiags.chpl
-  $CHPL_HOME/modules/standard/Sys.chpl
+  $CHPL_HOME/modules/standard/CommDiagnostics.chpl
+  $CHPL_HOME/modules/standard/gen/.../SysCTypes.chpl
   $CHPL_HOME/modules/dists/DSIUtil.chpl
+  $CHPL_HOME/modules/packages/Sort.chpl
+  $CHPL_HOME/modules/standard/Reflection.chpl
   $CHPL_HOME/modules/standard/List.chpl
   $CHPL_HOME/modules/standard/SysBasic.chpl
   $CHPL_HOME/modules/standard/IO.chpl
-  $CHPL_HOME/modules/standard/Sort.chpl
-  $CHPL_HOME/modules/standard/Search.chpl
-  $CHPL_HOME/modules/standard/CommDiagnostics.chpl
-  $CHPL_HOME/modules/standard/gen/.../SysCTypes.chpl
-  $CHPL_HOME/modules/standard/Error.chpl
+  $CHPL_HOME/modules/packages/RangeChunk.chpl
+  $CHPL_HOME/modules/packages/Search.chpl
+  $CHPL_HOME/modules/standard/Sys.chpl
+  $CHPL_HOME/modules/standard/SysError.chpl
   $CHPL_HOME/modules/standard/Regexp.chpl
 In bar
 In baz

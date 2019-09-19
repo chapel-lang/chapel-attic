@@ -40,8 +40,8 @@ class Grid {
 
   const dx: dimension*real;
           
+  const cells:          domain(dimension, stridable=true);
   const extended_cells: domain(dimension, stridable=true);
-  const cells:          subdomain(extended_cells);
   
   // const ghost_domains: MultiDomain(dimension, stridable=true);
   const ghost_domains: List( domain(dimension, stridable=true) );
@@ -49,10 +49,10 @@ class Grid {
 
 
   //|\''''''''''''''''''''|\
-  //| >    constructor    | >
+  //| >    initializer    | >
   //|/....................|/
   
-  proc Grid (
+  proc init (
     x_low:         dimension*real,
     x_high:        dimension*real,
     i_low:         dimension*int,
@@ -66,9 +66,6 @@ class Grid {
     this.i_low         = i_low;
     this.n_cells       = n_cells;
     this.n_ghost_cells = n_ghost_cells;
-
-    //==== Sanity check ====
-    sanityChecks();
 
     //==== dx ====
     dx = (x_high - x_low) / n_cells;
@@ -103,6 +100,10 @@ class Grid {
     //-------------------------------------------------------------
 
     ghost_domains = new List( domain(dimension,stridable=true) );
+    this.initDone();
+
+    //==== Sanity check ====
+    sanityChecks();
 
     var inner_location: dimension*int;
     for d in dimensions do inner_location(d) = loc1d.inner;
@@ -111,14 +112,17 @@ class Grid {
     for loc in (loc1d.below:int .. loc1d.above by 2)**dimension {
       if loc != inner_location {
         for d in dimensions {
-          if loc(d) == loc1d.below then 
-            ranges(d) = ((extended_cells.low(d).. by 2) #n_ghost_cells(d)).alignHigh();
-          else if loc(d) == loc1d.inner then
+          if loc(d) == loc1d.below {
+            var tmp = ((extended_cells.low(d).. by 2) #n_ghost_cells(d));
+            ranges(d) = tmp.alignHigh();
+          } else if loc(d) == loc1d.inner {
             ranges(d) = cells.dim(d);
-          else
+          } else {
             // ((..extended_cells.high(d) by 2) #-n_ghost_cells(d)).alignLow();
             // hilde sez: Mathematical precision meets ease of use
-            ranges(d) = ((..extended_cells.high(d) by 2 align extended_cells.high(d)) #-n_ghost_cells(d)).alignLow();
+            var tmp = ((..extended_cells.high(d) by 2 align extended_cells.high(d)) #-n_ghost_cells(d));
+            ranges(d) = tmp.alignLow();
+          }
         }
         ghost_domain = ranges;
         ghost_domains.add(ghost_domain);
@@ -128,19 +132,19 @@ class Grid {
 
   }
   // /|''''''''''''''''''''/|
-  //< |    Constructor    < |
+  //< |    Initializer    < |
   // \|....................\|
 
 
 
   //|\'''''''''''''''''''|\
-  //| >    destructor    | >
+  //| >  deinitializer   | >
   //|/...................|/
 
-  proc ~Grid () { delete ghost_domains; }
+  proc deinit () { delete ghost_domains; }
   
   // /|'''''''''''''''''''/|
-  //< |    destructor    < |
+  //< |  deinitializer   < |
   // \|...................\|
 
 
@@ -150,13 +154,13 @@ class Grid {
   //|/..........................|/
 
   //--------------------------------------------------------------
-  // Performs some basic sanity checks on the constructor inputs.
+  // Performs some basic sanity checks on the initializer inputs.
   //--------------------------------------------------------------
 
   proc sanityChecks () {
     var d_string: string;
     for d in dimensions do {
-      d_string = format("%i", d);
+      d_string = "%i".format(d);
 
       assert(x_low(d) < x_high(d),
 	     "error: Grid: x_low(" + d_string + ") must be strictly less than x_high(" + d_string + ").");
@@ -218,7 +222,7 @@ class Grid {
   // sensible.  Mainly for testing and debugging.
   //-----------------------------------------------------------
   
-  proc writeThis (w: Writer) {
+  proc writeThis (w) {
     writeln("x_low: ", x_low, ",  x_high: ", x_high);
     write("i_low: ", i_low, ",  i_high: ", i_high);
   }
@@ -286,7 +290,7 @@ proc readGrid(file_name: string) {
   var dim_in: int;
   input_file.readln(dim_in);
   assert(dim_in == dimension, 
-         "error: dimension of space.txt must equal " + format("%i",dimension));
+         "error: dimension of space.txt must equal " + "%i".format(dimension));
   input_file.readln(); // empty line
 
   var x_low, x_high:                 dimension*real;

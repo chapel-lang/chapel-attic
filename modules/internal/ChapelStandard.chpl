@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2014 Cray Inc.
+ * Copyright 2004-2018 Cray Inc.
  * Other additional copyright holders may be indicated within.
  *
  * The entirety of this work is licensed under the Apache License,
@@ -21,17 +21,20 @@
 //
 pragma "export init"
 module ChapelStandard {
-  use startInitCommDiags;
+  use startInitCommDiags;  // Internal, but uses standard/CommDiagnostics
 
   // Internal modules.
-  use ChapelBase;
+  use CPtr;
+  use CString;
   use String;
+  use ChapelDebugPrint;
+  use ChapelEnv;
+  use ChapelBase;
   use MemConsistency;
   use Atomics;
   use NetworkAtomics;
   use NetworkAtomicTypes;
   use AtomicsCommon;
-  use NewString;
   use ChapelIteratorSupport;
   use ChapelThreads;
   use ChapelThreadsInternal;
@@ -40,6 +43,7 @@ module ChapelStandard {
   use ChapelRange;
   use ChapelReduce;
   use ChapelSyncvar;
+  use ChapelTaskDataHelp;
   use LocaleModel;
   use ChapelLocale;
   use DefaultRectangular; // This might be able to go just after Atomics
@@ -55,11 +59,15 @@ module ChapelStandard {
   use ChapelTaskTable;
   use MemTracking;
   use ChapelUtil;
+  use ChapelError;
   use ChapelDynDispHack;
+  use ChapelTaskData;
+  use ChapelSerializedBroadcast;
 
   // Standard modules.
+  use Assert;
   use Types;
   use Math;
 
-  use stopInitCommDiags;
+  use stopInitCommDiags;  // Internal, but uses standard/CommDiagnostics
 }

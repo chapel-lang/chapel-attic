@@ -1,15 +1,15 @@
 /*
- * Copyright 2004-2014 Cray Inc.
+ * Copyright 2004-2018 Cray Inc.
  * Other additional copyright holders may be indicated within.
- * 
+ *
  * The entirety of this work is licensed under the Apache License,
  * Version 2.0 (the "License"); you may not use this file except
  * in compliance with the License.
- * 
+ *
  * You may obtain a copy of the License at
- * 
+ *
  *     http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -32,34 +32,39 @@
 #define IFA_EXTERN_INIT(x)
 #endif
 
+//
+// NOTE: NUM_KIND_LAST is used to mark the last entry in this enum. The
+// 'IF1_const_kind' enum below uses it to set values.
+//
 enum IF1_num_kind {
   NUM_KIND_NONE, NUM_KIND_BOOL, NUM_KIND_UINT, NUM_KIND_INT, NUM_KIND_REAL,
-  NUM_KIND_IMAG, NUM_KIND_COMPLEX
+  NUM_KIND_IMAG, NUM_KIND_COMPLEX, NUM_KIND_COMMID, NUM_KIND_LAST
 };
 
 enum IF1_const_kind {
-  CONST_KIND_STRING = NUM_KIND_COMPLEX + 1, CONST_KIND_SYMBOL
+  CONST_KIND_STRING = NUM_KIND_LAST + 1, CONST_KIND_SYMBOL
+};
+
+enum IF1_string_kind {
+  STRING_KIND_STRING,
+  STRING_KIND_C_STRING
 };
 
 enum IF1_bool_type {
-  BOOL_SIZE_1, BOOL_SIZE_SYS, BOOL_SIZE_8, BOOL_SIZE_16, BOOL_SIZE_32, 
+  BOOL_SIZE_1, BOOL_SIZE_SYS, BOOL_SIZE_8, BOOL_SIZE_16, BOOL_SIZE_32,
   BOOL_SIZE_64, BOOL_SIZE_NUM
 };
 
-enum IF1_int_type { 
+enum IF1_int_type {
   INT_SIZE_8, INT_SIZE_16, INT_SIZE_32, INT_SIZE_64, INT_SIZE_NUM
 };
 
-enum IF1_float_type { 
-  FLOAT_SIZE_16, FLOAT_SIZE_32, FLOAT_SIZE_48, FLOAT_SIZE_64, 
-  FLOAT_SIZE_80, FLOAT_SIZE_96, FLOAT_SIZE_112, FLOAT_SIZE_128, 
-  FLOAT_SIZE_NUM
+enum IF1_float_type {
+  FLOAT_SIZE_32, FLOAT_SIZE_64, FLOAT_SIZE_NUM
 };
 
-enum IF1_complex_type { 
-  COMPLEX_SIZE_32, COMPLEX_SIZE_64, COMPLEX_SIZE_96, COMPLEX_SIZE_128, 
-  COMPLEX_SIZE_160, COMPLEX_SIZE_192, COMPLEX_SIZE_224, COMPLEX_SIZE_256, 
-  COMPLEX_SIZE_NUM
+enum IF1_complex_type {
+  COMPLEX_SIZE_64, COMPLEX_SIZE_128, COMPLEX_SIZE_NUM
 };
 
 //
@@ -77,29 +82,49 @@ enum IF1_complex_type {
 
 class Immediate { public:
   uint32_t const_kind;
+  IF1_string_kind string_kind;
   uint32_t num_index;
   union {
-    uint64_t   v_bool;
-    int8_t     v_int8;
-    int16_t    v_int16;
-    int32_t    v_int32;
-    int64_t    v_int64;
-    // int128     v_int128;
-    uint8_t    v_uint8;
-    uint16_t   v_uint16;
-    uint32_t   v_uint32;
-    uint64_t   v_uint64;
-    // uint128    v_uint128;
-    float      v_float32;
-    double     v_float64;
-    complex64  v_complex64;
+    // Unions are initialized based off the first element, so we need to have
+    // the largest thing first to make sure it is all zero initialized
+
+    // complex values
     complex128 v_complex128;
+    complex64  v_complex64;
+
+    // floating-point values
+    double     v_float64;
+    float      v_float32;
+
+    // signed integer values
+    // int128     v_int128;
+    int64_t    v_int64;
+    int32_t    v_int32;
+    int16_t    v_int16;
+    int8_t     v_int8;
+
+    // unsigned integer values
+    // uint128    v_uint128;
+    uint64_t   v_uint64;
+    uint32_t   v_uint32;
+    uint16_t   v_uint16;
+    uint8_t    v_uint8;
+
+    // boolean value
+    uint64_t   v_bool;
+
+    // string value
     const char *v_string;
   };
 
-  int64_t  int_value( void);
-  uint64_t uint_value( void);
-  uint64_t bool_value( void);
+  int64_t  int_value( void)     const;
+  int64_t  commid_value( void)  const;
+  uint64_t uint_value( void)    const;
+  uint64_t bool_value( void)    const;
+  const char* string_value( void)const;
+  // calls int_value, uint_value, or bool_value as appropriate.
+  int64_t  to_int( void)        const;
+  uint64_t to_uint( void)       const;
 
   Immediate& operator=(const Immediate&);
   Immediate& operator=(bool b) {
@@ -110,32 +135,42 @@ class Immediate { public:
   }
   Immediate& operator=(char *s) {
     const_kind = CONST_KIND_STRING;
+    string_kind = STRING_KIND_C_STRING;
     v_string = s;
     return *this;
   }
-  Immediate(bool b) {
-    memset(this, 0, sizeof(*this));
-    const_kind = NUM_KIND_BOOL;
-    num_index = BOOL_SIZE_SYS;
+
+  explicit
+  Immediate(bool b) :
+    const_kind(NUM_KIND_BOOL),
+    string_kind(STRING_KIND_STRING),
+    num_index(BOOL_SIZE_SYS)
+  {
     v_bool = b;
   }
-  Immediate(const char *s) {
-    memset(this, 0, sizeof(*this));
-    const_kind = CONST_KIND_STRING;
+
+  Immediate(const char *s, IF1_string_kind kind) :
+    const_kind(CONST_KIND_STRING),
+    string_kind(kind),
+    num_index(0)
+  {
     v_string = s;
   }
+
   Immediate();
   Immediate(const Immediate &im);
 };
 
 inline uint64_t
-Immediate::bool_value( void) {
+Immediate::bool_value( void) const {
+  INT_ASSERT(const_kind == NUM_KIND_BOOL);
   return v_bool;
 }
 
 inline int64_t
-Immediate::int_value( void) {
+Immediate::int_value( void) const {
   int64_t val = 0;
+  INT_ASSERT(const_kind == NUM_KIND_INT);
   switch (num_index) {
   case INT_SIZE_8 : val = v_int8;  break;
   case INT_SIZE_16: val = v_int16; break;
@@ -147,10 +182,28 @@ Immediate::int_value( void) {
   return val;
 }
 
+inline const char*
+Immediate::string_value( void) const {
+  INT_ASSERT(const_kind == CONST_KIND_STRING);
+  INT_ASSERT(string_kind == STRING_KIND_STRING ||
+             string_kind == STRING_KIND_C_STRING);
+
+  return v_string;
+}
+
+
+inline int64_t
+Immediate::commid_value( void) const {
+  INT_ASSERT(const_kind == NUM_KIND_COMMID &&
+             num_index == INT_SIZE_64);
+  return v_int64;
+}
+
 
 inline uint64_t
-Immediate::uint_value( void) {
+Immediate::uint_value( void) const {
   uint64_t val = 0;
+  INT_ASSERT(const_kind == NUM_KIND_UINT);
   switch (num_index) {
   case INT_SIZE_8 : val = v_uint8;  break;
   case INT_SIZE_16: val = v_uint16; break;
@@ -162,6 +215,32 @@ Immediate::uint_value( void) {
   return val;
 }
 
+inline int64_t
+Immediate::to_int( void) const {
+  int64_t val = 0;
+  switch (const_kind) {
+    case NUM_KIND_INT : val = int_value();  break;
+    case NUM_KIND_UINT: val = uint_value(); break;
+    case NUM_KIND_BOOL: val = bool_value(); break;
+  default:
+    INT_FATAL("kind not handled in to_int");
+  }
+  return val;
+}
+
+
+inline uint64_t
+Immediate::to_uint( void) const {
+  uint64_t val = 0;
+  switch (const_kind) {
+    case NUM_KIND_INT : val = int_value();  break;
+    case NUM_KIND_UINT: val = uint_value(); break;
+    case NUM_KIND_BOOL: val = bool_value(); break;
+  default:
+    INT_FATAL("kind not handled in to_uint");
+  }
+  return val;
+}
 
 class ImmHashFns { public:
   static unsigned int hash(Immediate *);
@@ -206,13 +285,15 @@ ImmHashFns::equal(Immediate *imm1, Immediate *imm2) {
   return !memcmp(imm1, imm2, sizeof(*imm1));
 }
 
-int fprint_imm(FILE *fp, Immediate &imm);
-int snprint_imm(char *s, size_t max, Immediate &imm);
-int snprint_imm(char *str, size_t max, char *control_string, Immediate &imm);
+int fprint_imm(FILE *fp, const Immediate &imm, bool showType = false);
+int snprint_imm(char *s, size_t max, const Immediate &imm);
+int snprint_imm(char *str, size_t max, char *control_string, const Immediate &imm);
 void coerce_immediate(Immediate *from, Immediate *to);
 void fold_result(Immediate *imm1, Immediate *imm2, Immediate *imm);
 void fold_constant(int op, Immediate *im1, Immediate *im2, Immediate *imm);
 void convert_string_to_immediate(const char *str, Immediate *imm);
+const char* istrFromUserUint(long long unsigned int i);
+const char* istrFromUserInt(long long int i);
 
 #endif
 

@@ -18,7 +18,7 @@ proc DistributedArray.this(i: int) ref {
   }
 }
 
-proc DistributedArray.writeThis(W: Writer) {
+proc DistributedArray.writeThis(W) {
   for loc in Locales {
     W.write(if loc == here then data else others[loc.id].data);
     if loc.id != numLocales-1 then
@@ -26,7 +26,7 @@ proc DistributedArray.writeThis(W: Writer) {
   }
 }
 
-pragma "private" var A: DistributedArray;
+pragma "locale private" var A: DistributedArray;
 
 //
 // set up DistributedArray

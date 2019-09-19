@@ -49,15 +49,16 @@ class Block1DDist {
 
   //
   // DOWN: an array of local distribution class descriptors -- set up
-  // in the class constructor
+  // in the class initializer
   //
-  const locDist: [targetLocDom] LocBlock1DDist(idxType);
+  var locDist: [targetLocDom] LocBlock1DDist(idxType);
 
 
-  // CONSTRUCTORS:
+  // INITIALIZERS:
 
-  proc Block1DDist(type idxType = int(64), bbox: domain(1, idxType),
-                  targetLocales: [] locale = Locales) {
+  proc init(type idxType = int(64), bbox: domain(1, idxType),
+            targetLocales: [] locale = Locales) {
+    this.idxType = idxType;
     boundingBox = bbox;
     //
     // 0-base the local capture of the targetLocDom for simplicity
@@ -69,9 +70,17 @@ class Block1DDist {
     targetLocDom = {0..#targetLocales.numElements};
     targetLocs = targetLocales;
 
+    this.initDone();
+
     for locid in targetLocDom do
       on targetLocs(locid) do
         locDist(locid) = new LocBlock1DDist(idxType, locid, this);
+  }
+
+  proc deinit() {
+    for locid in targetLocDom do
+      on targetLocs(locid) do
+        delete locDist(locid);
   }
 
 
@@ -91,7 +100,7 @@ class Block1DDist {
   //
   // print out the distribution
   //
-  proc writeThis(x:Writer) {
+  proc writeThis(x) {
     x.writeln("BradsBlock1DPar");
     x.writeln("---------------");
     x.writeln("distributes: ", boundingBox);
@@ -175,33 +184,43 @@ class LocBlock1DDist {
   const loc: locale;
 
 
-  // CONSTRUCTORS:
+  // INITIALIZERS:
 
   //
-  // Constructor computes what chunk of index(1) is owned by the
+  // Initializer computes what chunk of index(1) is owned by the
   // current locale
   //
-  proc LocBlock1DDist(type idxType, 
-                     _localeIdx: int, // the locale index from the target domain
-                     dist: Block1DDist(idxType) // reference to glob dist
-                     ) {
-    const localeIdx = _localeIdx;
-    loc = dist.targetLocs(localeIdx);
+  proc init(type idxType,
+            _localeIdx: int, // the locale index from the target domain
+            dist: Block1DDist(idxType) // reference to glob dist
+            ) {
+    this.idxType = idxType;
+
+    //
+    // a helper function for mapping processors to indices
+    //
+    proc procToData(x, lo)
+      return (lo + (x: lo.type) + (x:real != x:int:real));
+
+    const lo = dist.boundingBox.low;
+    const hi = dist.boundingBox.high;
+    const numelems = hi - lo + 1;
+    const numlocs = dist.targetLocDom.numIndices;
+    const blo = if (_localeIdx == 0) then min(idxType)
+                else procToData((numelems: real * _localeIdx) / numlocs, lo);
+    const bhi = if (_localeIdx == numlocs - 1) then max(idxType)
+                else procToData((numelems: real * (_localeIdx+1)) / numlocs, lo) - 1;
+    myChunk = {blo..bhi};
+
+    loc = dist.targetLocs(_localeIdx);
     //
     // TODO: Create these assertions for other local classes as well
     //
     if (loc != here) {
       halt("Creating a local distribution class on the wrong locale");
     }
-    const lo = dist.boundingBox.low;
-    const hi = dist.boundingBox.high;
-    const numelems = hi - lo + 1;
-    const numlocs = dist.targetLocDom.numIndices;
-    const blo = if (localeIdx == 0) then min(idxType)
-                else procToData((numelems: real * localeIdx) / numlocs, lo);
-    const bhi = if (localeIdx == numlocs - 1) then max(idxType)
-                else procToData((numelems: real * (localeIdx+1)) / numlocs, lo) - 1;
-    myChunk = {blo..bhi};
+
+    this.initDone();
     if debugBradsBlock1D then
       writeln(this);
   }
@@ -209,16 +228,11 @@ class LocBlock1DDist {
 
   // INTERNAL INTERFACE:
 
-  //
-  // a helper function for mapping processors to indices
-  //
-  proc procToData(x, lo)
-    return (lo + (x: lo.type) + (x:real != x:int:real));
 
   //
   // print out the local distribution class
   //
-  proc writeThis(x:Writer) {
+  proc writeThis(x) {
     x.write("locale ", loc.id, " owns chunk: ", myChunk);
   }
 }
@@ -274,6 +288,12 @@ class Block1DDom {
                                            dist.getChunk(whole, localeIdx));
     if debugBradsBlock1D then
       [loc in dist.targetLocDom] writeln(loc, " owns ", locDoms(loc));
+  }
+
+  proc deinit() {
+    for localeIdx in dist.targetLocDom do
+      on dist.targetLocs(localeIdx) do
+        delete locDoms(localeIdx);
   }
 
 
@@ -366,7 +386,7 @@ class Block1DDom {
   //
   // the print method for the domain
   //
-  proc writeThis(x:Writer) {
+  proc writeThis(x) {
     x.write(whole);
   }
 
@@ -458,7 +478,7 @@ class LocBlock1DDom {
   //
   // how to write out this locale's indices
   //
-  proc writeThis(x:Writer) {
+  proc writeThis(x) {
     x.write(myBlock);
   }
 
@@ -530,6 +550,12 @@ class Block1DArr {
         locArr(localeIdx) = new LocBlock1DArr(idxType, elemType, dom.locDoms(localeIdx));
   }
 
+  proc deinit() {
+    for loc in dom.dist.targetLocDom do
+      on dom.dist.targetLocs(loc) do
+        delete locArr(loc);
+  }
+
 
   // GLOBAL ARRAY INTERFACE:
 
@@ -576,7 +602,7 @@ class Block1DArr {
   //
   // how to print out the whole array, sequentially
   //
-  proc writeThis(x: Writer) {
+  proc writeThis(x) {
     var first = true;
     for loc in dom.dist.targetLocDom {
       // May want to do something like the following:
@@ -672,7 +698,7 @@ class LocBlock1DArr {
   //
   // prints out this locale's piece of the array
   //
-  proc writeThis(x: Writer) {
+  proc writeThis(x) {
     // May want to do something like the following:
     //      on loc {
     // but it causes deadlock -- see writeThisUsingOn.chpl

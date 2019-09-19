@@ -20,11 +20,11 @@ class Node {
   var pred : Node = nil;
   var disc,fini : int = -1;
 
-  proc writeThis(w: Writer){
+  proc writeThis(w){
     w.write("{",name,"}");
   }
 
-  proc writeFancy(w: Writer){
+  proc writeFancy(w){
     w.write("{",name," : ",color);
     if(pred != nil) then w.write("^",pred.name);
     if(disc >= 0) then w.write(" ",disc);
@@ -43,7 +43,7 @@ class Edge {
   var dst: Node;
   var reversed: bool = false;
   var kind: edgeKind = edgeKind.GRAPH;
-  proc writeThis(w: Writer){
+  proc writeThis(w){
     var ec:string;
     select(kind) {
     when edgeKind.GRAPH do ec = "--->";
@@ -136,18 +136,19 @@ proc Edge.read(infile: file){
 */
 
 class UndirectedEdge : Edge {
-  proc writeThis(w: Writer){
+  proc writeThis(w){
      w.write(src," -- ",dst);
   }
 }
 
 class Graph {
 
-  proc Graph(nd:domain(1),ed:domain(1), ns, es){
+  proc init(nd:domain(1),ed:domain(1), ns, es){
     NodeDom = nd;
     EdgeDom = ed;
     nodes = ns;
     edges = es;
+    this.initDone();
     writeln("Graph constructor");
     preprocess();
   }
@@ -157,18 +158,18 @@ class Graph {
   var nodes : [NodeDom] Node;
   var edges : [EdgeDom] Edge;
 
-  var inEdges : [NodeDom] list(Edge) = nil;
+  var inEdges : [NodeDom] list(Edge);
   proc inEdges(n:Node) ref { return inEdges[n.id]; }
   proc inEdges(i:index(NodeDom)) ref { return inEdges[i]; }
 
-  var outEdges : [NodeDom] list(Edge) = nil;
+  var outEdges : [NodeDom] list(Edge);
   proc outEdges(n:Node) ref { return outEdges[n.id]; }
   proc outEdges(i:index(NodeDom)) ref { return outEdges[i]; }
 
 
 
-  var adjacent : [NodeDom] list(int) = nil;
-  var undir_adjacent: [NodeDom] list(int) = nil;
+  var adjacent : [NodeDom] list(int);
+  var undir_adjacent: [NodeDom] list(int);
 
   var __slack : [EdgeDom] int = -1;
   proc slack(e:Edge) ref { return slack[e.id]; }

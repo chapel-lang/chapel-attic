@@ -1,4 +1,4 @@
-# Copyright 2004-2014 Cray Inc.
+# Copyright 2004-2018 Cray Inc.
 # Other additional copyright holders may be indicated within.
 #
 # The entirety of this work is licensed under the Apache License,
@@ -15,39 +15,60 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-AST_SRCS = \
-	alist.cpp \
-	astutil.cpp \
-	baseAST.cpp \
-	bb.cpp \
-	build.cpp \
-	checkAST.cpp \
-	dominator.cpp\
-	expr.cpp \
-	iterator.cpp \
-	flags.cpp \
-	primitive.cpp \
-	stmt.cpp \
-	symbol.cpp \
-	type.cpp \
-	view.cpp \
-                             \
-        LoopStmt.cpp         \
-                             \
-        WhileStmt.cpp        \
-        WhileDoStmt.cpp      \
-        DoWhileStmt.cpp      \
-        CForLoop.cpp         \
-        ForLoop.cpp          \
-        ParamForLoop.cpp     \
-                             \
-        AstLogger.cpp        \
-        AstVisitor.cpp       \
-        AstDump.cpp          \
-        AstDumpToHtml.cpp    \
-        AstDumpToNode.cpp    \
-                             \
-        CollapseBlocks.cpp
+AST_SRCS =                                          \
+           AggregateType.cpp                        \
+           alist.cpp                                \
+           astutil.cpp                              \
+           baseAST.cpp                              \
+           bb.cpp                                   \
+           build.cpp                                \
+           CatchStmt.cpp                            \
+           CallExpr.cpp                             \
+           checkAST.cpp                             \
+           DeferStmt.cpp                            \
+           dominator.cpp                            \
+           expr.cpp                                 \
+           foralls.cpp                              \
+           flags.cpp                                \
+           FnSymbol.cpp                             \
+           ForallStmt.cpp                           \
+           iterator.cpp                             \
+           ModuleSymbol.cpp                         \
+           PartialCopyData.cpp                      \
+           primitive.cpp                            \
+           stmt.cpp                                 \
+           symbol.cpp                               \
+           TryStmt.cpp                              \
+           type.cpp                                 \
+           UseStmt.cpp                              \
+           view.cpp                                 \
+           wellknown.cpp                            \
+                                                    \
+           LoopStmt.cpp                             \
+                                                    \
+           WhileStmt.cpp                            \
+           WhileDoStmt.cpp                          \
+           DoWhileStmt.cpp                          \
+           CForLoop.cpp                             \
+           ForLoop.cpp                              \
+           ParamForLoop.cpp                         \
+                                                    \
+           AstVisitor.cpp                           \
+           AstVisitorTraverse.cpp                   \
+           AstLogger.cpp                            \
+           AstDump.cpp                              \
+           AstDumpToHtml.cpp                        \
+           AstDumpToNode.cpp                        \
+                                                    \
+           AstCount.cpp                             \
+                                                    \
+           AstPrintDocs.cpp                         \
+                                                    \
+           AstToText.cpp                            \
+                                                    \
+           CollapseBlocks.cpp                       \
+           TransformLogicalShortCircuit.cpp
+
 
 SVN_SRCS = $(AST_SRCS)
 SRCS = $(SVN_SRCS)

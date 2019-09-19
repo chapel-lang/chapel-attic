@@ -1,5 +1,5 @@
 /* The Computer Language Benchmarks Game
-  http://shootout.alioth.debian.org/
+  http://benchmarksgame.alioth.debian.org
 
   contributed by Paolo Bonzini & Sean Bartlett
   modified by Michael Mellor
@@ -36,6 +36,8 @@ proc pidigits
   var k, i, m: uint;
   var d: int;
 
+  param digitsPerLine = 10;
+
   mpz_init(tmp1);
   mpz_init(tmp2);
   mpz_init_set_ui(numer, 1);
@@ -56,10 +58,17 @@ proc pidigits
 
     // Do some format control.
     i += 1;
-    m = i % 10;
+    m = i % digitsPerLine;
     if m == 0 then writeln("\t:", i);
     if i >= n then break;
     eliminate_digit(d:uint);
+  }
+
+  const leftover = n%digitsPerLine;
+  if (leftover) {
+    for leftover..digitsPerLine do
+      write(" ");
+    writeln("\t:", n);
   }
 
   mpz_clear(denom);
@@ -71,12 +80,14 @@ proc pidigits
 
 proc next_term(k:uint)
 {
-  var y2:uint = 2 * k + 1;
+  var y2_tmp:uint = 2 * k + 1,
+    y2 = y2_tmp.safeCast(c_ulong),
+    ck = k.safeCast(c_ulong);
 
   mpz_mul_2exp(tmp1, numer, 1:c_ulong);
   mpz_add(accum, accum, tmp1);		// accum <- accum + numer * 2
   mpz_mul_ui(accum, accum, y2);		// accum <- accum * (2k+1)
-  mpz_mul_ui(numer, numer, k);		// numer <- numer * k
+  mpz_mul_ui(numer, numer, ck);		// numer <- numer * k
   mpz_mul_ui(denom, denom, y2);		// denom <- denom * (2k+1)
 }
 
@@ -102,7 +113,7 @@ proc extract_digit : int
 
 proc eliminate_digit(d: uint)
 {
-  mpz_submul_ui(accum, denom, d);
+  mpz_submul_ui(accum, denom, d.safeCast(c_ulong));
   mpz_mul_ui(accum, accum, 10);
   mpz_mul_ui(numer, numer, 10);
 }

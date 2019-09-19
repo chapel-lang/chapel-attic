@@ -20,6 +20,12 @@ are handled within forall statements and expressions.
 controlling default data parallelism.
 \end{itemize}       
 
+Data-parallel constructs may result in accesses to the same variable
+from different tasks, possibly due to aliasing using
+\chpl{ref} argument intents or forall intents, among others.
+Such accesses are subject to the Memory Consistency Model
+(\rsec{Memory_Consistency_Model}).
+
 \section{The Forall Statement}
 \label{Forall}
 \index{forall@\chpl{forall} (see also statements, forall)}
@@ -77,7 +83,7 @@ iterations to tasks.
 
 This concept will be formalized in future drafts of the Chapel
 specification; for now, please refer
-to \chpl{CHPL_HOME/examples/primers/leaderfollower.chpl} for a brief
+to \chpl{CHPL_HOME/examples/primers/parIters.chpl} for a brief
 introduction or to \emph{User-Defined Parallel Zippered Iterators in
 Chapel}, published in the PGAS 2011 workshop.
 
@@ -126,7 +132,7 @@ Zipper iteration has the same semantics as described
 in~\rsec{Zipper_Iteration} and~\rsec{Parallel_Iterators} for parallel
 iteration.
 
-
+\pagebreak
 \section{The Forall Expression}
 \label{Forall_Expressions}
 \index{data parallelism!forall expressions}
@@ -236,7 +242,7 @@ within the forall statement or expression implicitly refer
 to the corresponding formal argument of the task function
 or the leader iterator.
 
-Each formal argument of a task function or iterator has the blank
+Each formal argument of a task function or iterator has the default
 intent by default.  For variables of primitive, enum, class, record
 and union types, this has the effect of capturing the value of the
 variable at task creation time.  Within the lexical scope of the
@@ -257,15 +263,16 @@ Forall intents affect those tasks in the same way that task intents
 affect the behavior of a task construct such as a \chpl{coforall} loop.
 \end{rationale}
 
-\begin{future}
-We would like to introduce "reduction" intents
-that will let us implement reductions using forall intents.
-\end{future}
-
-\begin{future}
-As with task intents, we may want to disallow some intents,
-for example \chpl{inout} and \chpl{out}.
-\end{future}
+\begin{craychapel}
+To reduce values across iterations of a forall or coforall loop,
+"reduce" intents can be used.
+They are described in the \emph{Reduce Intents} page
+under \emph{Technical Notes}
+in Cray Chapel online documentation here:
+\\ %formatting
+\mbox{$$ $$ $$} %indent
+\url{https://chapel-lang.org/docs/latest/}
+\end{craychapel}
 
 
 \section{Promotion}
@@ -279,8 +286,10 @@ ranges, or the yielded types of the iterators can be resolved to the
 type of the argument.  The rules of when an overloaded function can be
 promoted are discussed in~\rsec{Function_Resolution}.
 
-In addition to scalar functions, operators and casts are also
-promoted.
+Functions that can be promoted include procedures, operators, casts,
+and methods. Also note that since class and record field access
+is performed with getter methods~(\rsec{Getter_Methods}), field
+access can also be promoted.
 
 \begin{chapelexample}{promotion.chpl}
 Given the array
@@ -307,6 +316,37 @@ for s in square(A) do writeln(s);
 \end{chapeloutput}
 \end{chapelexample}
 
+\begin{chapelexample}{field-promotion.chpl}
+Given an array of points, such as \chpl{A} defined below:
+\begin{chapel}
+record Point {
+  var x: real;
+  var y: real;
+}
+var A: [1..5] Point = [i in 1..5] new Point(x=i, y=i);
+\end{chapel}
+the following statement will create a new array consisting of
+the \chpl{x} field value for each value in A:
+\begin{chapel}
+var X = A.x;
+\end{chapel}
+and the following call will set the \chpl{y} field values for each
+element in A to 1.0:
+\begin{chapel}
+A.y = 1.0;
+\end{chapel}
+
+\begin{chapelnoprint}
+writeln(X);
+writeln(A);
+\end{chapelnoprint}
+\begin{chapeloutput}
+1.0 2.0 3.0 4.0 5.0
+(x = 1.0, y = 1.0) (x = 2.0, y = 1.0) (x = 3.0, y = 1.0) (x = 4.0, y = 1.0) (x = 5.0, y = 1.0)
+\end{chapeloutput}
+\end{chapelexample}
+
+
 %%
 %% sungeun: 10/2011
 %% I axed the following paragraph because comments from the peanut
@@ -323,6 +363,46 @@ for s in square(A) do writeln(s);
 
 Whole array operations are a form of promotion as applied to operators
 rather than functions.
+
+When a call is promoted and that call relied upon default
+arguments~(\rsec{Default_Values}), the default argument expression can
+be evaluated many times. For example:
+
+\begin{chapelexample}{promotes-default.chpl}
+\begin{chapel}
+  var counter: atomic int;
+
+  proc nextCounterValue():int {
+    var i = counter.fetchAdd(1);
+    return i;
+  }
+
+  proc assignCounter(ref x:int, counter=nextCounterValue()) {
+    x = counter;
+  }
+\end{chapel}
+
+Here the function assignCounter has a default argument
+providing the next value from an atomic counter as the value to set.
+
+\begin{chapel}
+  var A: [1..5] int;
+  assignCounter(A);
+\end{chapel}
+
+The assignCounter call uses both the default argument for counter as well
+as promotion. When these features are combined, the default argument
+will be evaluated once per promoted element. As a result, after this
+command, A will contain the elements 0 1 2 3 4 in some order.
+
+\begin{chapelnoprint}
+writeln(A.sorted());
+\end{chapelnoprint}
+\begin{chapeloutput}
+0 1 2 3 4
+\end{chapeloutput}
+\end{chapelexample}
+
 
 
 \subsection{Zipper Promotion}
@@ -559,6 +639,9 @@ in Chapter~\ref{User_Defined_Reductions_and_Scans}.
 \label{data_parallel_knobs}
 \index{data parallelism!knobs for default data parallelism}
 \index{data parallelism!configuration constants}
+\index{dataParTasksPerLocale@\chpl{dataParTasksPerLocale}}
+\index{dataParIgnoreRunningTasks@\chpl{dataParIgnoreRunningTasks}}
+\index{dataParMinGranularity@\chpl{dataParMinGranularity}}
 
 The following configuration constants are provided to control the
 degree of data parallelism over ranges, default domains, and default
@@ -597,5 +680,4 @@ the specified value.
 For distributed domains and arrays that have these same configuration
 constants (\eg, Block and Cyclic distributions), these same
 module level configuration constants are used to specify their
-default behavior within each locale
-(see \rsec{Block_Dist} and \rsec{Cyclic_Dist}).
+default behavior within each locale.

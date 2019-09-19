@@ -1,0 +1,3 @@
+assign-param-segfault.chpl:6: In initializer 'Bar':
+assign-param-segfault.chpl:10: error: illegal lvalue in assignment
+assign-param-segfault.chpl:10: error: parameter set multiple times

@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2014 Cray Inc.
+ * Copyright 2004-2018 Cray Inc.
  * Other additional copyright holders may be indicated within.
  * 
  * The entirety of this work is licensed under the Apache License,
@@ -21,21 +21,72 @@
 // Private Distribution, Domain, and Array
 //  Defines PrivateSpace, an instance of PrivateDom
 //
+/*
+This Private distribution maps each index ``i``
+between ``0`` and ``numLocales-1`` to ``Locales[i]``.
+
+The index set of a domain distributed over a Private distribution
+is always ``0..numLocales-1``, regardless of the domain's rank,
+and cannot be changed.
+
+The following domain is available as a convenience,
+so user programs do not need to declare their own:
+
+  .. code-block:: chapel
+
+    const PrivateSpace: domain(1) dmapped Private();
+
+
+**Example**
+
+The following code declares a Private-distributed array ``A``.
+The `forall` loop visits each locale and sets the array element
+corresponding to that locale to that locale's number of cores.
+
+  .. code-block:: chapel
+
+    var A: [PrivateSpace] int;
+    forall a in A do
+      a = here.numPUs();
+
+
+**Data-Parallel Iteration**
+
+A `forall` loop over a Private-distributed domain or array
+runs a single task on each locale.
+That task executes the loop's iteration corresponding to
+that locale's index in the ``Locales`` array.
+
+
+**Limitations**
+
+Domains and arrays distributed over this distribution
+do not provide some standard domain/array functionality.
+
+This distribution may perform unnecessary communication
+between locales.
+*/
 class Private: BaseDist {
-  proc dsiNewRectangularDom(param rank: int, type idxType, param stridable: bool) {
-    return new PrivateDom(rank=rank, idxType=idxType, stridable=stridable);
+  proc dsiNewRectangularDom(param rank: int, type idxType, param stridable: bool, inds) {
+    for i in inds do
+      if i.size != 0 then
+        halt("Tried to create a privateDom with a specific index set");
+    return new PrivateDom(rank=rank, idxType=idxType, stridable=stridable, dist=this);
   }
 
-  proc writeThis(x: Writer) {
-    x.writeln("Private Distribution");
+  proc writeThis(x) {
+    x <~> "Private Distribution\n";
   }
+  // acts like a singleton
+  proc dsiClone() return this;
+
+  proc trackDomains() param return false;
+  proc dsiTrackDomains()    return false;
+
+  proc singleton() param return true;
 }
 
 class PrivateDom: BaseRectangularDom {
-  param rank: int;
-  type idxType;
-  param stridable: bool;
-  var pid: int = -1;
   var dist: Private;
 
   iter these() { for i in 0..numLocales-1 do yield i; }
@@ -53,7 +104,7 @@ class PrivateDom: BaseRectangularDom {
       yield i;
   }
 
-  proc dsiSerialWrite(x: Writer) { x.write("Private Domain"); }
+  proc dsiSerialWrite(x) { x <~> "Private Domain"; }
 
   proc dsiBuildArray(type eltType)
     return new PrivateArr(eltType=eltType, rank=rank, idxType=idxType, stridable=stridable, dom=this);
@@ -62,8 +113,12 @@ class PrivateDom: BaseRectangularDom {
   proc dsiLow return 0;
   proc dsiHigh return numLocales-1;
   proc dsiStride return 0;
-  proc dsiSetIndices(x: domain) { compilerError("cannot reassign private domain"); }
+  proc dsiSetIndices(x: domain) { halt("cannot reassign private domain"); }
   proc dsiGetIndices() { return {0..numLocales-1}; }
+
+  proc dsiAssignDomain(rhs: domain, lhsPrivate:bool) {
+    halt("cannot reassign private domain");
+  }
 
   proc dsiRequiresPrivatization() param return true;
   proc linksDistribution() param return false;
@@ -79,16 +134,12 @@ class PrivateDom: BaseRectangularDom {
   proc dsiReprivatize(other, reprivatizeData) { }
 
   proc dsiMember(i) return 0 <= i && i <= numLocales-1;
+  proc dsiMyDist() return dist;
 }
 
-class PrivateArr: BaseArr {
-  type eltType;
-  param rank: int;
-  type idxType;
-  param stridable: bool;
+class PrivateArr: BaseRectangularArr {
   var dom: PrivateDom(rank, idxType, stridable);
   var data: eltType;
-  var pid: int = -1;
 }
 
 proc PrivateArr.dsiGetBaseDom() return dom;
@@ -140,12 +191,14 @@ iter PrivateArr.these(param tag: iterKind, followThis) ref where tag == iterKind
     yield dsiAccess(i);
 }
 
-proc PrivateArr.dsiSerialWrite(x: Writer) {
+proc PrivateArr.dsiSerialWrite(x) {
   var first: bool = true;
   for i in dom {
-    if first then first = !first; else write(" ");
-    write(dsiAccess(i));
+    if first then first = !first; else x <~> " ";
+    x <~> dsiAccess(i);
   }
 }
 
+// TODO: Fix 'new Private()' leak -- Discussed in #6726
 const PrivateSpace: domain(1) dmapped new dmap(new Private());
+

@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2014 Cray Inc.
+ * Copyright 2004-2018 Cray Inc.
  * Other additional copyright holders may be indicated within.
  *
  * The entirety of this work is licensed under the Apache License,
@@ -24,31 +24,15 @@
 #include "map.h"
 
 #include <cstdio>
+#include <map>
+#include <string>
 
 class Timer;
-
-
-// For versions of bison beyond 2.3, this struct and the following
-// two defines should be moved back into chapel.ypp into a %code requires
-// block so that YYLTYPE is near the YYLLOC_DEFAULT definition.
-struct YYLTYPE {
-  int   first_line;
-  int   first_column;
-  int   last_line;
-  int   last_column;
-  char* comment;
-};
-
-#define YYLTYPE_IS_DECLARED 1
-#define YYLTYPE_IS_TRIVIAL  1
-
-extern const char *chplBinaryName;
 
 extern int  instantiation_limit;
 
 // optimization control flags
 extern bool fFastFlag;
-extern int  fConditionalDynamicDispatchLimit;
 extern bool fNoBoundsChecks;
 extern bool fNoCopyPropagation;
 extern bool fNoDeadCodeElimination;
@@ -58,38 +42,60 @@ extern bool fNoInlineIterators;
 extern bool fNoloopInvariantCodeMotion;
 extern bool fNoInline;
 extern bool fNoLiveAnalysis;
+extern bool fNoFormalDomainChecks;
 extern bool fNoLocalChecks;
 extern bool fNoNilChecks;
 extern bool fNoStackChecks;
+extern bool fNoCastChecks;
+extern bool fNoDivZeroChecks;
+extern bool fMungeUserIdents;
 extern bool fEnableTaskTracking;
 extern bool fLLVMWideOpt;
 
 extern bool fNoRemoteValueForwarding;
+extern bool fNoRemoteSerialization;
 extern bool fNoRemoveCopyCalls;
 extern bool fNoScalarReplacement;
 extern bool fNoTupleCopyOpt;
 extern bool fNoOptimizeLoopIterators;
+extern bool fNoVectorize;
 extern bool fNoPrivatization;
 extern bool fNoOptimizeOnClauses;
 extern bool fNoRemoveEmptyRecords;
+extern bool fNoInferLocalFields;
+extern bool fRemoveUnreachableBlocks;
+extern bool fReplaceArrayAccessesWithRefTemps;
 extern int  optimize_on_clause_limit;
 extern int  scalar_replace_limit;
+extern int  inline_iter_yield_limit;
 extern int  tuple_copy_limit;
 
+
 extern bool report_inlining;
+
+// Chapel Envs
+bool useDefaultEnv(std::string key);
+
+extern std::map<std::string, const char*> envMap;
+
 extern char CHPL_HOME[FILENAME_MAX+1];
+extern char CHPL_RUNTIME_LIB[FILENAME_MAX+1];
+extern char CHPL_RUNTIME_INCL[FILENAME_MAX+1];
+extern char CHPL_THIRD_PARTY[FILENAME_MAX+1];
 
 extern const char* CHPL_HOST_PLATFORM;
 extern const char* CHPL_HOST_COMPILER;
 extern const char* CHPL_TARGET_PLATFORM;
 extern const char* CHPL_TARGET_COMPILER;
+extern const char* CHPL_ORIG_TARGET_COMPILER;
 extern const char* CHPL_TARGET_ARCH;
+extern const char* CHPL_RUNTIME_ARCH;
+extern const char* CHPL_TARGET_BACKEND_ARCH;
 extern const char* CHPL_LOCALE_MODEL;
 extern const char* CHPL_COMM;
 extern const char* CHPL_COMM_SUBSTRATE;
 extern const char* CHPL_GASNET_SEGMENT;
 extern const char* CHPL_TASKS;
-extern const char* CHPL_THREADS;
 extern const char* CHPL_LAUNCHER;
 extern const char* CHPL_TIMERS;
 extern const char* CHPL_MEM;
@@ -102,36 +108,38 @@ extern const char* CHPL_REGEXP;
 extern const char* CHPL_WIDE_POINTERS;
 extern const char* CHPL_LLVM;
 extern const char* CHPL_AUX_FILESYS;
-extern int num_chpl_env_vars;
-extern const char* chpl_env_vars[];
-extern const char* chpl_env_var_names[];
+extern const char* CHPL_UNWIND;
+extern const char* CHPL_RUNTIME_SUBDIR;
+extern const char* CHPL_LAUNCHER_SUBDIR;
 
 extern bool  printPasses;
 extern FILE* printPassesFile;
 
-// Set true if CHPL_WIDE_POINTERS==struct.
-// In that case, the code generator emits structures
-// for wide pointers. Otherwise, wide pointers are
-// packed into a wide pointer type.
-extern bool widePointersStruct;
-
 extern char fExplainCall[256];
 extern int  explainCallID;
+extern int  breakOnResolveID;
+extern bool fDenormalize;
 extern char fExplainInstantiation[256];
 /// If true, then print additional (disambiguation) information about
 /// resolution.
 extern bool fExplainVerbose;
+extern bool fParseOnly;
+extern bool fPrintCallGraph;
 extern bool fPrintCallStackOnError;
 extern bool fPrintIDonError;
 extern bool fPrintModuleResolution;
-extern bool fCLineNumbers;
 extern bool fPrintEmittedCodeSize;
 extern char fPrintStatistics[256];
 extern bool fPrintDispatch;
+extern bool fPrintUnusedFns;
+extern bool fPrintUnusedInternalFns;
 extern bool fGenIDS;
 extern bool fLocal;
+extern bool fIgnoreLocalClasses;
+extern bool fUserDefaultInitializers;
+extern bool fLifetimeChecking;
 extern bool fHeterogeneous;
-extern bool fieeefloat;
+extern int  ffloatOpt;
 extern int  fMaxCIdentLen;
 
 extern bool llvmCodegen;
@@ -143,6 +151,7 @@ extern bool fCacheRemote;
 // with clang and then added to the enclosing module's scope
 extern bool externC;
 extern char breakOnCodegenCname[256];
+extern int breakOnCodegenID;
 
 enum { LS_DEFAULT=0, LS_STATIC, LS_DYNAMIC };
 
@@ -152,19 +161,14 @@ extern int  debugParserLevel;
 extern int  debugShortLoc;
 extern bool fLibraryCompile;
 extern bool fUseNoinit;
+extern bool fNoUserConstructors;
 extern bool no_codegen;
 extern bool developer;
 extern bool fVerify;
 extern int  num_constants_per_variable;
 extern bool printCppLineno;
 
-extern bool fDocs;
-extern bool fDocsAlphabetize;
-extern char fDocsCommentLabel[256];
-extern char fDocsFolder[256];
-extern bool fDocsTextOnly;
 extern char defaultDist[256];
-extern char mainModuleName[256];
 extern bool printSearchDirs;
 extern bool printModuleFiles;
 extern bool ignore_warnings;
@@ -174,22 +178,19 @@ extern int  squelch_header_errors;
 extern bool fWarnConstLoops;
 
 extern bool fReportOptimizedLoopIterators;
+extern bool fReportInlinedIterators;
+extern bool fReportOrderIndependentLoops;
 extern bool fReportOptimizedOn;
 extern bool fReportPromotion;
 extern bool fReportScalarReplace;
 extern bool fReportDeadBlocks;
 extern bool fReportDeadModules;
 
+extern bool fPermitUnhandledModuleErrors;
+
 extern bool debugCCode;
 extern bool optimizeCCode;
 extern bool specializeCCode;
-
-extern bool fEnableTimers;
-extern Timer timer1;
-extern Timer timer2;
-extern Timer timer3;
-extern Timer timer4;
-extern Timer timer5;
 
 extern bool fNoMemoryFrees;
 extern int  numGlobalsOnHeap;
@@ -206,8 +207,14 @@ extern char compileVersion[64];
 // the compiler but breaks the language!
 extern bool fMinimalModules;
 
+// Set to true if we want to enable incremental compilation.
+extern bool fIncrementalCompilation;
+
 // Set to true if we want to use the experimental
-// Interactive Programming Environmment (IPE) mode.
+// Interactive Programming Environment (IPE) mode.
 extern bool fUseIPE;
+
+// LLVM flags (-mllvm)
+extern std::string llvmFlags;
 
 #endif

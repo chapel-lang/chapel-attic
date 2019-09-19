@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2014 Cray Inc.
+ * Copyright 2004-2018 Cray Inc.
  * Other additional copyright holders may be indicated within.
  * 
  * The entirety of this work is licensed under the Apache License,
@@ -24,6 +24,47 @@
 use DimensionalDist2D;
 
 
+/*
+This Block dimension specifier is for use with the
+:class:`DimensionalDist2D` distribution.
+
+It specifies the mapping of indices in its dimension
+that would be produced by a 1D :class:`~BlockDist.Block` distribution.
+
+**Constructor Arguments**
+
+The following ``BlockDim`` class constructors are available:
+
+  .. code-block:: chapel
+
+    proc BlockDim.BlockDim(
+      numLocales,
+      boundingBoxLow,
+      boundingBoxHigh,
+      type idxType = boundingBoxLow.type)
+
+    proc BlockDim.BlockDim(
+      numLocales: int,
+      boundingBox: range(?),
+      type idxType = boundingBox.idxType)
+
+.. Is there also the compiler-generated constructor:
+   proc BlockDim.BlockDim(type idxType, numLocales: int, bbStart, bbLength)
+   If so, do we want to list it here?
+   Ideally, the compiler will not generate that constructor
+   since user-defined constructors are provided
+
+The ``numLocales`` argument specifies the number of locales
+that this dimension's bounding box is to be distributed over.
+
+The ``boundingBoxLow`` and ``boundingBoxHigh`` arguments are
+a convenient replacement for the ``boundingBox`` argument,
+which specifies the bounding box in this dimension.
+
+The ``idxType``, whether provided or inferred, must match
+the index type of the domains "dmapped" using the corresponding
+``DimensionalDist2D`` distribution.
+*/
 class BlockDim {
   // the type of bbStart, bbLength
   // (also (ab)used as the idxType of the domains created over this dist.)
@@ -141,26 +182,13 @@ proc BlockDim.BlockDim(numLocales, boundingBoxLow, boundingBoxHigh, type idxType
 proc BlockDim.toString()
   return "BlockDim(" + numLocales:string + ", " + boundingBox:string + ")";
 
-proc BlockDim.dsiCreateReindexDist1d(newRange: range(?), oldRange: range(?)) {
-  const oldDesc = this;
-  if oldRange.stride != newRange.stride then
-    halt("reindexing from ", oldRange, " to ", newRange,
-         " is not supported by ", oldDesc.toString,
-         " due to a change in stride");
-  // TODO: this is overflow-oblivious. See Block.dsiCreateReindexDist().
-  const delta = newRange.first - oldRange.first;
-  return new BlockDim(idxType     = oldDesc.idxType,
-                   numLocales  = oldDesc.numLocales,
-                   boundingBox = oldDesc.boundingBox + delta);
-}
-
 proc BlockDim.dsiNewRectangularDom1d(type idxType, param stridable: bool,
                                   type stoIndexT)
 {
   // ignore stoIndexT - all we need is for other places to work out
   if idxType != this.idxType then
-    compilerError("The index type ", typeToString(idxType),
-                  " does not match the index type ",typeToString(this.idxType),
+    compilerError("The index type ", idxType:string,
+                  " does not match the index type ",this.idxType:string,
                   " of the 'BlockDim' 1-d distribution");
   return new Block1dom(idxType = idxType, stridable = stridable, pdist = this);
 }
@@ -221,31 +249,6 @@ proc Block1dom._dsiComputeMyRange(locId): rangeT {
 proc Block1locdom.dsiSetLocalIndices1d(globDD, locId: locIdT) {
   myRange = globDD._dsiComputeMyRange(locId);
   return myRange;
-}
-
-/////////////////////////////////
-
-proc Block1dom.dsiBuildRectangularDom1d(DD,
-                                   param stridable:bool,
-                                   rangeArg: range(idxType,
-                                                   BoundedRangeType.bounded,
-                                                   stridable))
-{
-  // There does not seem to be any optimizations from merging the two calls.
-  type dummy_stoIndexT = int;
-  const result = DD.dsiNewRectangularDom1d(this.idxType, stridable,
-                                           dummy_stoIndexT);
-  result.dsiSetIndices1d(rangeArg);
-  return result;
-}
-
-proc Block1locdom.dsiBuildLocalDom1d(newGlobDD, locId: locIdT) {
-  type  old_stoIndexT = this.myRange.idxType; // essentially 'this.stoIndexT'
-
-  const newLocDD = newGlobDD.dsiNewLocalDom1d(old_stoIndexT, locId);
-  const newStoRng = newLocDD.dsiSetLocalIndices1d(newGlobDD, locId);
-
-  return (newLocDD, newStoRng);
 }
 
 /////////////////////////////////

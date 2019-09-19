@@ -15,7 +15,7 @@ var jmat2, kmat2, jmat2T, kmat2T : [matD] elemType;
 class blockIndices {
   const ilo, ihi, jlo, jhi, klo, khi, llo, lhi : int;
   
-  proc blockIndices(ilo, ihi, jlo, jhi, klo, khi, llo, lhi) {
+  proc init(ilo, ihi, jlo, jhi, klo, khi, llo, lhi) {
     this.ilo = ilo;
     this.ihi = ihi;
     this.jlo = jlo;
@@ -23,7 +23,7 @@ class blockIndices {
     this.klo = klo;
     this.khi = khi;
     this.llo = llo;
-    this.lhi = lhi;	 
+    this.lhi = lhi;
   }
 }
 
@@ -46,6 +46,7 @@ proc buildjk() {
               bI = task;
             }
           }
+          delete bI;
       /*		
           task = bI;
         //task = new blockIndices(0,0,0,0,0,0,0,0);
@@ -137,12 +138,14 @@ proc buildjk_atom4(bI) {
     }
   }
   
-  atomic jmat2(ijD) += jij;
-  atomic jmat2(klD) += jkl;
-  atomic kmat2(ikD) += kik;
-  atomic kmat2(ilD) += kil;
-  atomic kmat2(jkD) += kjk;
-  atomic kmat2(jlD) += kjl;
+  jmat2(ijD) += jij;
+  jmat2(klD) += jkl;
+  kmat2(ikD) += kik;
+  kmat2(ilD) += kil;
+  kmat2(jkD) += kjk;
+  kmat2(jlD) += kjl;
+
+  delete bI;
 }
 
 proc g(i,j,k,l) {

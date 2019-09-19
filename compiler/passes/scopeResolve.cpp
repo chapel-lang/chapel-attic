@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2014 Cray Inc.
+ * Copyright 2004-2018 Cray Inc.
  * Other additional copyright holders may be indicated within.
  *
  * The entirety of this work is licensed under the Apache License,
@@ -17,48 +17,40 @@
  * limitations under the License.
  */
 
-// scopeResolve.cpp
-//
-
 #include "scopeResolve.h"
 
 #include "astutil.h"
 #include "build.h"
-#include "expr.h"
+#include "CatchStmt.h"
+#include "DeferStmt.h"
+#include "clangUtil.h"
+#include "driver.h"
+#include "externCResolve.h"
+#include "ForallStmt.h"
+#include "initializerRules.h"
 #include "LoopStmt.h"
 #include "passes.h"
-#include "stmt.h"
+#include "ResolveScope.h"
+#include "stlUtil.h"
 #include "stringutil.h"
-#include "symbol.h"
+#include "TryStmt.h"
+#include "visibleFunctions.h"
 
+#include <algorithm>
 #include <map>
+#include <set>
 
 #ifdef HAVE_LLVM
+// TODO: Remove uses of old-style collectors from LLVM-specific code.
+#include "oldCollectors.h"
 #include "llvm/ADT/SmallSet.h"
 #endif
 
-typedef std::map<const char*, Symbol*>           SymbolTableEntry;
-typedef std::map<BaseAST*,    SymbolTableEntry*> SymbolTable;
-
-
-//
-// The symbolTable maps BaseAST* pointers to entries based on scope
-// definitions.  The following BaseAST subtypes define scopes:
-//
-//   FnSymbol: defines a scope mainly for its arguments but also for
-//   identifiers that are defined via query-expressions, e.g., 't' in
-//   'def f(x: ?t)'
-//
-//   TypeSymbol: defines a scope for EnumType and AggregateType types for
-//   the enumerated type constants or the class/record fields
-//
-//   BlockStmt: defines a scope if the block is a normal block
-//   for any locally defined symbols
-//
-// Each entry contains a map from canonicalized string pointers to the
-// symbols defined in the scope.
-//
-static SymbolTable symbolTable;
+/************************************* | **************************************
+*                                                                             *
+*                                                                             *
+*                                                                             *
+************************************** | *************************************/
 
 //
 // The moduleUsesCache is a cache from blocks with use-statements to
@@ -69,40 +61,45 @@ static SymbolTable symbolTable;
 // Note that this caching is not enabled until after use expression
 // have been resolved.
 //
-static std::map<BlockStmt*,Vec<ModuleSymbol*>*> moduleUsesCache;
-static bool enableModuleUsesCache = false;
+static std::map<BlockStmt*, Vec<UseStmt*>*>   moduleUsesCache;
+static bool                                   enableModuleUsesCache = false;
 
-//
-// The aliasFieldSet is a set of names of fields for which arrays may
-// be passed in by named argument as aliases, as in new C(A=>GA) (see
-// test/arrays/deitz/test_array_alias_field.chpl).
-//
-static Vec<const char*> aliasFieldSet;
+// To avoid duplicate user warnings in checkIdInsideWithClause().
+// Using pair<> instead of astlocT to avoid defining operator<.
+typedef std::pair< std::pair<const char*,int>, const char* >  WFDIWmark;
+static std::set< std::pair< std::pair<const char*,int>, const char* > > warnedForDotInsideWith;
 
-static void     addToSymbolTable(Vec<DefExpr*>& defs);
-static void     processImportExprs();
-static void     addClassToHierarchy(AggregateType* ct);
+static void          addToSymbolTable();
 
-static void addRecordDefaultConstruction();
+static void          addToSymbolTable(DefExpr* def);
 
-static void     resolveGotoLabels();
-static void     resolveUnresolvedSymExprs();
-static void     resolveEnumeratedTypes();
-static void     destroyTable();
-static void     destroyModuleUsesCaches();
+static void          scopeResolve(ModuleSymbol*       module,
+                                  const ResolveScope* root);
 
-static void     renameDefaultTypesToReflectWidths();
+static void          processImportExprs();
 
-static Symbol*  lookup(BaseAST* scope, const char* name);
+static void          resolveGotoLabels();
 
-static BaseAST* getScope(BaseAST* ast);
+static void          resolveUnresolvedSymExprs();
+
+static void          resolveEnumeratedTypes();
+
+static void          destroyModuleUsesCaches();
+
+static void          renameDefaultTypesToReflectWidths();
+
+static bool          lookupThisScopeAndUses(const char*           name,
+                                            BaseAST*              context,
+                                            BaseAST*              scope,
+                                            std::vector<Symbol*>& symbols);
+
+static ModuleSymbol* definesModuleSymbol(Expr* expr);
 
 void scopeResolve() {
-
   //
   // add all program asts to the symbol table
   //
-  addToSymbolTable(gDefExprs);
+  addToSymbolTable();
 
   processImportExprs();
 
@@ -112,82 +109,63 @@ void scopeResolve() {
   // compute class hierarchy
   //
   forv_Vec(AggregateType, ct, gAggregateTypes) {
-    addClassToHierarchy(ct);
-  }
-
-  //
-  // determine fields (by name) that may be passed in arrays to alias
-  //
-  forv_Vec(NamedExpr, ne, gNamedExprs) {
-    if (!strncmp(ne->name, "chpl__aliasField_", 17)) {
-      CallExpr* pne  = toCallExpr(ne->parentExpr);
-      CallExpr* ppne = (pne) ? toCallExpr(pne->parentExpr) : NULL;
-
-      if (!ppne || !ppne->isPrimitive(PRIM_NEW))
-        USR_FATAL(ne, "alias-named-argument passing can only be used in constructor calls");
-
-      aliasFieldSet.set_add(astr(&ne->name[17]));
-    }
+    ct->addClassToHierarchy();
   }
 
   //
   // add implicit fields for implementing alias-named-argument passing
   //
-  forv_Vec(AggregateType, ct, gAggregateTypes) {
-    for_fields(field, ct) {
-      if (aliasFieldSet.set_in(field->name)) {
-        SET_LINENO(field);
-
-        const char* aliasName  = astr("chpl__aliasField_", field->name);
-        Symbol*     aliasField = new VarSymbol(aliasName);
-
-        aliasField->addFlag(FLAG_CONST);
-        aliasField->addFlag(FLAG_IMPLICIT_ALIAS_FIELD);
-
-        DefExpr* def = new DefExpr(aliasField);
-
-        def->init     = new UnresolvedSymExpr("false");
-        def->exprType = new UnresolvedSymExpr("bool");
-
-        ct->fields.insertAtTail(def);
+  forv_Vec(AggregateType, at, gAggregateTypes) {
+    for_fields(field, at) {
+      if (strcmp(field->name, "outer") == 0) {
+        USR_FATAL_CONT(field,
+                       "Cannot have a field named 'outer'. "
+                       "'outer' is used to refer to an outer class "
+                       "from within a nested class.");
       }
     }
-  }
-
-  addRecordDefaultConstruction();
-
-  //
-  // build constructors (type and value versions)
-  //
-  forv_Vec(AggregateType, ct, gAggregateTypes) {
-    SET_LINENO(ct->symbol);
-    build_constructors(ct);
   }
 
   //
   // resolve type of this for methods
   //
   forv_Vec(FnSymbol, fn, gFnSymbols) {
-    if (fn->_this && fn->_this->type == dtUnknown) {
-      if (UnresolvedSymExpr* sym = toUnresolvedSymExpr(toArgSymbol(fn->_this)->typeExpr->body.only())) {
+    if (fn->_this != NULL && fn->_this->type == dtUnknown) {
+      Expr* stmt = toArgSymbol(fn->_this)->typeExpr->body.only();
+
+      if (UnresolvedSymExpr* sym = toUnresolvedSymExpr(stmt)) {
         SET_LINENO(fn->_this);
 
-        TypeSymbol* ts = toTypeSymbol(lookup(sym, sym->unresolved));
+        if (TypeSymbol* ts = toTypeSymbol(lookup(sym->unresolved, sym))) {
+          sym->replace(new SymExpr(ts));
 
-        if (!ts) {
+          fn->_this->type = ts->type;
+          fn->_this->type->methods.add(fn);
+
+          AggregateType::setCreationStyle(ts, fn);
+
+        } else {
           USR_FATAL(fn, "cannot resolve base type for method '%s'", fn->name);
         }
 
-        sym->replace(new SymExpr(ts));
-
-        fn->_this->type = ts->type;
+      } else if (SymExpr* sym = toSymExpr(stmt)) {
+        fn->_this->type = sym->symbol()->type;
         fn->_this->type->methods.add(fn);
 
-      } else if (SymExpr* sym = toSymExpr(toArgSymbol(fn->_this)->typeExpr->body.only())) {
-        fn->_this->type = sym->var->type;
-        fn->_this->type->methods.add(fn);
+        AggregateType::setCreationStyle(sym->symbol()->type->symbol, fn);
       }
+
+    } else if (fn->_this) {
+      AggregateType::setCreationStyle(fn->_this->type->symbol, fn);
     }
+  }
+
+  //
+  // build constructors (type and value versions)
+  //
+  forv_Vec(AggregateType, ct, gAggregateTypes) {
+    ct->createOuterWhenRelevant();
+    ct->buildConstructors();
   }
 
   resolveGotoLabels();
@@ -196,997 +174,442 @@ void scopeResolve() {
 
   resolveEnumeratedTypes();
 
-  destroyTable();
+  ResolveScope::destroyAstMap();
 
   destroyModuleUsesCaches();
+
+  warnedForDotInsideWith.clear();
 
   renameDefaultTypesToReflectWidths();
 
   cleanupExternC();
 }
 
-/************************************ | *************************************
-*                                                                           *
-* addToSymbolTable adds the asts in a vector to the global symbolTable such *
-* that symbol definitions are added to entries in the table and new         *
-* enclosing asts become entries                                             *
-*                                                                           *
-************************************* | ************************************/
+/************************************* | **************************************
+*                                                                             *
+* addToSymbolTable adds the asts in a vector to the global symbolTable such   *
+* that symbol definitions are added to entries in the table and new           *
+* enclosing asts become entries                                               *
+*                                                                             *
+************************************** | *************************************/
 
-static void addToSymbolTable(Vec<DefExpr*>& defs) {
-  forv_Vec(DefExpr, def, defs)
-  {
-    // If the symbol is a compiler-generated variable or a label,
-    // do not add it to the symbol table.
-    if (def->sym->hasFlag(FLAG_TEMP) ||
-        isLabelSymbol(def->sym))
-      continue;
+// 2017/05/23: Noakes
+//
+// This is a specialized walk for the simplified case of chpl__Program.
+// This provides an anchor to start the transition to a more general
+// version of a conventional top-down traversal.
 
-    BaseAST* scope = getScope(def);
+// It also serves as a template for the more general version.
+// Eventually it should be possible to use the general implementation
+// to handle chpl__Program with little or no special casing.
 
-    if (symbolTable.count(scope) == 0) {
-      symbolTable[scope] = new SymbolTableEntry();
+static void addToSymbolTable() {
+  ResolveScope* rootScope = ResolveScope::getRootModule();
+
+  // Extend the rootScope with every top-level definition
+  for_alist(stmt, theProgram->block->body) {
+    if (DefExpr* def = toDefExpr(stmt)) {
+      rootScope->extend(def->sym);
     }
+  }
 
-    SymbolTableEntry* entry = symbolTable[scope];
+  // This would be the place to handle use statements but
+  // skipping for now as chpl__Program does not have any.
 
-    if (entry->count(def->sym->name) != 0) {
-      Symbol*     sym       = (*entry)[def->sym->name];
-      FnSymbol*   oldFn     = toFnSymbol(sym);
-      FnSymbol*   newFn     = toFnSymbol(def->sym);
-      TypeSymbol* typeScope = toTypeSymbol(scope);
-
-      if (!typeScope || !isAggregateType(typeScope->type)) { // inheritance
-        if ((!oldFn || (!oldFn->_this && oldFn->hasFlag(FLAG_NO_PARENS))) &&
-            (!newFn || (!newFn->_this && newFn->hasFlag(FLAG_NO_PARENS)))) {
-          USR_FATAL(sym,
-                    "'%s' has multiple definitions, redefined at:\n  %s",
-                    sym->name,
-                    def->sym->stringLoc());
-        }
-      }
-
-      if (!newFn || (newFn && !newFn->_this && newFn->hasFlag(FLAG_NO_PARENS)))
-        (*entry)[def->sym->name] = def->sym;
-    } else {
-      (*entry)[def->sym->name] = def->sym;
+  // Now recurse on every top-level module
+  for_alist(stmt, theProgram->block->body) {
+    if (ModuleSymbol* mod = definesModuleSymbol(stmt)) {
+      scopeResolve(mod, rootScope);
     }
   }
 }
 
-/************************************ | *************************************
-*                                                                           *
-* Transform module uses into calls to initialize functions; store the       *
-* relevant scoping information in BlockStmt::modUses                        *
-*                                                                           *
-************************************* | ************************************/
+/************************************* | **************************************
+*                                                                             *
+* Exported entry point for AggregateType                                      *
+*                                                                             *
+************************************** | *************************************/
 
-static ModuleSymbol* getUsedModule(Expr* expr);
-static ModuleSymbol* getUsedModule(Expr* expr, CallExpr* useCall);
+void addToSymbolTable(FnSymbol* fn) {
+  std::vector<DefExpr*> defs;
 
-static void processImportExprs() {
-  // handle "use mod;" where mod is a module
-  forv_Vec(CallExpr, call, gCallExprs) {
-    if (call->isPrimitive(PRIM_USE)) {
-      SET_LINENO(call);
+  collectDefExprs(fn, defs);
 
-      ModuleSymbol* mod = getUsedModule(call);
-
-      if (!mod)
-        USR_FATAL(call, "Cannot find module");
-
-      ModuleSymbol* enclosingModule = call->getModule();
-
-      enclosingModule->moduleUseAdd(mod);
-
-      getVisibilityBlock(call)->moduleUseAdd(mod);
-
-      call->getStmtExpr()->remove();
-    }
+  for_vector(DefExpr, def, defs) {
+    addToSymbolTable(def);
   }
 }
 
-//
-// Return the module imported by a use call.  The module returned could be
-// nested: e.g. "use outermost.middle.innermost;"
-//
-static ModuleSymbol* getUsedModule(Expr* expr) {
-  CallExpr* call = toCallExpr(expr);
+static void addToSymbolTable(DefExpr* def) {
+  Symbol* newSym = def->sym;
 
-  if (!call)
-    INT_FATAL(call, "Bad use statement in getUsedModule");
+  if (newSym->hasFlag(FLAG_TEMP) == false &&
+      isLabelSymbol(newSym)      == false) {
+    ResolveScope* entry = ResolveScope::findOrCreateScopeFor(def);
 
-  if (!call->isPrimitive(PRIM_USE))
-    INT_FATAL(call, "Bad use statement in getUsedModule");
-
-  return getUsedModule(call->get(1), call);
-}
-
-//
-// Return the module imported by a use call.  The module returned could be
-// nested: e.g. "use outermost.middle.innermost;"
-//
-static ModuleSymbol* getUsedModule(Expr* expr, CallExpr* useCall) {
-  ModuleSymbol* mod    = NULL;
-  Symbol*       symbol = NULL;
-
-  if (SymExpr* sym = toSymExpr(expr)) {
-    Symbol* symbol = sym->var;
-
-    mod = toModuleSymbol(symbol);
-
-    if (symbol && !mod) {
-      USR_FATAL(useCall, "Illegal use of non-module %s", symbol->name);
-    }
-
-  } else if (UnresolvedSymExpr* sym = toUnresolvedSymExpr(expr)) {
-    Symbol* symbol = lookup(useCall, sym->unresolved);
-
-    mod = toModuleSymbol(symbol);
-
-    if (symbol && !mod) {
-      USR_FATAL(useCall, "Illegal use of non-module %s", symbol->name);
-    } else if (!symbol) {
-      USR_FATAL(useCall, "Cannot find module '%s'", sym->unresolved);
-    }
-
-  } else if(CallExpr* call = toCallExpr(expr)) {
-    if (!call->isNamed("."))
-      USR_FATAL(useCall, "Bad use statement in getUsedModule");
-
-    ModuleSymbol* lhs = getUsedModule(call->get(1), useCall);
-
-    if (!lhs)
-      USR_FATAL(useCall, "Cannot find module");
-
-    SymExpr*    rhs     = toSymExpr(call->get(2));
-    const char* rhsName = 0;
-
-    if (!rhs)
-      INT_FATAL(useCall, "Bad use statement in getUsedModule");
-
-    if (!get_string(rhs, &rhsName))
-      INT_FATAL(useCall, "Bad use statement in getUsedModule");
-
-    symbol = lookup(lhs->block, rhsName);
-    mod    = toModuleSymbol(symbol);
-
-    if (symbol && !mod) {
-      USR_FATAL(useCall, "Illegal use of non-module %s", symbol->name);
-    } else if (!symbol) {
-      USR_FATAL(useCall, "Cannot find module '%s'", rhsName);
-    }
-  } else {
-    INT_FATAL(useCall, "Bad use statement in getUsedModule");
+    entry->extend(newSym);
   }
-
-  return mod;
 }
 
-/************************************ | *************************************
-*                                                                           *
-* Compute dispatchParents and dispatchChildren vectors; add base class      *
-* fields to subclasses; identify cyclic or illegal class or record          *
-* hierarchies                                                               *
-*                                                                           *
-************************************* | ************************************/
+/************************************* | **************************************
+*                                                                             *
+*                                                                             *
+*                                                                             *
+************************************** | *************************************/
 
-static void addClassToHierarchy(AggregateType*       ct,
-                                Vec<AggregateType*>* localSeen);
+static void scopeResolve(FnSymbol*           fn,
+                         const ResolveScope* parent);
 
-static void addClassToHierarchy(AggregateType* ct) {
-  Vec<AggregateType*> localSeen; // classes in potential cycle
+static void scopeResolve(BlockStmt*          block,
+                         const ResolveScope* parent);
 
-  return addClassToHierarchy(ct, &localSeen);
+static void scopeResolve(TypeSymbol*         typeSym,
+                         const ResolveScope* parent);
+
+static void scopeResolve(const AList&        alist,
+                         ResolveScope*       scope);
+
+static void scopeResolve(ModuleSymbol*       module,
+                         const ResolveScope* parent) {
+  ResolveScope* scope = new ResolveScope(module, parent);
+
+  scopeResolve(module->block->body, scope);
 }
 
-static void addClassToHierarchy(AggregateType*       ct,
-                                Vec<AggregateType*>* localSeen) {
-  static Vec<AggregateType*> globalSeen; // classes already in hierarchy
+static void scopeResolve(BlockStmt*          block,
+                         const ResolveScope* parent) {
+  ResolveScope* scope = new ResolveScope(block, parent);
 
-  if (localSeen->set_in(ct))
-    USR_FATAL(ct, "Class hierarchy is cyclic");
+  scopeResolve(block->body,         scope);
+}
 
-  if (globalSeen.set_in(ct))
-    return;
+static void scopeResolve(FnSymbol*           fn,
+                         const ResolveScope* parent) {
+  ResolveScope* scope = new ResolveScope(fn, parent);
 
-  globalSeen.set_add(ct);
+  for_alist(formal, fn->formals) {
+    if (DefExpr* def = toDefExpr(formal)) {
+      Symbol* sym = def->sym;
 
-  add_root_type(ct);
+      // Remarkably, there is such a thing as TEMP formals!
+      if (sym->hasFlag(FLAG_TEMP) == false) {
+        if (ArgSymbol* formal = toArgSymbol(sym)) {
+          scope->extend(formal);
 
-  // Walk the base class list, and add parents into the class hierarchy.
-  for_alist(expr, ct->inherits) {
-    UnresolvedSymExpr* se  = toUnresolvedSymExpr(expr);
+          if (formal->typeExpr != NULL) {
+            std::vector<BaseAST*> asts;
 
-    INT_ASSERT(se);
+            // The typeExpr may define query variables.  The DefExpr for
+            // these are unconventional so fall back on the collect()
+            // functions.
 
-    //    printf("looking up %s\n", se->unresolved);
-    Symbol*            sym = lookup(expr, se->unresolved);
-    TypeSymbol*        ts  = toTypeSymbol(sym);
+            // Collect *all* asts within this top-level module in text order
+            collect_asts(formal->typeExpr, asts);
 
-    if (!ts)
-      USR_FATAL(expr, "Illegal super class");
-
-    //    printf("found it in %s\n", sym->getModule()->name);
-    AggregateType* pt = toAggregateType(ts->type);
-
-    if (!pt)
-      USR_FATAL(expr, "Illegal super class %s", ts->name);
-
-    if (isUnion(ct) && isUnion(pt))
-      USR_FATAL(expr, "Illegal inheritance involving union type");
-
-    if (isRecord(ct) && isClass(pt))
-      USR_FATAL(expr, "Record %s inherits from class %s",
-                ct->symbol->name, pt->symbol->name);
-
-    if (isClass(ct) && isRecord(pt))
-      // <hilde> Possible language change: Allow classes to inherit
-      // fields and methods from records.
-      USR_FATAL(expr,
-                "Class %s inherits from record %s",
-                ct->symbol->name,
-                pt->symbol->name);
-
-    localSeen->set_add(ct);
-
-    addClassToHierarchy(pt, localSeen);
-
-    ct->dispatchParents.add(pt);
-
-    bool inserted = pt->dispatchChildren.add_exclusive(ct);
-
-    INT_ASSERT(inserted);
-
-    expr->remove();
-
-    if (isClass(ct)) {
-      SET_LINENO(ct);
-      // For a class, just add a super class pointer.
-      VarSymbol* super = new VarSymbol("super", pt);
-
-      super->addFlag(FLAG_SUPER_CLASS);
-
-      ct->fields.insertAtHead(new DefExpr(super));
-    } else {
-      SET_LINENO(ct);
-
-      // For records and unions, scan the fields in the parent type.
-      for_fields_backward(field, pt) {
-        if (toVarSymbol(field) && !field->hasFlag(FLAG_SUPER_CLASS)) {
-          // If not already in derived class (by name), copy it.
-          bool alreadyContainsField = false;
-
-          for_fields(myfield, ct) {
-            if (!strcmp(myfield->name, field->name)) {
-              alreadyContainsField = true;
-              break;
+            for_vector(BaseAST, item, asts) {
+              if (DefExpr* subDef = toDefExpr(item)) {
+                scope->extend(subDef->sym);
+              }
             }
           }
 
-          if (!alreadyContainsField) {
-            ct->fields.insertAtHead(field->defPoint->copy());
+          if (formal->variableExpr != NULL) {
+            std::vector<BaseAST*> asts;
+
+            // Use the same scheme as for typeExpr
+            collect_asts(formal->variableExpr, asts);
+
+            for_vector(BaseAST, item, asts) {
+              if (DefExpr* subDef = toDefExpr(item)) {
+                scope->extend(subDef->sym);
+              }
+            }
           }
+
+        } else {
+          INT_ASSERT(false);
         }
       }
+
+    } else {
+      INT_ASSERT(false);
     }
+  }
+
+  if (fn->where != NULL) {
+    scopeResolve(fn->where, scope);
+  }
+
+  if (fn->retExprType != NULL) {
+    scopeResolve(fn->retExprType, scope);
+  }
+
+  scopeResolve(fn->body, scope);
+}
+
+static void scopeResolve(TypeSymbol*         typeSym,
+                         const ResolveScope* parent) {
+  Type* type = typeSym->type;
+
+  if (AggregateType* at = toAggregateType(type)) {
+    ResolveScope* scope = new ResolveScope(typeSym, parent);
+
+    scopeResolve(at->fields,    scope);
+
+  } else if (EnumType* et = toEnumType(type)) {
+    ResolveScope* scope = new ResolveScope(typeSym, parent);
+
+    scopeResolve(et->constants, scope);
   }
 }
 
-void add_root_type(AggregateType* ct)
-{
-  // make root records inherit from value
-  // make root classes inherit from object
-  if (ct->inherits.length == 0 && !ct->symbol->hasFlag(FLAG_NO_OBJECT)) {
-    SET_LINENO(ct);
+static void scopeResolve(const AList& alist, ResolveScope* scope) {
+  // Add the local definitions to the scope
+  for_alist(stmt, alist) {
+    if (DefExpr* def = toDefExpr(stmt))   {
+      Symbol* sym = def->sym;
 
-    if (isRecord(ct)) {
-      ct->dispatchParents.add(dtValue);
-
-      // Assume that this addition is unique; report if not.
-      bool inserted = dtValue->dispatchChildren.add_exclusive(ct);
-      INT_ASSERT(inserted);
-    } else if (isClass(ct)) {
-      ct->dispatchParents.add(dtObject);
-
-      // Assume that this addition is unique; report if not.
-      bool inserted = dtObject->dispatchChildren.add_exclusive(ct);
-      INT_ASSERT(inserted);
-
-      VarSymbol* super = new VarSymbol("super", dtObject);
-      super->addFlag(FLAG_SUPER_CLASS);
-      ct->fields.insertAtHead(new DefExpr(super));
-    }
-  }
-}
-
-static void addRecordDefaultConstruction()
-{
-  forv_Vec(DefExpr, def, gDefExprs)
-  {
-    // We're only interested in declarations that do not have initializers.
-    if (def->init)
-      continue;
-
-    if (VarSymbol* var = toVarSymbol(def->sym))
-    {
-      if (AggregateType* at = toAggregateType(var->type))
-      {
-        if (!at->isRecord())
-          continue;
-
-        // No initializer for extern records.
-        if (at->symbol->hasFlag(FLAG_EXTERN))
-          continue;
-
-        SET_LINENO(def);
-        CallExpr* ctor_call = new CallExpr(new SymExpr(at->symbol));
-        def->init = new CallExpr(PRIM_NEW, ctor_call);
-        insert_help(def->init, def, def->parentSymbol);
+      if (sym->hasFlag(FLAG_TEMP) == false &&
+          isLabelSymbol(sym)      == false) {
+        scope->extend(sym);
       }
     }
   }
-}
 
+  // Should process use statements here
 
-/************************************ | *************************************
-*                                                                           *
-*                                                                           *
-************************************* | ************************************/
+  // Process the remaining statements
+  for_alist(stmt, alist) {
+    if (DefExpr* def = toDefExpr(stmt))   {
+      Symbol* sym = def->sym;
 
-static void       build_type_constructor(AggregateType* ct);
-static void       build_constructor(AggregateType* ct);
-static ArgSymbol* create_generic_arg(VarSymbol* field);
-static void       insert_implicit_this(FnSymbol*         fn,
-                                       Vec<const char*>& fieldNamesSet);
-static void       move_constructor_to_outer(FnSymbol*      fn,
-                                            AggregateType* outerType);
+      if (sym->hasFlag(FLAG_TEMP) == false &&
+          isLabelSymbol(sym)      == false) {
+        if (ModuleSymbol* modSym  = toModuleSymbol(sym)) {
+          scopeResolve(modSym,  scope);
 
-void build_constructors(AggregateType* ct)
-{
-  if (ct->defaultInitializer)
-    return;
+        } else if (FnSymbol* fnSym = toFnSymbol(sym))     {
+          scopeResolve(fnSym,   scope);
 
-  SET_LINENO(ct);
+        } else if (TypeSymbol* typeSym = toTypeSymbol(sym))   {
+          scopeResolve(typeSym, scope);
+        }
+      }
 
-  build_type_constructor(ct);
-  build_constructor(ct);
-}
-
-
-// Create the (default) type constructor for this class.
-static void build_type_constructor(AggregateType* ct) {
-  // Create the type constructor function,
-  FnSymbol* fn = new FnSymbol(astr("_type_construct_", ct->symbol->name));
-
-  fn->addFlag(FLAG_TYPE_CONSTRUCTOR);
-  fn->cname = astr("_type_construct_", ct->symbol->cname);
-
-  fn->addFlag(FLAG_COMPILER_GENERATED);
-  fn->retTag = RET_TYPE;
-
-  if (ct->symbol->hasFlag(FLAG_REF))
-    fn->addFlag(FLAG_REF);
-
-  if (ct->symbol->hasFlag(FLAG_TUPLE)) {
-    fn->addFlag(FLAG_TUPLE);
-    fn->addFlag(FLAG_INLINE);
-  }
-
-  // and insert it into the class type.
-  ct->defaultTypeConstructor = fn;
-
-  // Create "this".
-  fn->_this = new VarSymbol("this", ct);
-  fn->_this->addFlag(FLAG_ARG_THIS);
-
-  fn->insertAtTail(new DefExpr(fn->_this));
-
-  // Walk all fields and select the generic ones.
-  Vec<const char*> fieldNamesSet;
-
-  for_fields(tmp, ct) {
-    SET_LINENO(tmp);
-
-    if (VarSymbol* field = toVarSymbol(tmp)) {
-      if (field->hasFlag(FLAG_SUPER_CLASS))
-        continue;
-
-      Expr* exprType = field->defPoint->exprType;
-      Expr* init = field->defPoint->init;
-
-      if (!strcmp(field->name, "_promotionType") ||
-          field->hasFlag(FLAG_OMIT_FROM_CONSTRUCTOR)) {
-        fn->insertAtTail(
-          new BlockStmt(
-            new CallExpr(PRIM_SET_MEMBER, fn->_this, 
-              new_StringSymbol(field->name),
-              new CallExpr(PRIM_TYPE_INIT, exprType->remove())),
-            BLOCK_TYPE));
+    } else if (BlockStmt* block = toBlockStmt(stmt)) {
+      if (block->blockTag == BLOCK_NORMAL) {
+        scopeResolve(block,       scope);
 
       } else {
-        fieldNamesSet.set_add(field->name);
+        scopeResolve(block->body, scope);
+      }
 
-        //
-        // if formal is generic
-        //
-        if (field->hasFlag(FLAG_TYPE_VARIABLE) || 
-            field->hasFlag(FLAG_PARAM)         || 
-            (!exprType && !init)) {
+    } else if (CondStmt* cond = toCondStmt(stmt))  {
+      scopeResolve(cond->thenStmt, scope);
 
-          ArgSymbol* arg = create_generic_arg(field);
+      if (cond->elseStmt != NULL) {
+        scopeResolve(cond->elseStmt, scope);
+      }
 
-          fn->insertFormalAtTail(arg);
+    } else if (TryStmt* tryStmt = toTryStmt(stmt)) {
+      scopeResolve(tryStmt->_body, scope);
 
-          if (field->hasFlag(FLAG_PARAM) || field->hasFlag(FLAG_TYPE_VARIABLE))
-            fn->insertAtTail(new CallExpr(PRIM_SET_MEMBER,
-                                          fn->_this,
-                                          new_StringSymbol(field->name), arg));
+      for_alist(item, tryStmt->_catches) {
+        if (CatchStmt* catchStmt = toCatchStmt(item)) {
+          scopeResolve(catchStmt->_body, scope);
 
-          else if (arg->type == dtAny &&
-                   !ct->symbol->hasFlag(FLAG_REF))
-            // It would be nice to be able to remove this case.
-            fn->insertAtTail(new CallExpr(PRIM_SET_MEMBER,
-                                          fn->_this,
-                                          new_StringSymbol(field->name),
-                                          new CallExpr("chpl__initCopy",
-                                                       new CallExpr(PRIM_TYPE_INIT, arg))));
-          #if 0
-          // Leaving this case in for Tom's work.  He will remove it if it is
-          // unnecessary
-          else
-            fn->insertAtTail(new CallExpr(PRIM_SET_MEMBER,
-                                          fn->_this,
-                                          new_StringSymbol(field->name),
-                                          new CallExpr(PRIM_TYPE_INIT, arg)));
-          #endif
-        } else if (exprType) {
-          CallExpr* newInit = new CallExpr(PRIM_TYPE_INIT, exprType->copy());
-          CallExpr* newSet  = new CallExpr(PRIM_SET_MEMBER, 
-                                           fn->_this,
-                                           new_StringSymbol(field->name),
-                                           newInit);
-          fn->insertAtTail(newSet);
+        } else {
+          INT_ASSERT(false);
+        }
+      }
 
-        } else if (init) {
-          // Non-param fields initialized with a string literal but
-          // without a type are assumed to be of type string.  Note
-          // that we do this for other functions/methods in
-          // fix_def_expr() in normalize.cpp.
-          if ((toSymExpr(init) &&
-               (toSymExpr(init)->typeInfo() == dtStringC)) &&
-              !field->hasFlag(FLAG_PARAM)) {
+    } else if (ForallStmt* forallStmt = toForallStmt(stmt)) {
+      BlockStmt* fBody = forallStmt->loopBody();
+      // or, we could construct ResolveScope specifically for forallStmt
+      ResolveScope* bodyScope = new ResolveScope(fBody, scope);
+      // cf. scopeResolve(FnSymbol*,parent)
+      for_alist(ivdef, forallStmt->inductionVariables()) {
+        Symbol* sym = toDefExpr(ivdef)->sym;
+        // "chpl__tuple_blank" indicates the underscore placeholder for
+        // the induction variable. Do not add it. Because if there are two
+        // (legally) ex. "forall (_,_) in ...", we get an error.
+        if (strcmp(sym->name, "chpl__tuple_blank"))
+          bodyScope->extend(sym);
+      }
+      for_shadow_var_defs(svd, temp, forallStmt) {
+        bodyScope->extend(svd->sym);
+      }
 
-            // Put in an explicit type expression for string
-            exprType = new UnresolvedSymExpr("string");
+      scopeResolve(fBody->body, bodyScope);
 
-            field->defPoint->exprType = exprType;
-            insert_help(exprType, init->parentExpr, init->parentSymbol);
+    } else if (DeferStmt* deferStmt = toDeferStmt(stmt)) {
+      scopeResolve(deferStmt->body(), scope);
 
-            // Now do the same as above in the 'if (exprType)' case
-            CallExpr* newInit = new CallExpr(PRIM_TYPE_INIT, exprType->copy());
-            CallExpr* newSet  = new CallExpr(PRIM_SET_MEMBER,
-                                             fn->_this,
-                                             new_StringSymbol(field->name),
-                                             newInit);
-            fn->insertAtTail(newSet);
-          } else {
-            fn->insertAtTail(new CallExpr(PRIM_SET_MEMBER,
-                                          fn->_this,
-                                          new_StringSymbol(field->name),
-                                          new CallExpr("chpl__initCopy", init->copy())));
-          }
+    } else if (isUseStmt(stmt)           == true ||
+               isCallExpr(stmt)          == true ||
+               isUnresolvedSymExpr(stmt) == true ||
+               isGotoStmt(stmt)          == true) {
+
+    // May occur in --llvm runs
+    } else if (isExternBlockStmt(stmt)   == true) {
+
+    } else {
+      INT_ASSERT(false);
+    }
+  }
+}
+
+/************************************* | **************************************
+*                                                                             *
+* Transform module uses into calls to initialize functions; store the         *
+* relevant scoping information in BlockStmt::modUses                          *
+*                                                                             *
+************************************** | *************************************/
+
+static void processImportExprs() {
+  for_alist(expr, theProgram->block->body) {
+    if (ModuleSymbol* topLevelModule = definesModuleSymbol(expr)) {
+      std::vector<BaseAST*> asts;
+
+      // Collect *all* asts within this top-level module in text order
+      collect_asts(topLevelModule, asts);
+
+      for_vector(BaseAST, item, asts) {
+        if (UseStmt* useStmt = toUseStmt(item)) {
+          BaseAST*      astScope = getScope(useStmt);
+          ResolveScope* scope    = ResolveScope::getScopeFor(astScope);
+
+          useStmt->scopeResolve(scope);
         }
       }
     }
   }
-
-  // Add return
-  fn->insertAtTail(new CallExpr(PRIM_RETURN, fn->_this));
-  fn->retType = ct;
-
-  ct->symbol->defPoint->insertBefore(new DefExpr(fn));
-
-  // Make implicit references to 'this' explicit.
-  insert_implicit_this(fn, fieldNamesSet);
-
-  AggregateType *outerType = toAggregateType(ct->symbol->defPoint->parentSymbol->type);
-
-  if (outerType) {
-    // Create an "outer" pointer to the outer class in the inner class
-    VarSymbol* outer = new VarSymbol("outer");
-
-    move_constructor_to_outer(fn, outerType);
-
-    // Save the pointer to the outer class
-    ct->fields.insertAtTail(new DefExpr(outer));
-    fn->insertAtHead(new CallExpr(PRIM_SET_MEMBER,
-                                  fn->_this,
-                                  new_StringSymbol("outer"),
-                                  fn->_outer));
-
-    ct->outer = outer;
-  }
-
-  // Update the symbol table with added defs.
-  Vec<DefExpr*> defs;
-
-  collectDefExprs(fn, defs);
-  addToSymbolTable(defs);
 }
 
+/************************************* | *************************************/
 
-// For the given class type, this builds the compiler-generated constructor
-// which is also called by user-defined constructors to pre-initialize all 
-// fields to their declared or type-specific initial values.
-static void build_constructor(AggregateType* ct) {
-  if (isSyncType(ct))
-    ct->defaultValue = NULL;
+static void handleLoopStmtGoto(LoopStmt* loop, GotoStmt* gs) {
+  if (gs->gotoTag == GOTO_BREAK) {
+    gs->label->replace(new SymExpr(loop->breakLabelGet()));
 
-  // Create the default constructor function symbol,
-  FnSymbol* fn = new FnSymbol(astr("_construct_", ct->symbol->name));
-  fn->cname = fn->name;
+  } else if (gs->gotoTag == GOTO_CONTINUE) {
+    gs->label->replace(new SymExpr(loop->continueLabelGet()));
 
-  fn->addFlag(FLAG_DEFAULT_CONSTRUCTOR);
-  fn->addFlag(FLAG_CONSTRUCTOR);
-  fn->addFlag(FLAG_COMPILER_GENERATED);
-
-  if (ct->symbol->hasFlag(FLAG_REF))
-    fn->addFlag(FLAG_REF);
-
-  if (ct->symbol->hasFlag(FLAG_TUPLE)) {
-    fn->addFlag(FLAG_TUPLE);
-    fn->addFlag(FLAG_INLINE);
-  }
-
-  // And insert it into the class type.
-  ct->defaultInitializer = fn;
-
-  // Create "this".
-  fn->_this = new VarSymbol("this", ct);
-  fn->_this->addFlag(FLAG_ARG_THIS);
-
-  fn->insertAtTail(new DefExpr(fn->_this));
-
-  // Walk the fields in the class type.
-  std::map<VarSymbol*,ArgSymbol*> fieldArgMap;
-
-  Vec<const char*> fieldNamesSet;
-
-  for_fields(tmp, ct) {
-    SET_LINENO(tmp);
-    if (VarSymbol* field = toVarSymbol(tmp)) {
-      // Filter inherited fields and other special cases.
-      // "outer" is used internally to supply a pointer to 
-      // the outer parent of a nested class.
-      if (!field->hasFlag(FLAG_SUPER_CLASS) &&
-          !field->hasFlag(FLAG_OMIT_FROM_CONSTRUCTOR) &&
-          strcmp(field->name, "_promotionType") &&
-          strcmp(field->name, "outer")) {
-        // Create an argument to the default constructor
-        // corresponding to the field.
-        ArgSymbol* arg = new ArgSymbol(INTENT_BLANK, field->name, field->type);
-
-        fieldArgMap[field] = arg;
-        fieldNamesSet.set_add(field->name);
-      }
-    }
-  }
-
-  ArgSymbol* meme      = NULL;
-  CallExpr*  superCall = NULL;
-  CallExpr*  allocCall = NULL;
-
-  if (ct->symbol->hasFlag(FLAG_REF) ||
-      isSyncType(ct)) {
-    // For ref, sync and single classes, just allocate space.
-    allocCall = callChplHereAlloc(fn->_this);
-    fn->insertAtTail(new CallExpr(PRIM_MOVE, fn->_this, allocCall));
-  } else if (!ct->symbol->hasFlag(FLAG_TUPLE)) {
-    // Create a meme (whatever that is).
-    meme = new ArgSymbol(INTENT_BLANK, 
-                         "meme",
-                         ct,
-                         NULL,
-                         new SymExpr(gTypeDefaultToken));
-    meme->addFlag(FLAG_IS_MEME);
-
-    // Move the meme into "this".
-    fn->insertAtTail(new CallExpr(PRIM_MOVE, fn->_this, meme));
-
-    if (isClass(ct)) {
-      if (ct->dispatchParents.n > 0 && !ct->symbol->hasFlag(FLAG_EXTERN)) {
-        // This class has a parent class.
-        if (!ct->dispatchParents.v[0]->defaultInitializer) {
-          // If it doesn't yet have an initializer, make one.
-          build_constructors(toAggregateType(ct->dispatchParents.v[0]));
-        }
-
-        // Get the parent constructor.
-        // Note that since we only pay attention to the first entry in the
-        // dispatchParents list, we are effectively implementing
-        // single class inheritance, multiple interface inheritance.
-        FnSymbol* superCtor = ct->dispatchParents.v[0]->defaultInitializer;
-
-        // Create a call to the superclass constructor.
-        superCall = new CallExpr(superCtor->name);
-
-        // Walk the formals of the default super class constructor
-        for_formals_backward(formal, superCtor) {
-          if (formal->hasFlag(FLAG_IS_MEME))
-            continue;
-
-          DefExpr* superArg = formal->defPoint->copy();
-
-          // Omit the arguments shadowed by this class's fields.
-          if (fieldNamesSet.set_in(superArg->sym->name))
-            continue;
-
-          fieldNamesSet.set_add(superArg->sym->name);
-
-          // Inserting each successive ancestor argument at the head in 
-          // reverse-lexcial order results in all of the arguments appearing
-          // in lexical order, starting with those in the most ancient class
-          // and ending with those in the most-derived class.
-          fn->insertFormalAtHead(superArg);
-          superCall->insertAtHead(superArg->sym);
-        }
-
-        // Create a temp variable and add it to the actual argument list
-        // in the superclass constructor call.  This temp will hold 
-        // the pointer to the parent subobject.
-        VarSymbol* tmp = newTemp();
-
-        superCall->insertAtTail(new NamedExpr("meme", new SymExpr(tmp)));
-
-        // Add super call to the constructor function.
-        fn->insertAtTail(superCall);
-
-        // Declare that variable in the scope of this constructor.
-        // And initialize it with the super class pointer.
-        superCall->insertBefore(new DefExpr(tmp));
-
-        superCall->insertBefore(
-          new CallExpr(PRIM_MOVE,
-                       tmp,
-                       new CallExpr(PRIM_GET_MEMBER_VALUE,
-                                    fn->_this,
-                                    new_StringSymbol("super"))));
-      }
-    }
-  }
-
-  if (isUnion(ct))
-    fn->insertAtTail(new CallExpr(PRIM_SET_UNION_ID, fn->_this, new_IntSymbol(0)));
-
-  ct->symbol->defPoint->insertBefore(new DefExpr(fn));
-
-  for_fields(tmp, ct) {
-    VarSymbol* field = toVarSymbol(tmp);
-
-    if (!field)
-      continue;
-
-    if (fieldArgMap.count(field) == 0)
-      continue;
-
-    ArgSymbol* arg = fieldArgMap[field];
-
-    SET_LINENO(field);
-
-    if (field->hasFlag(FLAG_PARAM))
-      arg->intent = INTENT_PARAM;
-
-    Expr* exprType = field->defPoint->exprType->remove();
-    Expr* init     = field->defPoint->init->remove();
-
-    bool hadType = exprType;
-    bool hadInit = init;
-
-    if (init) {
-      if (!field->hasFlag(FLAG_TYPE_VARIABLE) && !exprType) {
-        // init && !exprType
-        VarSymbol* tmp = newTemp();
-
-        tmp->addFlag(FLAG_INSERT_AUTO_DESTROY);
-        tmp->addFlag(FLAG_MAYBE_PARAM);
-        tmp->addFlag(FLAG_MAYBE_TYPE);
-
-        exprType = new BlockStmt(new DefExpr(tmp), BLOCK_TYPE);
-
-        toBlockStmt(exprType)->insertAtTail(new CallExpr(PRIM_MOVE,
-                                                         tmp,
-                                                         new CallExpr("chpl__initCopy",
-                                                                      init->copy())));
-
-        toBlockStmt(exprType)->insertAtTail(new CallExpr(PRIM_TYPEOF, tmp));
-      }
-
-    } else if (hadType && 
-               !field->hasFlag(FLAG_TYPE_VARIABLE) && 
-               !field->hasFlag(FLAG_PARAM)) {
-      init = new CallExpr(PRIM_INIT, exprType->copy());
-    }
-
-    if (!field->hasFlag(FLAG_TYPE_VARIABLE) && !field->hasFlag(FLAG_PARAM)) {
-      if (hadType)
-        init = new CallExpr("_createFieldDefault", exprType->copy(), init);
-      else if (init)
-        init = new CallExpr("chpl__initCopy", init);
-    }
-
-    if (init) {
-      if (hadInit)
-        arg->defaultExpr = new BlockStmt(init, BLOCK_SCOPELESS);
-      else
-        arg->defaultExpr = new BlockStmt(new SymExpr(gTypeDefaultToken));
-    }
-
-    if (exprType) {
-      if (!isBlockStmt(exprType))
-        arg->typeExpr = new BlockStmt(exprType, BLOCK_TYPE);
-      else
-        arg->typeExpr = toBlockStmt(exprType);
-    }
-
-    if (field->hasFlag(FLAG_TYPE_VARIABLE))
-      // Args with this flag are removed after resolution.
-      // Note that in the default type constructor, this flag is also applied
-      // (along with FLAG_GENERIC) to arguments whose type is unknown, but would
-      // not be pruned in resolution.
-      arg->addFlag(FLAG_TYPE_VARIABLE);
-
-    if (!exprType && arg->type == dtUnknown)
-      arg->type = dtAny;
-
-    fn->insertFormalAtTail(arg);
-
-    if (arg->type == dtAny && !arg->hasFlag(FLAG_TYPE_VARIABLE) &&
-        !arg->hasFlag(FLAG_PARAM) && !ct->symbol->hasFlag(FLAG_REF))
-      fn->insertAtTail(new CallExpr(PRIM_SET_MEMBER, 
-                                    fn->_this, 
-                                    new_StringSymbol(arg->name),
-                                    new CallExpr("chpl__initCopy", arg)));
-    else
-      // Since we don't copy the argument before stuffing it in a field,
-      // we will have to remove the autodestroy flag for specific cases.
-      // Namely, if the function is a default constructor and the target
-      // of a PRIM_SET_MEMBER is a record, then the INSERT_AUTO_DESTROY
-      // flag must be removed.
-      // (See NOTE 1 in callDestructors.cpp.)
-      fn->insertAtTail(new CallExpr(PRIM_SET_MEMBER, 
-                                    fn->_this, 
-                                    new_StringSymbol(arg->name),
-                                    arg));
-  }
-
-  if (meme)
-    fn->insertFormalAtTail(meme);
-
-  insert_implicit_this(fn, fieldNamesSet);
-
-  AggregateType *outerType = toAggregateType(ct->symbol->defPoint->parentSymbol->type);
-
-  if (outerType) {
-    move_constructor_to_outer(fn, outerType);
-
-    // Save the pointer to the outer class
-    fn->insertAtTail(new CallExpr(PRIM_SET_MEMBER,
-                                  fn->_this,
-                                  new_StringSymbol("outer"),
-                                  fn->_outer));
-  }
-
-  //
-  // Insert a call to the "initialize()" method if one is defined.
-  // The return value of this method (if any) is ignored.
-  //
-  forv_Vec(FnSymbol, method, ct->methods) {
-    // Select a method named "initialize" and taking no arguments
-    // (aside from _mt and the implicit 'this').
-    if (method && !strcmp(method->name, "initialize")) {
-      if (method->numFormals() == 2) {
-        CallExpr* init = new CallExpr("initialize", gMethodToken, fn->_this);
-        fn->insertAtTail(init);
-        break;
-      }
-    }
-  }
-
-  fn->insertAtTail(new CallExpr(PRIM_RETURN, fn->_this));
-
-  Vec<DefExpr*> defs;
-  collectDefExprs(fn, defs);
-  addToSymbolTable(defs);
-}
-
-static ArgSymbol* create_generic_arg(VarSymbol* field)
-{
-  ArgSymbol* arg = new ArgSymbol(INTENT_BLANK, field->name, field->type);
-
-  // We take it as a param argument if it is marked as a param field.
-  if (field->hasFlag(FLAG_PARAM))
-    arg->intent = INTENT_PARAM;
-  else
-    // Both type arguments and arguments of unspecified type get this flag.
-    arg->addFlag(FLAG_TYPE_VARIABLE);
-
-  // Copy the field type if it exists.
-  Expr* exprType = field->defPoint->exprType;
-  if (exprType)
-    arg->typeExpr = new BlockStmt(exprType->copy(), BLOCK_TYPE);
-
-  // Copy the initialization expression if it exists.
-  Expr* init = field->defPoint->init;
-  if (init)
-    arg->defaultExpr = new BlockStmt(init->copy(), BLOCK_SCOPELESS);
-
-  // Translate an unknown field type into an unspecified arg type.
-  if (!exprType && arg->type == dtUnknown)
-  {
-    if (! field->hasFlag(FLAG_TYPE_VARIABLE))
-      arg->addFlag(FLAG_GENERIC);
-    arg->type = dtAny;
-  }
-
-  return arg;
-}
-
-/// Replace implicit references to 'this' in the body of this 
-/// type constructor with explicit member reference (dot) expressions.
-static void insert_implicit_this(FnSymbol* fn, Vec<const char*>& fieldNamesSet)
-{
-  Vec<BaseAST*> asts;
-
-  collect_asts(fn->body, asts);
-
-  forv_Vec(BaseAST, ast, asts) {
-    if (UnresolvedSymExpr* se = toUnresolvedSymExpr(ast))
-      if (fieldNamesSet.set_in(se->unresolved))
-        // The name of this UnresolvedSymExpr matches a field name.
-        // So replace it with a dot expression.
-        se->replace(buildDotExpr(fn->_this, se->unresolved));
+  } else {
+    INT_FATAL(gs, "unexpected goto type");
   }
 }
 
-static void move_constructor_to_outer(FnSymbol* fn, AggregateType* outerType)
-{
-  // Remove the DefPoint for this constructor, add it to the outer
-  // class's method list.
-  outerType->methods.add(fn);
+/*
+Note that break and continue statements that are placed incorrectly
+inside a forall loop are flagged by checkControlFlow() during parsing.
+This includes 'continue' to a named loop outside of the forall,
+which the code here would not catch.
+*/
+static void handleForallGoto(ForallStmt* forall, GotoStmt* gs) {
+  if (gs->gotoTag == GOTO_BREAK) {
+    INT_ASSERT(false);
 
-  fn->_outer = new ArgSymbol(INTENT_BLANK, "outer", outerType);
-  fn->_outer->addFlag(FLAG_GENERIC); // Arg expects a real object :-P.
-  fn->insertFormalAtHead(new DefExpr(fn->_outer));
-  fn->insertFormalAtHead(new DefExpr(new ArgSymbol(INTENT_BLANK,
-                                                   "_mt",
-                                                   dtMethodToken)));
+  } else if (gs->gotoTag == GOTO_CONTINUE) {
+    INT_ASSERT(isSymExpr(gs->label) == true);
+    gs->label->replace(new SymExpr(forall->continueLabel()));
 
-  fn->addFlag(FLAG_METHOD);
-
-  Expr* insertPoint = outerType->symbol->defPoint;
-
-  while (toTypeSymbol(insertPoint->parentSymbol))
-    insertPoint = insertPoint->parentSymbol->defPoint;
-
-  insertPoint->insertBefore(fn->defPoint->remove());
+  } else {
+    INT_FATAL(gs, "unexpected goto type");
+  }
 }
-
-
-/************************************ | *************************************
-*                                                                           *
-*                                                                           *
-************************************* | ************************************/
-
-static LoopStmt* findOuterLoop(Expr* stmt);
 
 static void resolveGotoLabels() {
   forv_Vec(GotoStmt, gs, gGotoStmts) {
     SET_LINENO(gs);
 
-    if (SymExpr* label = toSymExpr(gs->label)) {
-      if (label->var == gNil) {
-        LoopStmt* loop = findOuterLoop(gs);
+    Stmt* loop = NULL;
 
-        if (!loop)
-          USR_FATAL(gs, "break or continue is not in a loop");
+    if (isSymExpr(gs->label) == true) {
+      loop = LoopStmt::findEnclosingLoopOrForall(gs);
 
-        if (gs->gotoTag == GOTO_BREAK) {
-          Symbol* breakLabel = loop->breakLabelGet();
-
-          INT_ASSERT(breakLabel);
-          gs->label->replace(new SymExpr(breakLabel));
-
-        } else if (gs->gotoTag == GOTO_CONTINUE) {
-          Symbol* continueLabel = loop->continueLabelGet();
-          INT_ASSERT(continueLabel);
-
-          gs->label->replace(new SymExpr(continueLabel));
-
-        } else
-          INT_FATAL(gs, "unexpected goto type");
+      if (loop == NULL) {
+        USR_FATAL_CONT(gs, "break or continue is not in a loop");
       }
 
     } else if (UnresolvedSymExpr* label = toUnresolvedSymExpr(gs->label)) {
-      const char* name = label->unresolved;
-      LoopStmt*   loop = findOuterLoop(gs);
+      loop = LoopStmt::findEnclosingLoop(gs, label->unresolved);
 
-      while (loop && (!loop->userLabel || strcmp(loop->userLabel, name))) {
-        loop = findOuterLoop(loop->parentExpr);
+      if (loop == NULL) {
+        USR_FATAL_CONT(gs, "bad label '%s' on break or continue",
+                       label->unresolved);
       }
+    }
 
-      if (!loop) {
-        USR_FATAL(gs, "bad label on break or continue");
-      }
+    if (loop == NULL) {
+      // Handled above as needed. Nothing to do here.
 
-      if (gs->gotoTag == GOTO_BREAK)
-        label->replace(new SymExpr(loop->breakLabelGet()));
+    } else if (LoopStmt* loopS = toLoopStmt(loop)) {
+      handleLoopStmtGoto(loopS, gs);
 
-      else if (gs->gotoTag == GOTO_CONTINUE)
-        label->replace(new SymExpr(loop->continueLabelGet()));
+    } else if (ForallStmt* forall = toForallStmt(loop)) {
+      handleForallGoto(forall, gs);
 
-      else
-        INT_FATAL(gs, "unexpected goto type");
+    } else {
+      INT_ASSERT(false); // should not have any other loops here
     }
   }
 }
 
-static LoopStmt* findOuterLoop(Expr* stmt) {
-  LoopStmt* retval = 0;
+/************************************* | *************************************/
 
-  if (LoopStmt* loop = toLoopStmt(stmt))
-    retval = loop;
+static void resolveUnresolvedSymExpr(UnresolvedSymExpr* usymExpr);
 
-  else if (stmt->parentExpr)
-    retval = findOuterLoop(stmt->parentExpr);
+static void updateMethod(UnresolvedSymExpr* usymExpr);
 
-  else
-    retval = 0;
+static void updateMethod(UnresolvedSymExpr* usymExpr,
+                         Symbol*            sym);
 
-  return retval;
-}
+static void updateMethod(UnresolvedSymExpr* usymExpr,
+                         Symbol*            sym,
+                         SymExpr*           symExpr);
 
-/************************************ | *************************************
-*                                                                           *
-*                                                                           *
-************************************* | ************************************/
+static bool isFunctionNameWithExplicitScope(Expr* expr);
 
-static void resolveUnresolvedSymExpr(UnresolvedSymExpr*       unresolvedSymExpr,
-                                     Vec<UnresolvedSymExpr*>& skipSet);
+static void insertFieldAccess(FnSymbol*          method,
+                              UnresolvedSymExpr* usymExpr,
+                              Symbol*            sym,
+                              Expr*              expr);
 
-static void resolveModuleCall(CallExpr* call, Vec<UnresolvedSymExpr*>& skipSet);
+static int  computeNestedDepth(const char* name,
+                               Type*       type);
+
+static void resolveModuleCall(CallExpr* call);
+
 static bool isMethodName(const char* name, Type* type);
 static bool isMethodNameLocal(const char* name, Type* type);
 
+static void checkIdInsideWithClause(Expr*              exprInAst,
+                                    UnresolvedSymExpr* origUSE);
+
 #ifdef HAVE_LLVM
 static bool tryCResolve(ModuleSymbol* module, const char* name);
-static bool tryCResolve_set(ModuleSymbol*                     module,
-                            const char*                       name,
-                            llvm::SmallSet<ModuleSymbol*, 24> already_checked);
 #endif
 
-static void resolveUnresolvedSymExprs()
-{
-  Vec<UnresolvedSymExpr*> skipSet;
-
+static void resolveUnresolvedSymExprs() {
   //
   // Translate M.x where M is a ModuleSymbol into just x where x is
   // the symbol in module M; for functions, insert a "module=" token
   // that is used to determine visible functions.
   //
 
-  int max_resolved = 0;
+  int maxResolved = 0;
+  int i           = 0;
 
   forv_Vec(UnresolvedSymExpr, unresolvedSymExpr, gUnresolvedSymExprs) {
-    resolveUnresolvedSymExpr(unresolvedSymExpr, skipSet);
-    max_resolved++;
+    resolveUnresolvedSymExpr(unresolvedSymExpr);
+
+    maxResolved++;
   }
 
   forv_Vec(CallExpr, call, gCallExprs) {
-    resolveModuleCall(call, skipSet);
+    resolveModuleCall(call);
   }
-
-  int i = 0;
 
   // Note that the extern C resolution might add new UnresolvedSymExprs, and it
   // might do that within resolveModuleCall, so we try resolving unresolved
@@ -1197,213 +620,252 @@ static void resolveUnresolvedSymExprs()
   //  - import all C symbols at an earlier point
   //      (but that might add lots of unused garbage to the Chapel AST
   //       for e.g. #include <stdio.h>; and it might cause the C-to-Chapel
-  //       translater to need to handle more platform/compiler-specific stuff,
+  //       translator to need to handle more platform/compiler-specific stuff,
   //       and it might lead to extra naming conflicts).
   forv_Vec(UnresolvedSymExpr, unresolvedSymExpr, gUnresolvedSymExprs) {
     // Only try resolving symbols that are new after last attempt.
-    if( i >= max_resolved ) {
-      resolveUnresolvedSymExpr(unresolvedSymExpr, skipSet);
+    if (i >= maxResolved) {
+      resolveUnresolvedSymExpr(unresolvedSymExpr);
     }
+
     i++;
   }
-
-  skipSet.clear();
 }
 
-static void resolveUnresolvedSymExpr(UnresolvedSymExpr* unresolvedSymExpr,
-                                     Vec<UnresolvedSymExpr*>& skipSet) {
-  if (skipSet.set_in(unresolvedSymExpr))
-    return;
+static void resolveUnresolvedSymExpr(UnresolvedSymExpr* usymExpr) {
+  SET_LINENO(usymExpr);
 
-  const char* name = unresolvedSymExpr->unresolved;
-  if (!strcmp(name, "."))
-    return;
+  const char* name = usymExpr->unresolved;
 
-  // Skip unresolveds that are not in the tree.
-  if (!unresolvedSymExpr->parentSymbol)
-    return;
+  if (name == astrSdot || !usymExpr->inTree()) {
 
-  SET_LINENO(unresolvedSymExpr);
+  } else if (Symbol* sym = lookup(name, usymExpr)) {
+    FnSymbol* fn = toFnSymbol(sym);
 
-  Symbol* sym = lookup(unresolvedSymExpr, name);
+    if (fn == NULL) {
+      SymExpr* symExpr = new SymExpr(sym);
 
-  //
-  // handle function call without parentheses
-  //
-  if (FnSymbol* fn = toFnSymbol(sym)) {
-    if (!fn->_this && fn->hasFlag(FLAG_NO_PARENS)) {
-      unresolvedSymExpr->replace(new CallExpr(fn));
-      return;
-    }
-  }
+      usymExpr->replace(symExpr);
 
-  // sjd: stopgap to avoid shadowing variables or functions by methods
-  if (FnSymbol* fn = toFnSymbol(sym))
-    if (fn->hasFlag(FLAG_METHOD))
-      sym = NULL;
+      updateMethod(usymExpr, sym, symExpr);
 
-  SymExpr* symExpr = NULL;
+    // sjd: stopgap to avoid shadowing variables or functions by methods
+    } else if (fn->isMethod() == true) {
+      updateMethod(usymExpr);
 
-  if (sym) {
-    if (!isFnSymbol(sym)) {
-      symExpr = new SymExpr(sym);
-      unresolvedSymExpr->replace(symExpr);
-    }
-    else if (isFnSymbol(sym)) {
-      Expr* parent = unresolvedSymExpr->parentExpr;
+    // handle function call without parentheses
+    } else if (fn->hasFlag(FLAG_NO_PARENS) == true) {
+      checkIdInsideWithClause(usymExpr, usymExpr);
+      usymExpr->replace(new CallExpr(fn));
 
-      if (parent) {
-        CallExpr *call = toCallExpr(parent);
+    } else if (Expr* parent = usymExpr->parentExpr) {
+      CallExpr* call = toCallExpr(parent);
 
-        if (((call) && (call->baseExpr != unresolvedSymExpr)) || (!call)) {
-          //If the function is being used as a first-class value, handle
-          // this with a primitive and unwrap the primitive later in
-          // functionResolution
-          CallExpr *prim_capture_fn = new CallExpr(PRIM_CAPTURE_FN);
+      if (call == NULL || call->baseExpr != usymExpr) {
+        CallExpr* primFn = NULL;
 
-          unresolvedSymExpr->replace(prim_capture_fn);
-          prim_capture_fn->insertAtTail(unresolvedSymExpr);
-
-          // Don't do it again if for some reason we return
-          // to trying to resolve this symbol.
-          skipSet.set_add(unresolvedSymExpr);
-          return;
+        // Wrap the FN in the appropriate way
+        if (call != NULL && call->isNamed("c_ptrTo") == true) {
+          primFn = new CallExpr(PRIM_CAPTURE_FN_FOR_C);
+        } else {
+          primFn = new CallExpr(PRIM_CAPTURE_FN_FOR_CHPL);
         }
-      }
-    }
-  } 
 
-  // Apply 'this' and 'outer' in methods where necessary
-  {
-    Expr* expr = symExpr;
+        usymExpr->replace(primFn);
 
-    if (!expr)
-      expr = unresolvedSymExpr;
+        primFn->insertAtTail(usymExpr);
 
-    Symbol* parent = expr->parentSymbol;
-
-    while (!toModuleSymbol(parent)) {
-      if (FnSymbol* method = toFnSymbol(parent)) {
-
-        // stopgap bug fix: do not let methods shadow symbols
-        // that are more specific than methods
-        if (sym && sym->defPoint->getFunction() == method)
-          break;
-
-        if (method->_this && (!symExpr || symExpr->var != method->_this)) {
-          Type*       type = method->_this->type;
-          TypeSymbol* cts  =
-            (sym) ? toTypeSymbol(sym->defPoint->parentSymbol) : NULL;
-
-          if ((cts && isAggregateType(cts->type)) ||
-              isMethodName(name, type)) {
-            CallExpr* call = toCallExpr(expr->parentExpr);
-
-            if (call && call->baseExpr == expr &&
-                call->numActuals() >= 2 &&
-                toSymExpr(call->get(1)) &&
-                toSymExpr(call->get(1))->var == gMethodToken) {
-              UnresolvedSymExpr* use = new UnresolvedSymExpr(name);
-
-              expr->replace(use);
-
-              skipSet.set_add(use);
-            } else {
-              AggregateType* ct        = toAggregateType(type);
-              int            nestDepth = 0;
-
-              if (isMethodName(name, type)) {
-                while (ct && !isMethodNameLocal(name, ct)) {
-                  // count how many classes out from current depth that
-                  // this method is first defined in
-                  nestDepth += 1;
-                  ct = toAggregateType
-                    (ct->symbol->defPoint->parentSymbol->type);
-                }
-              } else {
-                while (ct && !ct->getField(name, false)) {
-                  // count how many classes out from current depth that
-                  // this symbol is first defined in
-                  nestDepth += 1;
-                  ct = toAggregateType(ct->symbol->defPoint->parentSymbol->type);
-                }
-              }
-
-              Expr *dot = NULL;
-
-              for (int i=0; i<=nestDepth; i++) {
-                // Apply implicit this pointers and outer this pointers
-                if (i == 0) {
-                  if (i < nestDepth) {
-                    dot = new CallExpr(".",
-                                       method->_this,
-                                       new_StringSymbol("outer"));
-                  } else {
-                    if (isTypeSymbol(sym))
-                      dot = new CallExpr(".", method->_this, sym);
-                    else
-                      dot = new CallExpr(".",
-                                         method->_this,
-                                         new_StringSymbol(name));
-                  }
-                } else {
-                  if (i < nestDepth) {
-                    dot = new CallExpr(".",
-                                       dot, new_StringSymbol("outer"));
-                  } else {
-                    if (isTypeSymbol(sym))
-                      dot = new CallExpr(".", dot, sym);
-                    else
-                      dot = new CallExpr(".", dot, new_StringSymbol(name));
-                  }
-                }
-              }
-
-              expr->replace(dot);
-            }
-          }
-          break;
-        }
+      } else {
+        updateMethod(usymExpr, sym);
       }
 
-      parent = parent->defPoint->parentSymbol;
+    } else {
+      updateMethod(usymExpr, sym);
     }
-  }
+
+  } else {
+    updateMethod(usymExpr);
 
 #ifdef HAVE_LLVM
-  if (!sym && externC && tryCResolve(unresolvedSymExpr->getModule(), name)) {
-    //try resolution again since the symbol should exist now
-    resolveUnresolvedSymExpr(unresolvedSymExpr, skipSet);
-  }
+    if (gExternBlockStmts.size() > 0 &&
+        tryCResolve(usymExpr->getModule(), name) == true) {
+      // Try resolution again since the symbol should exist now
+      resolveUnresolvedSymExpr(usymExpr);
+    }
 #endif
+  }
+}
+
+// Apply 'this' and 'outer' in methods where necessary
+static void updateMethod(UnresolvedSymExpr* usymExpr) {
+  updateMethod(usymExpr, NULL);
+}
+
+static void updateMethod(UnresolvedSymExpr* usymExpr,
+                         Symbol*            sym) {
+  updateMethod(usymExpr, sym, NULL);
+}
+
+static void updateMethod(UnresolvedSymExpr* usymExpr,
+                         Symbol*            sym,
+                         SymExpr*           symExpr) {
+  Expr*   expr   = (symExpr != NULL) ? (Expr*) symExpr : (Expr*) usymExpr;
+  Symbol* parent = expr->parentSymbol;
+  bool    isAggr = false;
+
+  if (sym != NULL) {
+    if (TypeSymbol* cts = toTypeSymbol(sym->defPoint->parentSymbol)) {
+      isAggr = isAggregateType(cts->type);
+    }
+  }
+
+  while (isModuleSymbol(parent) == false) {
+    if (FnSymbol* method = toFnSymbol(parent)) {
+      // stopgap bug fix: do not let methods shadow symbols
+      // that are more specific than methods
+      if (sym != NULL && sym->defPoint->getFunction() == method) {
+        break;
+
+      } else if (method->_this != NULL) {
+        if (symExpr == NULL || symExpr->symbol() != method->_this) {
+          const char* name = usymExpr->unresolved;
+          Type*       type = method->_this->type;
+
+          if (isAggr == true || isMethodName(name, type) == true) {
+            if (isFunctionNameWithExplicitScope(expr) == false) {
+              insertFieldAccess(method, usymExpr, sym, expr);
+            }
+          }
+
+          break;
+        }
+      }
+    }
+
+    parent = parent->defPoint->parentSymbol;
+  }
+}
+
+//
+// Is <expr> one of
+//        ModName.<expr>( ... );                 or
+//        aggrType.<expr>( ... );                ?
+//
+// These will be have been converted to one of
+//        <expr>(_module=, <mod>,  ...)          or
+//        <expr>(_mt,      <this>, ...)
+//
+
+static bool isFunctionNameWithExplicitScope(Expr* expr) {
+  bool retval = false;
+
+  if (CallExpr* call = toCallExpr(expr->parentExpr)) {
+    if (expr == call->baseExpr && call->numActuals() >= 2) {
+      if (SymExpr* arg1 = toSymExpr(call->get(1))) {
+        if (arg1->symbol() == gModuleToken ||
+            arg1->symbol() == gMethodToken) {
+          retval = true;
+        }
+      }
+    }
+  }
+
+  return retval;
+}
+
+// Apply implicit this pointers and outer this pointers
+static void insertFieldAccess(FnSymbol*          method,
+                              UnresolvedSymExpr* usymExpr,
+                              Symbol*            sym,
+                              Expr*              expr) {
+  const char* name      = usymExpr->unresolved;
+  int         nestDepth = computeNestedDepth(name, method->_this->type);
+  Expr*       dot       = new SymExpr(method->_this);
+
+  checkIdInsideWithClause(expr, usymExpr);
+
+  if (nestDepth > 0) {
+    for (int i = 0; i < nestDepth; i++) {
+      dot = new CallExpr(".", dot, new_CStringSymbol("outer"));
+    }
+  }
+
+  if (isTypeSymbol(sym) == true) {
+    dot = new CallExpr(".", dot, sym);
+  } else {
+    dot = new CallExpr(".", dot, new_CStringSymbol(name));
+  }
+
+  expr->replace(dot);
+}
+
+static int computeNestedDepth(const char* name, Type* type) {
+  int retval = 0;
+
+  if (isMethodName(name, type) == true) {
+    AggregateType* ct = toAggregateType(type);
+
+    // count how many classes out from current depth that
+    // this method is first defined in
+    while (ct != NULL && isMethodNameLocal(name, ct) == false) {
+      retval = retval + 1;
+      ct     = toAggregateType(ct->symbol->defPoint->parentSymbol->type);
+    }
+
+  } else {
+    // count how many classes out from current depth that
+    // this symbol is first defined in
+    AggregateType* ct = toAggregateType(type);
+
+    while (ct != NULL && ct->getField(name, false) == NULL) {
+      retval = retval + 1;
+      ct     = toAggregateType(ct->symbol->defPoint->parentSymbol->type);
+    }
+  }
+
+  return retval;
 }
 
 //
 // isMethodName returns true iff 'name' names a method of 'type'
 //
 static bool isMethodName(const char* name, Type* type) {
-  if (!strcmp(name, type->symbol->name))
-    return false;
+  bool retval = false;
 
-  forv_Vec(Symbol, method, type->methods) {
-    if (method && !strcmp(name, method->name))
-      return true;
+  if (strcmp(name, type->symbol->name) == 0) {
+    retval = false;
+
+  } else {
+    forv_Vec(Symbol, method, type->methods) {
+      if (method != NULL && strcmp(name, method->name) == 0) {
+        retval = true;
+        break;
+      }
+    }
+
+    if (retval == false) {
+      if (AggregateType* at = toAggregateType(type)) {
+        Type* outerType = at->symbol->defPoint->parentSymbol->type;
+
+        forv_Vec(AggregateType, pt, at->dispatchParents) {
+          if (isMethodName(name, pt) == true) {
+            retval = true;
+            break;
+          }
+        }
+
+        if (retval == false) {
+          if (AggregateType* outer = toAggregateType(outerType)) {
+            if (isMethodName(name, outer) == true) {
+              retval = true;
+            }
+          }
+        }
+      }
+    }
   }
 
-  forv_Vec(Type, pt, type->dispatchParents) {
-    if (isMethodName(name, pt))
-      return true;
-  }
-
-  if (AggregateType* ct = toAggregateType(type)) {
-    Type *outerType = ct->symbol->defPoint->parentSymbol->type;
-
-    if (AggregateType* outer = toAggregateType(outerType))
-      if (isMethodName(name, outer))
-        return true;
-  }
-
-  return false;
+  return retval;
 }
 
 
@@ -1412,75 +874,149 @@ static bool isMethodName(const char* name, Type* type) {
 // excluding methods of an outer type
 //
 static bool isMethodNameLocal(const char* name, Type* type) {
-  if (!strcmp(name, type->symbol->name))
-    return false;
+  bool retval = false;
 
-  forv_Vec(Symbol, method, type->methods) {
-    if (method && !strcmp(name, method->name))
-      return true;
-  }
+  if (strcmp(name, type->symbol->name) == 0) {
+    retval = false;
 
-  forv_Vec(Type, pt, type->dispatchParents) {
-    if (isMethodName(name, pt))
-      return true;
-  }
+  } else {
+    forv_Vec(Symbol, method, type->methods) {
+      if (method != NULL && strcmp(name, method->name) == 0) {
+        retval = true;
+        break;
+      }
+    }
 
-  return false;
-} 
-
-static void resolveModuleCall(CallExpr* call, Vec<UnresolvedSymExpr*>& skipSet) {
-  if (call->isNamed(".")) {
-    if (SymExpr* se = toSymExpr(call->get(1))) {
-      if (ModuleSymbol* mod = toModuleSymbol(se->var)) { 
-        ModuleSymbol* enclosingModule = call->getModule();
-
-        enclosingModule->moduleUseAdd(mod);
-
-        SET_LINENO(call);
-
-        SymbolTableEntry* entry    = NULL;
-        Symbol*           sym      = NULL;
-        const char*       mbr_name = get_string(call->get(2));
-
-        // Is it a variable or a method?
-        if (symbolTable.count(mod->block) != 0) {
-          entry = symbolTable[mod->block];
-
-          if (entry->count(mbr_name) != 0) {
-            sym = (*entry)[mbr_name];
+    if (retval == false) {
+      if (AggregateType* at = toAggregateType(type)) {
+        forv_Vec(AggregateType, pt, at->dispatchParents) {
+          if (isMethodName(name, pt) == true) {
+            retval = true;
+            break;
           }
         }
+      }
+    }
+  }
 
-        if (FnSymbol* fn = toFnSymbol(sym)) {
-          if (!fn->_this && fn->hasFlag(FLAG_NO_PARENS)) {
-            call->replace(new CallExpr(fn));
+  return retval;
+}
+
+
+static void errorDotInsideWithClause(UnresolvedSymExpr* origUSE,
+                                     const char*        construct) {
+  // As of this writing, a with-clause can be duplicated in the AST.
+  // This code avoids multiple error messages for the same symbol.
+
+  std::pair<const char*, int> markLoc(origUSE->astloc.filename,
+                                      origUSE->astloc.lineno);
+
+  WFDIWmark                   mark(markLoc, origUSE->unresolved);
+
+  if (warnedForDotInsideWith.count(mark) == 0) {
+    USR_FATAL_CONT(origUSE,
+                   "cannot reference a field or function '%s' "
+                   "in a with-clause of this %s",
+                   origUSE->unresolved,
+                   construct);
+
+    warnedForDotInsideWith.insert(mark);
+  }
+}
+
+//
+// 'expr' ended up being a field reference (or perhaps a method call).
+// If we are inside a 'with' clause, report an error.
+//
+static void checkIdInsideWithClause(Expr*              exprInAst,
+                                    UnresolvedSymExpr* origUSE) {
+  // A 'with' clause in a ForallStmt.
+  if (isOuterVarOfShadowVar(exprInAst)) {
+    errorDotInsideWithClause(origUSE, "forall loop");
+    return;
+  }
+
+  // A 'with' clause for a task construct.
+  if (Expr* parent1 = exprInAst->parentExpr) {
+    if (BlockStmt* parent2 = toBlockStmt(parent1->parentExpr)) {
+      if (parent1 == parent2->byrefVars) {
+        CallExpr* blockInfo = parent2->blockInfoGet();
+
+        // Ensure that an issue, indeed, occurred a task construct.
+        INT_ASSERT(blockInfo->isPrimitive(PRIM_BLOCK_COBEGIN)  ||
+                   blockInfo->isPrimitive(PRIM_BLOCK_COFORALL) ||
+                   blockInfo->isPrimitive(PRIM_BLOCK_BEGIN));
+
+        errorDotInsideWithClause(origUSE, blockInfo->primitive->name);
+      }
+    }
+  }
+}
+
+/************************************* | **************************************
+*                                                                             *
+*                                                                             *
+*                                                                             *
+************************************** | *************************************/
+
+static bool resolveModuleIsNewExpr(CallExpr* call, Symbol* sym);
+
+static void resolveModuleCall(CallExpr* call) {
+  if (call->isNamedAstr(astrSdot) == true) {
+    if (SymExpr* se = toSymExpr(call->get(1))) {
+      if (ModuleSymbol* mod = toModuleSymbol(se->symbol())) {
+        SET_LINENO(call);
+
+        ModuleSymbol* currModule = call->getModule();
+        ResolveScope* scope      = ResolveScope::getScopeFor(mod->block);
+        const char*   mbrName    = get_string(call->get(2));
+
+        currModule->moduleUseAdd(mod);
+
+        if (Symbol* sym  = scope->lookupNameLocally(mbrName)) {
+          if (sym->isVisible(call) == true) {
+            if (FnSymbol* fn = toFnSymbol(sym)) {
+              if (fn->_this == NULL && fn->hasFlag(FLAG_NO_PARENS) == true) {
+                call->replace(new CallExpr(fn));
+
+              } else {
+                CallExpr* parent = toCallExpr(call->parentExpr);
+
+                call->replace(new UnresolvedSymExpr(mbrName));
+
+                parent->insertAtHead(mod);
+                parent->insertAtHead(gModuleToken);
+              }
+
+            } else if (resolveModuleIsNewExpr(call, sym) == true) {
+              CallExpr* parent = toCallExpr(call->parentExpr);
+
+              call->replace(new SymExpr(sym));
+
+              parent->insertAtHead(mod);
+              parent->insertAtHead(gModuleToken);
+
+            } else {
+              call->replace(new SymExpr(sym));
+            }
+
           } else {
-            UnresolvedSymExpr* se = new UnresolvedSymExpr(mbr_name);
-
-            skipSet.set_add(se);
-            call->replace(se);
-
-            CallExpr* parent = toCallExpr(se->parentExpr);
-            INT_ASSERT(parent);
-
-            parent->insertAtHead(mod);
-            parent->insertAtHead(gModuleToken);
+            USR_FATAL(call,
+                      "Cannot access '%s', '%s' is private to '%s'",
+                      mbrName,
+                      mbrName,
+                      mod->name);
           }
 
-        } else if (sym) {
-          call->replace(new SymExpr(sym));
-
 #ifdef HAVE_LLVM
-        } else if (!sym && externC && tryCResolve(call->getModule(),mbr_name)) {
-          // Try to resolve again now that the symbol should
-          // be in the table
-          resolveModuleCall(call, skipSet);
+        } else if (tryCResolve(currModule, mbrName) == true) {
+          resolveModuleCall(call);
 #endif
 
         } else {
           USR_FATAL_CONT(call,
                          "Symbol '%s' undeclared in module '%s'",
-                         mbr_name,
+                         mbrName,
                          mod->name);
         }
       }
@@ -1488,27 +1024,58 @@ static void resolveModuleCall(CallExpr* call, Vec<UnresolvedSymExpr*>& skipSet) 
   }
 }
 
-#ifdef HAVE_LLVM
-static bool tryCResolve(ModuleSymbol* module, const char* name) {
-  llvm::SmallSet<ModuleSymbol*, 24> already_checked;
+static bool resolveModuleIsNewExpr(CallExpr* call, Symbol* sym) {
+  bool retval = false;
 
-  return tryCResolve_set(module, name, already_checked);
+  if (TypeSymbol* ts = toTypeSymbol(sym)) {
+    if (isAggregateType(ts->type) == true) {
+      if (CallExpr* parentCall = toCallExpr(call->parentExpr)) {
+        if (CallExpr* grandParentCall = toCallExpr(parentCall->parentExpr)) {
+
+          retval = grandParentCall->isPrimitive(PRIM_NEW);
+        }
+      }
+    }
+  }
+
+  return retval;
 }
 
-static bool tryCResolve_set(ModuleSymbol* module, const char* name,
-  llvm::SmallSet<ModuleSymbol*, 24> already_checked) {
+#ifdef HAVE_LLVM
+static bool tryCResolve(ModuleSymbol*                     module,
+                        const char*                       name,
+                        llvm::SmallSet<ModuleSymbol*, 24> visited);
 
-  if (! module) return false;
+static bool tryCResolve(ModuleSymbol* module, const char* name) {
+  bool retval = false;
 
-  if (already_checked.insert(module)) {
+  if (externC == true) {
+    llvm::SmallSet<ModuleSymbol*, 24> visited;
+
+    retval = tryCResolve(module, name, visited);
+  }
+
+  return retval;
+}
+
+static bool tryCResolve(ModuleSymbol*                     module,
+                        const char*                       name,
+                        llvm::SmallSet<ModuleSymbol*, 24> visited) {
+
+  if (module == NULL) {
+    return false;
+
+  } else if (visited.insert(module).second) {
+    // visited.insert(module)) {
     // we added it to the set, so continue.
+
   } else {
     // It was already in the set.
     return false;
   }
 
   // Is it resolveable in this module?
-  if (module->extern_info) {
+  if (module->extern_info != NULL) {
     // Try resolving it
     Vec<Expr*> c_exprs;
 
@@ -1520,11 +1087,13 @@ static bool tryCResolve_set(ModuleSymbol* module, const char* name,
 
     if (c_exprs.count()) {
       forv_Vec(Expr*, c_expr, c_exprs) {
-        Vec<DefExpr*> v;
+        std::vector<DefExpr*> v;
 
         collectDefExprs(c_expr, v);
 
-        addToSymbolTable(v);
+        for_vector(DefExpr, def, v) {
+          addToSymbolTable(def);
+        }
 
         if (DefExpr* de = toDefExpr(c_expr)) {
           if (TypeSymbol* ts = toTypeSymbol(de->sym)) {
@@ -1532,7 +1101,7 @@ static bool tryCResolve_set(ModuleSymbol* module, const char* name,
               SET_LINENO(ct->symbol);
               // If this is a class DefExpr,
               //  make sure its initializer gets created.
-              build_constructors(ct);
+              ct->buildConstructors();
             }
           }
         }
@@ -1546,9 +1115,9 @@ static bool tryCResolve_set(ModuleSymbol* module, const char* name,
 
   // Otherwise, try the modules used by this module.
   forv_Vec(ModuleSymbol, usedMod, module->modUseList) {
-    bool got = tryCResolve_set(usedMod, name, already_checked);
-
-    if( got ) return true;
+    if (tryCResolve(usedMod, name, visited) == true) {
+      return true;
+    }
   }
 
   return false;
@@ -1556,39 +1125,32 @@ static bool tryCResolve_set(ModuleSymbol* module, const char* name,
 
 #endif
 
-
-/************************************ | *************************************
-*                                                                           *
-* resolves EnumTypeName.fieldName to the symbol named fieldName in the      *
-* enumerated type named EnumTypeName                                        *
-*                                                                           *
-************************************* | ************************************/
+/************************************* | **************************************
+*                                                                             *
+* resolves EnumTypeName.fieldName to the symbol named fieldName in the        *
+* enumerated type named EnumTypeName                                          *
+*                                                                             *
+************************************** | *************************************/
 
 static void resolveEnumeratedTypes() {
   forv_Vec(CallExpr, call, gCallExprs) {
-    if (call->isNamed(".")) {
+    if (call->isNamedAstr(astrSdot)) {
       SET_LINENO(call);
 
       if (SymExpr* first = toSymExpr(call->get(1))) {
-        if (EnumType* type = toEnumType(first->var->type)) {
+        if (EnumType* type = toEnumType(first->symbol()->type)) {
           if (SymExpr* second = toSymExpr(call->get(2))) {
             const char* name;
-            bool found = false;
 
             INT_ASSERT(get_string(second, &name));
 
             for_enums(constant, type) {
               if (!strcmp(constant->sym->name, name)) {
                 call->replace(new SymExpr(constant->sym));
-                found = true;
               }
             }
-
-            if (!found) {
-              USR_FATAL(call, 
-                        "unresolved enumerated type symbol \"%s\"",
-                        name);
-            }
+            // Unresolved enum symbols are now either resolved or throw an error
+            // during the function resolution pass. Permits paren-less methods.
           }
         }
       }
@@ -1596,28 +1158,14 @@ static void resolveEnumeratedTypes() {
   }
 }
 
-/************************************ | *************************************
-*                                                                           *
-* delete the symbol table and module uses cache                             *
-*                                                                           *
-************************************* | ************************************/
+/************************************* | **************************************
+*                                                                             *
+* delete the module uses cache                                                *
+*                                                                             *
+************************************** | *************************************/
 
-static void destroyTable() {
-  SymbolTable::iterator entry;
-
-  for (entry = symbolTable.begin(); entry != symbolTable.end(); entry++) {
-    delete entry->second;
-  }
-
-  symbolTable.clear();
-}
-
-
-//
-// delete the module uses cache
-//
 static void destroyModuleUsesCaches() {
-  std::map<BlockStmt*,Vec<ModuleSymbol*>*>::iterator use;
+  std::map<BlockStmt*, Vec<UseStmt*>*>::iterator use;
 
   for (use = moduleUsesCache.begin(); use != moduleUsesCache.end(); use++) {
     delete use->second;
@@ -1626,11 +1174,10 @@ static void destroyModuleUsesCaches() {
   moduleUsesCache.clear();
 }
 
-
-/************************************ | *************************************
-*                                                                           *
-*                                                                           *
-************************************* | ************************************/
+/************************************* | **************************************
+*                                                                             *
+*                                                                             *
+************************************** | *************************************/
 
 static void renameDefaultType(Type* type, const char* newname);
 
@@ -1650,189 +1197,465 @@ static void renameDefaultType(Type* type, const char* newname) {
   type->symbol->name = astr(newname);
 }
 
-/************************************ | *************************************
-*                                                                           *
-*                                                                           *
-************************************* | ************************************/
+/************************************* | **************************************
+*                                                                             *
+*                                                                             *
+*                                                                             *
+************************************** | *************************************/
 
-static void  lookup(BaseAST*       scope,
-                    const char*    name,
-                    Vec<Symbol*>&  symbols,
-                    Vec<BaseAST*>& alreadyVisited);
+static void lookup(const char*           name,
+                   BaseAST*              context,
 
-static void lookupSimple(BaseAST*       scope,
-                         const char*    name,
-                         Vec<Symbol*>&  symbols);
+                   BaseAST*              scope,
+                   Vec<BaseAST*>&        visited,
 
-static void    buildBreadthFirstModuleList(Vec<ModuleSymbol*>* modules);
+                   std::vector<Symbol*>& symbols);
 
-static void    buildBreadthFirstModuleList(Vec<ModuleSymbol*>* modules,
-                                           Vec<ModuleSymbol*>* current,
-                                           Vec<ModuleSymbol*>* alreadySeen);
-
-static Symbol* lookup(BaseAST* scope, const char* name)
+// Show what symbols from 'symbols' conflict with the given 'sym'.
+static void printConflictingSymbols(std::vector<Symbol*>& symbols, Symbol* sym)
 {
-  Vec<Symbol*>  symbols;
-  Vec<BaseAST*> nestedscopes;
-  lookup(scope, name, symbols, nestedscopes);
-
-  symbols.set_to_vec();
-
-  if (symbols.n == 0)
-    // No symbols found.
-    return NULL;
-
-  if (symbols.n == 1)
-    // A unique symbol was found.
-    return symbols.v[0];
-
-  forv_Vec(Symbol, sym, symbols) {
-    if (!isFnSymbol(sym))
-      USR_FATAL_CONT(sym, "Symbol %s multiply defined", name);
+  Symbol* sampleFunction = NULL;
+  for_vector(Symbol, another, symbols) if (another != sym)
+  {
+    if (isFnSymbol(another))
+      sampleFunction = another;
+    else
+      USR_PRINT(another, "also defined here", another->name);
   }
-  USR_STOP();
 
-  return NULL;
+  if (sampleFunction)
+    USR_PRINT(sampleFunction,
+              "also defined as a function here (and possibly elsewhere)");
 }
 
-// This version recurses through module uses.
-// Adds zero or more symbols to the passed-in symbols vector.
-static void lookup(BaseAST*       scope,
-                   const char*    name,
-                   Vec<Symbol*>&  symbols,
-                   Vec<BaseAST*>& alreadyVisited)
-{
-  if (!alreadyVisited.set_in(scope)) {
-    alreadyVisited.set_add(scope);
+// Given a name and a calling context, determine the symbol referred to
+// by that name in the context of that call
+Symbol* lookup(const char* name, BaseAST* context) {
+  std::vector<Symbol*> symbols;
+  Symbol*              retval = NULL;
 
-    if (symbolTable.count(scope) != 0) {
-      SymbolTableEntry* entry = symbolTable[scope];
+  lookup(name, context, symbols);
 
-      if (entry->count(name) != 0) {
-        Symbol* sym = (*entry)[name];
-        symbols.set_add(sym);
+  if (symbols.size() == 0) {
+    retval = NULL;
+
+  } else if (symbols.size() == 1) {
+    retval = symbols[0];
+
+  } else {
+    // Multiple symbols found for this name.
+    // If they're all functions
+    //   then      assume function resolution will be applied
+    //   otherwise fail
+
+    for_vector(Symbol, sym, symbols) {
+      if (isFnSymbol(sym) == false) {
+        USR_FATAL_CONT(sym, "symbol %s is multiply defined", name);
+        printConflictingSymbols(symbols, sym);
+        break;
       }
     }
 
-    if (TypeSymbol* ts = toTypeSymbol(scope))
-      if (AggregateType* ct = toAggregateType(ts->type))
-        if (Symbol* sym = ct->getField(name, false))
-          symbols.set_add(sym);
+    USR_STOP();
 
-    if (symbols.n == 0) {
-      if (BlockStmt* block = toBlockStmt(scope)) {
-        if (block->modUses) {
-          Vec<ModuleSymbol*>* modules = NULL;
+    retval = NULL;
+  }
 
-          if (moduleUsesCache.count(block) == 0) {
-            modules = new Vec<ModuleSymbol*>();
+  return retval;
+}
 
-            for_actuals(expr, block->modUses) {
-              SymExpr* se = toSymExpr(expr);
-              INT_ASSERT(se);
+void lookup(const char*           name,
+            BaseAST*              context,
+            std::vector<Symbol*>& symbols) {
+  Vec<BaseAST*> visited;
 
-              ModuleSymbol* mod = toModuleSymbol(se->var);
-              INT_ASSERT(mod);
+  lookup(name, context, context, visited, symbols);
+}
 
-              modules->add(mod);
+static void lookup(const char*           name,
+                   BaseAST*              context,
+
+                   BaseAST*              scope,
+                   Vec<BaseAST*>&        visited,
+
+                   std::vector<Symbol*>& symbols) {
+
+  if (!visited.set_in(scope)) {
+    visited.set_add(scope);
+
+    if (lookupThisScopeAndUses(name, context, scope, symbols) == true) {
+      // We've found an instance here.
+      // Lydia note: in the access call case, we'd want to look in our
+      // surrounding scopes for the symbols on the left and right part
+      // of the call (if any) to verify we were finding anything in particular.
+      //
+      // A symbol could be visible in the innermost scope because it was
+      // defined in an outer scope (for instance, if M1 defines foo,
+      // M2 doesn't shadow it and we're looking for M1.M2.foo),
+      // so that is something to keep in mind as well.
+
+      return;
+    }
+
+    if (scope->getModule()->block == scope) {
+      if (getScope(scope) != NULL) {
+        lookup(name, context, getScope(scope), visited, symbols);
+      }
+
+    } else {
+      // Otherwise, look in the next scope up.
+      FnSymbol* fn = toFnSymbol(scope);
+
+      if (fn != NULL && fn->_this) {
+        // If currently in a method, the next scope up is anything visible
+        // within the aggregate type
+        if (AggregateType* ct = toAggregateType(fn->_this->type)) {
+          lookup(name, context, ct->symbol, visited, symbols);
+        }
+      }
+
+      // Check if found something in last lookup call
+      if (symbols.size() == 0) {
+        // If we didn't find something in the aggregate type that matched,
+        // or we weren't in an aggregate type method, so look at next scope up.
+        lookup(name, context, getScope(scope), visited, symbols);
+      }
+    }
+  }
+}
+
+/************************************* | **************************************
+*                                                                             *
+*                                                                             *
+*                                                                             *
+************************************** | *************************************/
+
+static bool      isRepeat(Symbol* toAdd, const std::vector<Symbol*>& symbols);
+
+static Symbol*   inSymbolTable(const char* name, BaseAST* scope);
+
+static Symbol*   inType(const char* name, BaseAST* scope);
+
+static bool      methodMatched(BaseAST* scope, FnSymbol* method);
+
+static FnSymbol* getMethod(const char* name, Type* type);
+
+static void      buildBreadthFirstModuleList(Vec<UseStmt*>* modules);
+
+static void      buildBreadthFirstModuleList(
+                      Vec<UseStmt*>*                             modules,
+                      Vec<UseStmt*>*                             current,
+                      std::map<Symbol*, std::vector<UseStmt*> >* alreadySeen);
+
+static bool      skipUse(std::map<Symbol*, std::vector<UseStmt*> >* seen,
+                         UseStmt*                                   current);
+
+static bool lookupThisScopeAndUses(const char*           name,
+                                   BaseAST*              context,
+                                   BaseAST*              scope,
+                                   std::vector<Symbol*>& symbols) {
+  if (Symbol* sym = inSymbolTable(name, scope)) {
+    if (sym->hasFlag(FLAG_PRIVATE) == true) {
+      if (sym->isVisible(context) == true) {
+        symbols.push_back(sym);
+      }
+
+    } else {
+      symbols.push_back(sym);
+    }
+  }
+
+  if (Symbol* sym = inType(name, scope)) {
+    if (isRepeat(sym, symbols) == true) {
+      // If we're looking at the exact same Symbol, there's no need to add it
+      // and we can just return.
+      return true;
+    }
+
+    // When methods and fields can be private, need to check against the
+    // rejected private symbols here.  But that's in the future.
+    symbols.push_back(sym);
+  }
+
+  if (symbols.size() == 0) {
+    // Nothing found so far, look into the uses.
+    if (BlockStmt* block = toBlockStmt(scope)) {
+      if (block->useList != NULL) {
+        Vec<UseStmt*>* moduleUses = NULL;
+
+        if (moduleUsesCache.count(block) == 0) {
+          moduleUses = new Vec<UseStmt*>();
+
+          for_actuals(expr, block->useList) {
+            UseStmt* use = toUseStmt(expr);
+            INT_ASSERT(use);
+
+            moduleUses->add(use);
+          }
+
+          INT_ASSERT(moduleUses->n);
+
+          buildBreadthFirstModuleList(moduleUses);
+
+          if (enableModuleUsesCache)
+            moduleUsesCache[block] = moduleUses;
+        } else {
+          moduleUses = moduleUsesCache[block];
+        }
+
+        forv_Vec(UseStmt, use, *moduleUses) {
+          if (use != NULL) {
+            if (use->skipSymbolSearch(name) == false) {
+              const char* nameToUse = use->isARename(name) ? use->getRename(name) : name;
+              BaseAST* scopeToUse = use->getSearchScope();
+
+              if (Symbol* sym = inSymbolTable(nameToUse, scopeToUse)) {
+                if (sym->hasFlag(FLAG_PRIVATE) == true) {
+                  if (sym->isVisible(context) == true &&
+                      isRepeat(sym, symbols)  == false) {
+                    symbols.push_back(sym);
+                  }
+
+                } else if (isRepeat(sym, symbols) == false) {
+                  symbols.push_back(sym);
+                }
+              }
             }
 
-            INT_ASSERT(modules->n);
-
-            buildBreadthFirstModuleList(modules);
-
-            if (enableModuleUsesCache)
-              moduleUsesCache[block] = modules;
           } else {
-            modules = moduleUsesCache[block];
+            // break on each new depth if a symbol has been found
+            if (symbols.size() > 0) {
+              break;
+            }
           }
+        }
 
-          forv_Vec(ModuleSymbol, mod, *modules) {
-            if (mod) {
-              lookupSimple(mod->block, name, symbols);
-            } else {
-              //
-              // break on each new depth if a symbol has been found
-              //
-              if (symbols.n > 0)
-                break;
+        if (symbols.size() > 0) {
+          // We found a symbol in the module use.  This could conflict with
+          // the function symbol's arguments if we are at the top level scope
+          // within a function.  Note that we'd check the next scope up if
+          // size() == 0, so we only need to do this check here because the
+          // module case would hide it otherwise
+          if (FnSymbol* fn = toFnSymbol(getScope(block))) {
+            // The next scope up from the block statement is a function
+            // symbol. That means that we need to check the arguments
+            if (Symbol* sym = inSymbolTable(name, fn)) {
+              // We found it in the arguments.  This should cause a conflict,
+              // because it is probably an error that the user had the same
+              // name as a module level variable.
+              USR_WARN(sym,
+                       "Module level symbol is hiding function argument '%s'",
+                       name);
             }
           }
         }
       }
     }
+  }
 
-    if (symbols.n == 0) {
-      if (scope->getModule()->block == scope) {
-        ModuleSymbol* mod = scope->getModule();
-        lookup(mod->block, name, symbols, alreadyVisited);
+  return symbols.size() != 0;
+}
 
-        if (symbols.n == 0 && getScope(scope)) {
-          lookup(getScope(scope), name, symbols, alreadyVisited);
+// Returns true if the symbol is present in the vector, false otherwise
+static bool isRepeat(Symbol* toAdd, const std::vector<Symbol*>& symbols) {
+  for (std::vector<Symbol* >::const_iterator it = symbols.begin();
+       it != symbols.end();
+       ++it) {
+    if (*it == toAdd) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+// Is this name defined in this scope?
+static Symbol* inSymbolTable(const char* name, BaseAST* ast) {
+  Symbol* retval = NULL;
+
+  if (ResolveScope* scope = ResolveScope::getScopeFor(ast)) {
+    if (Symbol* sym = scope->lookupNameLocally(name)) {
+      if (FnSymbol* fn = toFnSymbol(sym)) {
+        if (fn->isMethod() == false || methodMatched(ast, fn) == true) {
+          retval = sym;
         }
+
       } else {
-        FnSymbol* fn = toFnSymbol(scope);
-        if (fn && fn->_this)
-        {
-          AggregateType* ct = toAggregateType(fn->_this->type);
-          if (ct)
-            lookup(ct->symbol, name, symbols, alreadyVisited);
-        }
-        if (symbols.n == 0)
-          lookup(getScope(scope), name, symbols, alreadyVisited);
+        retval = sym;
       }
     }
   }
+
+  return retval;
 }
 
-// This version does not recurse through module uses.
-static void lookupSimple(BaseAST*       scope,
-                         const char*    name,
-                         Vec<Symbol*>&  symbols)
-{
-  if (symbolTable.count(scope) != 0) {
-    SymbolTableEntry* entry = symbolTable[scope];
+static Symbol* inType(const char* name, BaseAST* scope) {
+  Symbol* retval = NULL;
 
-    if (entry->count(name) != 0) {
-      Symbol* sym = (*entry)[name];
-      symbols.set_add(sym);
+  if (TypeSymbol* ts = toTypeSymbol(scope)) {
+    if (AggregateType* ct = toAggregateType(ts->type)) {
+      if (Symbol* sym = ct->getField(name, false)) {
+        retval = sym;
+
+      } else if (Symbol* fn = getMethod(name, ct)) {
+        if (methodMatched(scope, toFnSymbol(fn)) == true) {
+          retval = fn;
+        }
+      }
     }
   }
 
-  if (TypeSymbol* ts = toTypeSymbol(scope))
-    if (AggregateType* ct = toAggregateType(ts->type))
-      if (Symbol* sym = ct->getField(name, false))
-        symbols.set_add(sym);
+  return retval;
 }
 
-static void buildBreadthFirstModuleList(Vec<ModuleSymbol*>* modules) {
-  Vec<ModuleSymbol*> seen;
+// For a scope and a given method, determine if the method is visible in this
+// scope
+// Lydia note (2015/06/26)
+// Semantic issue not handled by this function: when a parenthesis-less method
+// is defined by an outside module and the use of that module is at the same
+// scope as another symbol of the same name as the method, which symbol should
+// take precedent?  When the use is not present, both the prior version of
+// scopeResolve and the current version don't resolve the symbol, leaving the
+// decision to function resolution, which thinks it should have gotten the
+// method that wasn't available
+static bool methodMatched(BaseAST* scope, FnSymbol* method) {
+  bool retval = true;
+
+  if (method->_this->type->symbol == scope) {
+    retval = true;
+
+  } else {
+    BaseAST* curScope = getScope(scope);
+
+    // Traverse up the scopes either until we find this method or until there
+    // are no more scopes to traverse
+    while (curScope) {
+      if (TypeSymbol* ts = toTypeSymbol(scope)) {
+        // Are we in a type symbol?
+        if (Symbol* sym = getMethod(method->name, ts->type)) {
+          // Does that type symbol have a method with the same name?
+          if (sym == method) {
+            // Is it us?
+            return true;
+          } else {
+            // We are not in scope
+            return false;
+          }
+        }
+      }
+      curScope = getScope(curScope);
+    }
+
+    retval = false;
+  }
+
+  return retval;
+}
+
+// Determines and obtains a method by the given name on the given type
+//
+// This function uses the same methodology as isMethodName but returns the
+// symbol found instead of just a boolean
+static FnSymbol* getMethod(const char* name, Type* type) {
+  FnSymbol* retval = NULL;
+
+  if (strcmp(name, type->symbol->name) == 0) {
+    retval = NULL;
+
+  } else {
+    // Looks for name in methods defined directly on this type
+    forv_Vec(FnSymbol, method, type->methods) {
+      if (method != NULL && strcmp(name, method->name) == 0) {
+        retval = method;
+      }
+    }
+
+    if (retval == NULL) {
+      if (AggregateType* at = toAggregateType(type)) {
+        Type* outerType = at->symbol->defPoint->parentSymbol->type;
+
+        // Looks for name in methods defined on parent types
+        forv_Vec(AggregateType, pt, at->dispatchParents) {
+          if (FnSymbol* sym = getMethod(name, pt)) {
+            retval = sym;
+            break;
+          }
+        }
+
+        // Looks for name in types wrapping this type definition
+        if (retval == NULL) {
+          if (AggregateType* outer = toAggregateType(outerType)) {
+            if (FnSymbol* sym = getMethod(name, outer)) {
+              retval = sym;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  return retval;
+}
+
+static void buildBreadthFirstModuleList(Vec<UseStmt*>* modules) {
+  std::map<Symbol*, std::vector<UseStmt* > > seen;
 
   return buildBreadthFirstModuleList(modules, modules, &seen);
 }
 
-static void buildBreadthFirstModuleList(Vec<ModuleSymbol*>* modules,
-                                        Vec<ModuleSymbol*>* current,
-                                        Vec<ModuleSymbol*>* alreadySeen) {
-  modules->add(NULL); // use NULL sentinel to identify modules of equal depth
+// If the uses of a particular module are considered its level 1 uses, then
+// this function will only add level 2 and lower uses to the modules vector
+// argument.
+static void buildBreadthFirstModuleList(
+                 Vec<UseStmt*>*                             modules,
+                 Vec<UseStmt*>*                             current,
+                 std::map<Symbol*, std::vector<UseStmt*> >* alreadySeen) {
+ // use NULL as a sentinel to identify modules of equal depth
+  modules->add(NULL);
 
-  Vec<ModuleSymbol*> next;
+  Vec<UseStmt*> next;
 
-  forv_Vec(ModuleSymbol, module, *current) {
-    if (!module) {
+  forv_Vec(UseStmt, source, *current) {
+    if (!source) {
       break;
-    } else if (module->block->modUses) {
-      for_actuals(expr, module->block->modUses) {
-        SymExpr*      se  = toSymExpr(expr);
-        INT_ASSERT(se);
+    } else {
+      SymExpr* se = toSymExpr(source->src);
+      INT_ASSERT(se);
+      if (ModuleSymbol* mod = toModuleSymbol(se->symbol())) {
+        if (mod->block->useList != NULL) {
+          for_actuals(expr, mod->block->useList) {
+            UseStmt* use = toUseStmt(expr);
+            INT_ASSERT(use);
 
-        ModuleSymbol* mod = toModuleSymbol(se->var);
-        INT_ASSERT(mod);
+            SymExpr* useSE = toSymExpr(use->src);
+            INT_ASSERT(useSE);
 
-        if (!alreadySeen->set_in(mod)) {
-          next.add(mod);
-          modules->add(mod);
-          alreadySeen->set_add(mod);
+            UseStmt* useToAdd = NULL;
+            if (!useSE->symbol()->hasFlag(FLAG_PRIVATE)) {
+              // Uses of private modules are not transitive -
+              // the symbols in the private modules are only visible to
+              // itself and its immediate parent.  Therefore, if the symbol
+              // is private, we will not traverse it further and will merely
+              // add it to the alreadySeen map.
+              useToAdd = use->applyOuterUse(source);
+
+              if (useToAdd                       != NULL &&
+                  skipUse(alreadySeen, useToAdd) == false) {
+                next.add(useToAdd);
+                modules->add(useToAdd);
+              }
+
+              // if applyOuterUse returned NULL, the number of symbols that
+              // could be provided from this use was 0, so it didn't need to be
+              // added to the alreadySeen map.
+              if (useToAdd != NULL) {
+                (*alreadySeen)[useSE->symbol()].push_back(useToAdd);
+              }
+
+            } else {
+              (*alreadySeen)[useSE->symbol()].push_back(use);
+            }
+          }
         }
       }
     }
@@ -1843,19 +1666,81 @@ static void buildBreadthFirstModuleList(Vec<ModuleSymbol*>* modules,
   }
 }
 
-/************************************ | *************************************
-*                                                                           *
-* getScope returns the BaseAST that corresponds to the scope where 'ast'    *
-* exists; 'ast' must be an Expr or a Symbol.  Note that if you pass this a  *
-* BaseAST that defines a scope, the BaseAST that defines the scope where it *
-* exists will be returned.                                                  *
-*                                                                           *
-* Thus if a BlockStmt nested in another BlockStmt is passed to getScope,    *
-* the outer BlockStmt will be returned.                                     *
-*                                                                           *
-************************************* | ************************************/
+// Returns true if we should skip looking at this use, because the symbols it
+// provides have already been covered by a previous use.
+static bool skipUse(std::map<Symbol*, std::vector<UseStmt*> >* seen,
+                    UseStmt*                                   current) {
+  SymExpr* useSE = toSymExpr(current->src);
 
-static BaseAST* getScope(BaseAST* ast) {
+  INT_ASSERT(useSE);
+
+  std::vector<UseStmt*> vec = (*seen)[useSE->symbol()];
+
+  if (vec.size() > 0) {
+    // We've already seen at least one use of this module, but it might
+    // not be thorough enough to justify skipping the newest 'use'.
+    for_vector(UseStmt, use, vec) {
+      if (current->providesNewSymbols(use) == false) {
+        // We found a prior use that covered all the symbols available
+        // from current.  We can skip looking at current
+        return true;
+      }
+    }
+  }
+
+  // We didn't have a prior use, or all the prior uses we missing at
+  // least one of the symbols current provides.  Don't skip current.
+  return false;
+}
+
+/************************************* | **************************************
+*                                                                             *
+* Returns true if this module is capable of being used or traversed as part   *
+* of an access in the provided scope, false if the module is private and the  *
+* scope is not in its direct parent.                                          *
+*                                                                             *
+************************************** | *************************************/
+
+bool Symbol::isVisible(BaseAST* scope) const {
+  bool retval = true;
+
+  if (hasFlag(FLAG_PRIVATE) == true) {
+    BaseAST* parentScope = getScope(defPoint);
+    BaseAST* searchScope = scope;
+
+    INT_ASSERT(parentScope != NULL);
+
+    // We need to walk up scopes until we either find our parent scope (in
+    // which case, we're visible if it "use"s us) or we run out of scope to
+    // check against (in which case we are most certainly *not* visible)
+    while (searchScope != NULL) {
+      if (searchScope == parentScope) {
+        return true;
+      }
+
+      searchScope = getScope(searchScope);
+    }
+
+    // We got to the top of the scope without finding the parent.
+    return false;
+  }
+
+  return retval;
+}
+
+/************************************* | **************************************
+*                                                                             *
+* getScope returns the BaseAST that corresponds to the scope where 'ast'      *
+* exists; 'ast' must be an Expr or a Symbol.  Note that if you pass this a    *
+* BaseAST that defines a scope, the BaseAST that defines the scope where it   *
+* exists will be returned.                                                    *
+*                                                                             *
+* Thus if a BlockStmt nested in another BlockStmt is passed to getScope,      *
+* the outer BlockStmt will be returned.                                       *
+*                                                                             *
+************************************** | *************************************/
+
+BaseAST* getScope(BaseAST* ast) {
   if (Expr* expr = toExpr(ast)) {
     BlockStmt* block = toBlockStmt(expr->parentExpr);
 
@@ -1893,3 +1778,18 @@ static BaseAST* getScope(BaseAST* ast) {
   return NULL;
 }
 
+/************************************* | **************************************
+*                                                                             *
+*                                                                             *
+*                                                                             *
+************************************** | *************************************/
+
+static ModuleSymbol* definesModuleSymbol(Expr* expr) {
+  ModuleSymbol* retval = NULL;
+
+  if (DefExpr* def = toDefExpr(expr)) {
+    retval = toModuleSymbol(def->sym);
+  }
+
+  return retval;
+}

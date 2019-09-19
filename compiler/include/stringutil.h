@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2014 Cray Inc.
+ * Copyright 2004-2018 Cray Inc.
  * Other additional copyright holders may be indicated within.
  * 
  * The entirety of this work is licensed under the Apache License,
@@ -21,15 +21,20 @@
 #define _STRINGUTIL_H_
 
 #include <stdint.h>
+#include <string>
+#include <vector>
 
 const char* astr(const char* s1,
-                 const char* s2 = 0,
+                 const char* s2,
                  const char* s3 = 0,
                  const char* s4 = 0,
                  const char* s5 = 0,
                  const char* s6 = 0,
                  const char* s7 = 0,
                  const char* s8 = 0);
+
+const char* astr(const char* s1);
+const char* astr(const std::string& s);
 
 const char* istr(int i);
 
@@ -49,5 +54,15 @@ uint64_t    str2uint64(const char* str);
 uint64_t    binStr2uint64(const char* str);
 uint64_t    octStr2uint64(const char* str);
 uint64_t    hexStr2uint64(const char* str);
+
+// std::string utilities
+       std::string erasePrefix(std::string s, int count);
+       std::string firstNonEmptyLine(std::string s);
+inline bool        isEmpty(std::string s);
+inline std::string ltrim(std::string s);
+       std::string ltrimAllLines(std::string s);
+       int         minimumPrefix(std::string s);
+
+void readArgsFromString(std::string s, std::vector<std::string>& args);
 
 #endif

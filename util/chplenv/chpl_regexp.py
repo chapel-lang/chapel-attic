@@ -1,20 +1,23 @@
 #!/usr/bin/env python
-import sys, os
+import os
+import sys
 
-import chpl_arch, chpl_platform, chpl_compiler, utils
+chplenv_dir = os.path.dirname(__file__)
+sys.path.insert(0, os.path.abspath(chplenv_dir))
+
+import chpl_3p_re2_configs, chpl_arch, chpl_compiler, chpl_platform, overrides
+from chpl_home_utils import get_chpl_third_party
 from utils import memoize
+
 
 @memoize
 def get():
-    regexp_val = os.environ.get('CHPL_REGEXP')
+    regexp_val = overrides.get('CHPL_REGEXP')
     if not regexp_val:
-        target_platform = chpl_platform.get('target')
-        target_compiler = chpl_compiler.get('target')
-        target_arch = chpl_arch.get('target', map_to_compiler=True, get_lcd=True)
-        chpl_home = utils.get_chpl_home()
-        regexp_target_dir = '{0}-{1}-{2}'.format(target_platform, target_compiler, target_arch)
-        regexp_subdir = os.path.join(chpl_home, 'third-party', 're2', 'install',
-                                     regexp_target_dir)
+        third_party = get_chpl_third_party()
+        uniq_cfg_path = chpl_3p_re2_configs.get_uniq_cfg_path()
+        regexp_subdir = os.path.join(third_party, 're2', 'install',
+                                     uniq_cfg_path)
         regexp_header = os.path.join(regexp_subdir, 'include', 're2', 're2.h')
         if os.path.exists(regexp_header):
             regexp_val = 're2'

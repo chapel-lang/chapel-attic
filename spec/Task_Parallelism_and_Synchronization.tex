@@ -11,7 +11,7 @@ to introduce concurrency into a program.
 \item \rsec{Synchronization_Variables} describes synchronization
 variables, an unstructured mechanism for synchronizing tasks.
 \item \rsec{Atomic_Variables} describes atomic variables, a mechanism
-for supporting atomic operations. 
+for supporting atomic operations.
 \item \rsec{Cobegin} describes the cobegin statement, a structured way to
 introduce concurrency into a program.
 \item \rsec{Coforall} describes the coforall loop, another structured way to
@@ -59,10 +59,15 @@ implementation and run-time execution state.
 \index{task parallelism!task function}
 A task is represented as a call to a \emph{task function}, whose body
 contains the Chapel code for the task. Variables defined in outer
-scopes are considered to be passed into a task function by blank intent,
+scopes are considered to be passed into a task function by default intent,
 unless a different \emph{task intent} is specified explicitly
 by a \sntx{task-intent-clause}.
 
+% Should this be placed more prominently right before this section?
+Accesses to the same variable from different tasks are subject
+to the Memory Consistency Model (\rsec{Memory_Consistency_Model}).
+Such accesses can result from aliasing due to \chpl{ref} argument intents
+or task intents, among others.
 
 \section{The Begin Statement}
 \label{Begin}
@@ -136,9 +141,25 @@ read, its state does not change.  When either type of synchronization
 variable is written, its state transitions to full.
 
 \chpl{sync} and \chpl{single} are type qualifiers and precede
-the type of the variable's value in
-the declaration.  Sync and single are supported for all Chapel
-primitive types (~\rsec{Primitive_Types}) except strings and complex.
+the type of the variable's value in the declaration.  Sync and single
+are supported for all Chapel primitive types (~\rsec{Primitive_Types})
+except complex.  They are also supported for enumerated types
+(~\rsec{Enumerated_Types}) and variables of class type
+(~\rsec{Class_Types}).  For sync variables of class type, the
+full/empty state applies to the reference to the class object, not to
+its member fields.
+
+\begin{rationale}
+It is only well-formed to apply full-empty semantics to types that
+have no more than a single logical value.  Booleans, integers, real
+and imaginary numbers, enums, and class references all meet this
+criteria.  Since it is possible to read/write the individual elements
+of a complex value, it's not obvious how the full-empty semantics
+would interact with such operations.  While one could argue that
+record types with a single field could also be included, the user can
+more directly express such cases by declaring the field itself to be
+of sync type.
+\end{rationale}
 
 If a task attempts to read or write a synchronization variable that is
 not in the correct state, the task is suspended.  When the variable
@@ -147,6 +168,12 @@ multiple tasks blocked waiting for the state transition, one is
 non-deterministically selected to proceed and the others continue to
 wait if it is a sync variable; all tasks are selected to proceed
 if it is a single variable.
+
+%
+% TODO: The following should really be a 'type-expression' right?
+% i.e., if there was a user type alias 'eltType', one should be
+% able to do 'sync eltType'...
+%
 
 A synchronization variable is specified with a sync or single type
 given by the following syntax:
@@ -171,7 +198,7 @@ class Tree {
   var value: int;
 
   proc sum():int {
-    if (isLeaf) then 
+    if (isLeaf) then
        return value;
 
     var x(*\texttt{\$}*): sync int;
@@ -187,7 +214,7 @@ var tree: Tree = new Tree(false, new Tree(false, new Tree(true, nil, nil, 1),
                                  new Tree(false, new Tree(true, nil, nil, 1),
                                                  new Tree(true, nil, nil, 1), 1), 1);
 writeln(tree.sum());
-proc Tree.~Tree() {
+proc Tree.deinit() {
   if isLeaf then return;
   delete left;
   delete right;
@@ -233,6 +260,7 @@ before either had written its updated value, causing one of the
 increments to be lost.
 \end{chapelexample}
 
+\pagebreak
 \begin{chapelexample}{singleVar.chpl}
 The following code implements a simple split-phase barrier using a
 single variable.
@@ -273,7 +301,7 @@ full at which time all the other tasks can be unblocked and run.
 \end{chapelexample}
 
 \index{synchronization types!formal arguments}
-If a formal argument with a blank intent either has a synchronization
+If a formal argument with a default intent either has a synchronization
 type or the formal is generic (\rsec{Formal_Arguments_of_Generic_Type})
 and the actual has a synchronization type, the actual must be an
 lvalue and is passed by reference. In these cases the formal itself
@@ -322,6 +350,7 @@ single variable remains full when this method completes.
 This method implements the normal read of a \chpl{single} variable.
 \end{protobody}
 
+\pagebreak
 \index{readXX (sync var)@\chpl{readXX} (sync var)}
 \index{predefined functions!readXX (sync var)@\chpl{readXX} (sync var)}
 \begin{protohead}
@@ -450,7 +479,7 @@ writeln((x(*\texttt{\$}*).readXX(), y(*\texttt{\$}*).readFF(), z));
 
 Atomic variables are variables that support atomic operations. Chapel
 currently supports atomic operations for bools, all supported sizes of
-signed and unsigned integers, as well as all supported sizes of reals. 
+signed and unsigned integers, as well as all supported sizes of reals.
 
 \begin{rationale}
 The choice of supported atomic variable types as well as the atomic
@@ -459,9 +488,9 @@ operations was strongly influenced by the C11 standard.
 
 Atomic is a type qualifier that precedes the variable's type in
 the declaration. Atomic operations are supported for bools, and all
-sizes of ints, uints, and reals.  
+sizes of ints, uints, and reals.
 
-An atomic variable is specified with an atomic type given by the 
+An atomic variable is specified with an atomic type given by the
 following syntax:
 
 \begin{syntax}
@@ -475,7 +504,7 @@ atomic-type:
 
 The following methods are defined for variables of atomic type. Note
 that not all operations are supported for all atomic types. The
-supported types are listed for each method.  
+supported types are listed for each method.
 
 \index{atomic types!memory order}
 Most of the predefined atomic methods accept an optional argument
@@ -484,7 +513,6 @@ used to specify the ordering constraints of atomic operations. The
 supported memory\_order values are:
 \begin{itemize}
 \item{memory\_order\_relaxed}
-\item{memory\_order\_consume}
 \item{memory\_order\_acquire}
 \item{memory\_order\_release}
 \item{memory\_order\_acq\_rel}
@@ -513,9 +541,10 @@ conservative ordering than specified.
 proc (atomic t).read(memory_order order): t
 \end{protohead}
 \begin{protobody}
-Reads and returns the stored value. Defined for all atomic types.  
+Reads and returns the stored value. Defined for all atomic types.
 \end{protobody}
 
+\pagebreak
 \index{peek (atomic var)@\chpl{peek} (atomic var)}
 \index{predefined functions!peek (atomic var)@\chpl{peek} (atomic var)}
 \begin{protohead}
@@ -532,7 +561,7 @@ Defined for all atomic types.
 proc (atomic t).write(v: t, memory_order order)
 \end{protohead}
 \begin{protobody}
-Stores \chpl{v} as the new value. Defined for all atomic types.  
+Stores \chpl{v} as the new value. Defined for all atomic types.
 \end{protobody}
 
 \index{poke (atomic var)@\chpl{poke} (atomic var)}
@@ -552,7 +581,7 @@ proc (atomic t).exchange(v: t, memory_order order): t
 \end{protohead}
 \begin{protobody}
 Stores \chpl{v} as the new value and returns the original
-value. Defined for all atomic types. 
+value. Defined for all atomic types.
 \end{protobody}
 
 \index{compareExchangWeak (atomic var)@\chpl{compareExchangeWeak} (atomic var)}
@@ -808,12 +837,12 @@ the last line until all of the tasks have completed.
 If a variable is referenced within the lexical scope of a
 \chpl{begin}, \chpl{cobegin}, or \chpl{coforall} statement
 and is declared outside that statement, it is considered
-to be passed as an actual argument to the corresponding task function 
+to be passed as an actual argument to the corresponding task function
 at task creation time. All references to the variable
 within the task function implicitly refer to the task function's
 corresponding formal argument.
 
-Each formal argument of a task function has the blank intent by default.
+Each formal argument of a task function has the default intent by default.
 For variables of primitive and class types, this has the effect
 of capturing the value of the variable at task creation time
 and referencing that value instead of the original variable
@@ -835,6 +864,17 @@ task-intent-list:
   formal-intent identifier
   formal-intent identifier, task-intent-list
 \end{syntax}
+
+where the following intents can be used as a \sntx{formal-intent}:
+\chpl{ref}, \chpl{in}, \chpl{const}, \chpl{const in}, \chpl{const ref}.
+
+% TODO for task intents:
+% * Introduce a 'task-formal-intent' syntactic rule
+%   that expands to the legal intents - far preferable than
+%   qualifying which intents are legal in the text of this paragraph.
+% * That's assuming we do not support 'out' and 'inout',
+%   which is still up for debate; otherwise leave as-is.
+% * Do we want to allow default intents? Current implementation allows them.
 
 The implicit treatment of outer scope variables as the task function's
 formal arguments applies to both module level and local variables.
@@ -886,8 +926,8 @@ in the surrounding code, for example loop-invariant code motion.
 
 Furthermore, in the above example the scope where \chpl{i} is declared
 may exit before all the ten tasks complete.  Without task intents,
-the implementation needs to ensure that \chpl{i} can still be
-referenced by the tasks after its scope ends.
+the user would have to protect \chpl{i} to make sure its lexical scope
+doesn't exit before the tasks referencing it complete.
 
 We decided to treat \chpl{cobegin} and \chpl{coforall} statements the
 same way as \chpl{begin}. This is for consistency and to make the
@@ -895,7 +935,7 @@ race-avoidance benefit available to more code.
 
 We decided to apply task intents to module level variables, in addition
 to local variables. Again, this is for consistency. One could view module
-level variables differently than local variables (e.g. a module level 
+level variables differently than local variables (e.g. a module level
 variable is ``always available''), but we favored consistency over such
 an approach.
 
@@ -904,27 +944,21 @@ the variables in the dynamic scope of a task construct. This is to
 keep this feature manageable, so that all variables subject to task
 intents can be obtained by examining just the lexical scope of the
 task construct. In general, the set of closure variables can be hard
-to determine, unweildy to implement and reason about, it is unclear
+to determine, unwieldy to implement and reason about, it is unclear
 what to do with extern functions, etc.
-\end{rationale}
 
+We do not provide \chpl{inout} or \chpl{out} as task intents because they
+will necessarily create a data race in a \chpl{cobegin} or \chpl{coforall}.
+% that does not necessarily apply to a 'begin'
+\chpl{type} and \chpl{param} intents are not available either
+as they do not seem useful as task intents.
+\end{rationale}
 
 \begin{future}
 For a given intent, we would also like to provide a blanket clause,
 which would apply the intent to all variables.
 An example of syntax for a blanket \chpl{ref} intent would be \chpl{ref *}.
 \end{future}
-
-\begin{future}
-We may want to disallow some intents because they do not make sense
-in this context. For example, an \chpl{inout} or \chpl{out} intent
-will necessarily create a data race in a \chpl{cobegin} or \chpl{coforall}.
-Also, \chpl{type} and \chpl{param} intents do not seem useful.
-\end{future}
-
-\begin{craychapel}
-At present, only the \chpl{ref} task intent is implemented.
-\end{craychapel}
 
 
 \section{The Sync Statement}
@@ -1169,7 +1203,7 @@ while (head) {
   next = head.next;
   delete head;
   head = next;
-} 
+}
 \end{chapelpost}
 \begin{chapeloutput}
 atomic.chpl:13: warning: atomic keyword is ignored (not implemented)

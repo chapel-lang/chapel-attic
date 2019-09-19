@@ -27,9 +27,9 @@ const localesAcross = sqrt(numLocales) : int;
 const blkSize = n / localesAcross : int;
 
 class WrappedArray {
-    proc WrappedArray() { }
+    proc init() { }
 
-    proc WrappedArray(row, col, numRows, numCols) {
+    proc init(row, col, numRows, numCols) {
         dom = {row..row+numRows-1, col..col+numCols-1};
     }
 
@@ -81,9 +81,9 @@ proc luLikeMultiply(
 
     // do local matrix-multiply
     forall (locRow, locCol) in solLocales do on myLocales[locRow,locCol] {
-        var localA   => rowCopies[locRow,locCol].data;
-        var localB   => colCopies[locRow,locCol].data;
-        var localSol => A[locRow,locCol].data;
+        ref localA   = rowCopies[locRow,locCol].data;
+        ref localB   = colCopies[locRow,locCol].data;
+        ref localSol = A[locRow,locCol].data;
 
         forall i in localSol.domain.dim(1) {
             forall j in localSol.domain.dim(2) {
@@ -94,23 +94,24 @@ proc luLikeMultiply(
             }
         }
     }
+    for r in rowCopies do delete r;
+    for c in colCopies do delete c;
 }
 
 
 
 
 proc matrixMult_ijk(
-    const m : int,
-    const p : int,
-    const n : int,
-    const A : [1..m, 1..p] int,
-    const B : [1..p, 1..n] int,
-    C : [1..m, 1..n] int)
+    outerDim,
+    innerDim,
+    const A : [outerDim, innerDim] int,
+    const B : [innerDim, outerDim] int,
+    C : [outerDim, outerDim] int)
 {
-    for i in 1..m {
-        for j in 1..n {
+    for i in outerDim {
+        for j in outerDim {
             C[i,j] = 0;
-            for k in 1..p {
+            for k in innerDim {
                 C[i,j] += A[i,k] * B[k,j];
             }
         }
@@ -162,9 +163,8 @@ proc main() {
     }
 
     matrixMult_ijk(
-        n-blkSize,
-        blkSize,
-        n-blkSize,
+        1+blkSize..n,
+        1..1+blkSize-1,
         data(aRegion),
         data(bRegion),
         data(solRegion));
@@ -183,5 +183,7 @@ proc main() {
     }
 
     if passed then writeln("PASSED"); else writeln("FAILED");
+
+    for a in A do delete a;
 }
 

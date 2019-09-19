@@ -44,4 +44,10 @@ end
 define loc
  p ::stringLoc($arg0)
 end
+define locid
+  call debugSummary($arg0)
+end
+define parentlocid
+  call debugSummary(debugParentSym($arg0))
+end
 break gdbShouldBreakHere

@@ -12,7 +12,7 @@ extern proc chpl_task_yield();
       colors are the same, no change, otherwise each chameneos changes to the
       color you and your partner both are not.)
 
-    - (description of benchmark: http://shootout.alioth.debian.org/u32q/benchmark.php?test=chameneosredux&lang=all */
+    - (description of benchmark: http://benchmarksgame.alioth.debian.org/u32q/performance.php?test=chameneosredux */
 
 config const numMeetings : int = 6000000;  // number of meetings to take place
 config const numChameneos1 : int(32) = 3;  // size of population 1
@@ -31,7 +31,8 @@ class MeetingPlace {
 
   /* constructor for MeetingPlace, sets the
      number of meetings to take place */
-  proc MeetingPlace() {
+  proc init() {
+    this.initDone();
     state.write((numMeetings << MEET_COUNT_SHIFT) : uint(32));
   }
 
@@ -48,10 +49,30 @@ class MeetingPlace {
    if this and the other color are of the same value, return own value
    otherwise return the color that is neither this or the other color */
 proc getComplement(myColor : Color, otherColor : Color) {
-  if (myColor == otherColor) {
-    return myColor;
+  select myColor {
+    when otherColor do return myColor;
+    when Color.blue {
+      if (otherColor == Color.red) then return Color.yellow;
+      else
+        // otherColor == Color.yellow, because first when statement
+        // eliminates Color.blue
+        return Color.red;
+    }
+    when Color.red {
+      if (otherColor == Color.blue) then return Color.yellow;
+      else
+        // otherColor == Color.yellow, because first when statement
+        // eliminates Color.red
+        return Color.blue;
+    }
+    otherwise {
+      if (otherColor == Color.blue) then return Color.red;
+      else
+        // otherColor == Color.red, because first when statement
+        // eliminates Color.yellow
+        return Color.blue;
+    }
   }
-  return (3 - myColor - otherColor) : Color;
 }
 
 class Chameneos {
@@ -203,7 +224,7 @@ proc printInfo(population : [] Chameneos) {
 proc spellInt(n : int) {
   var s : string = n:string;
   for i in 1..s.length {
-    write(" ", (s.substring(i):int + 1):Digit);
+    write(" ", (s[i]:int + 1):Digit);
   }
   writeln();
 }
@@ -229,6 +250,11 @@ proc main() {
       runQuiet(population1, forest);
       runQuiet(population2, forest);
     }
+
+    for c in population2 do delete c;
+    for c in population1 do delete c;
+
+    delete forest;
   }
 }
 

@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2014 Cray Inc.
+ * Copyright 2004-2018 Cray Inc.
  * Other additional copyright holders may be indicated within.
  * 
  * The entirety of this work is licensed under the Apache License,
@@ -22,10 +22,12 @@
 #include "chplmemtrack.h"
 #include "chpl-mem.h"
 #include "chpl-mem-desc.h"
+#include "chpl-mem-sys.h"  // mem layer not initialized yet, need system alloc
 #include "chpl-tasks.h"
 #include "chpltypes.h"
 #include "chpl-comm.h"
 #include "chplcgfns.h"
+#include "chpl-linefile-support.h"
 #include "config.h"
 #include "error.h"
 
@@ -39,23 +41,25 @@
 #include <inttypes.h>
 
 
+static void
+printMemAllocs(chpl_mem_descInt_t description, int64_t threshold,
+               int32_t lineno, int32_t filename);
+
+
 //
 // This is in the modules, in MemTracking.chpl.
 //
-extern void chpl_memTracking_returnConfigVals(chpl_bool*,
-                                              chpl_bool*,
-                                              chpl_bool*,
-                                              chpl_bool*,
-                                              size_t*,
-                                              size_t*,
-                                              c_string*,
-                                              c_string*);
+extern void chpl_memTracking_returnConfigVals(chpl_bool* memTrack,
+                                              chpl_bool* memStats,
+                                              chpl_bool* memLeaksByType,
+                                              c_string* memLeaksByDesc,
+                                              chpl_bool* memLeaks,
+                                              size_t* memMax,
+                                              size_t* memThreshold,
+                                              c_string* memLog,
+                                              c_string* memLeaksLog);
 
 chpl_bool chpl_memTrack = false;
-
-#undef malloc
-#undef calloc
-#undef free
 
 typedef struct memTableEntry_struct { /* table entry */
   size_t number;
@@ -63,7 +67,7 @@ typedef struct memTableEntry_struct { /* table entry */
   chpl_mem_descInt_t description;
   void* memAlloc;
   int32_t lineno;
-  c_string filename;
+  int32_t filename;
   struct memTableEntry_struct* nextInBucket;
 } memTableEntry;
 
@@ -78,14 +82,15 @@ static int hashSize = 0;
 
 static memTableEntry** memTable = NULL;
 
-static _Bool memLeaks = false;
-static _Bool memLeaksTable = false;
 static _Bool memStats = false;
+static _Bool memLeaksByType = false;
+static c_string memLeaksByDesc = "";
+static _Bool memLeaks = false;
 static size_t memMax = 0;
 static size_t memThreshold = 0;
-static c_string memLog = "";
+static c_string memLog = NULL;
 static FILE* memLogFile = NULL;
-static c_string memLeaksLog = "";
+static c_string memLeaksLog = NULL;
 
 static size_t totalMem = 0;       /* total memory currently allocated */
 static size_t maxMem = 0;         /* maximum total memory during run  */
@@ -116,8 +121,9 @@ void chpl_setMemFlags(void) {
   //
   chpl_memTracking_returnConfigVals(&local_memTrack,
                                     &memStats,
+                                    &memLeaksByType,
+                                    &memLeaksByDesc,
                                     &memLeaks,
-                                    &memLeaksTable,
                                     &memMax,
                                     &memThreshold,
                                     &memLog,
@@ -125,23 +131,24 @@ void chpl_setMemFlags(void) {
 
   if (local_memTrack
       || memStats
+      || memLeaksByType
+      || (memLeaksByDesc && strcmp(memLeaksByDesc, ""))
       || memLeaks
-      || memLeaksTable
       || memMax > 0
-      || strcmp(memLeaksLog, "") != 0) {
+      || memLeaksLog != NULL) {
     chpl_memTrack = true;
   }
 
-  if (strcmp(memLog, "") == 0) {
+  if (!memLog) {
     memLogFile = stdout;
   } else {
     if (chpl_numNodes == 1) {
       memLogFile = fopen(memLog, "w");
     } else {
-      char* filename = (char*)malloc((strlen(memLog)+10)*sizeof(char));
+      char* filename = (char*)sys_malloc((strlen(memLog)+10)*sizeof(char));
       sprintf(filename, "%s.%" FORMAT_c_nodeid_t, memLog, chpl_nodeID);
       memLogFile = fopen(filename, "w");
-      free(filename);
+      sys_free(filename);
     }
   }
 
@@ -149,7 +156,7 @@ void chpl_setMemFlags(void) {
     chpl_sync_initAux(&memTrack_sync);
     hashSizeIndex = 0;
     hashSize = hashSizes[hashSizeIndex];
-    memTable = calloc(hashSize, sizeof(memTableEntry*));
+    memTable = sys_calloc(hashSize, sizeof(memTableEntry*));
   }
 }
 
@@ -166,7 +173,7 @@ static unsigned hash(void* memAlloc, int hashSize) {
 }
 
 
-static void increaseMemStat(size_t chunk, int32_t lineno, c_string filename) {
+static void increaseMemStat(size_t chunk, int32_t lineno, int32_t filename) {
   totalMem += chunk;
   totalAllocated += chunk;
   if (memMax && (totalMem > memMax)) {
@@ -193,7 +200,7 @@ resizeTable(int direction) {
 
   newHashSizeIndex = hashSizeIndex + direction;
   newHashSize = hashSizes[newHashSizeIndex];
-  newMemTable = calloc(newHashSize, sizeof(memTableEntry*));
+  newMemTable = sys_calloc(newHashSize, sizeof(memTableEntry*));
 
   for (i = 0; i < hashSize; i++) {
     for (me = memTable[i]; me != NULL; me = next) {
@@ -204,21 +211,22 @@ resizeTable(int direction) {
     }
   }
 
-  free(memTable);
+  sys_free(memTable);
   memTable = newMemTable;
   hashSize = newHashSize;
   hashSizeIndex = newHashSizeIndex;
 }
 
-
-static void addMemTableEntry(void* memAlloc, size_t number, size_t size, chpl_mem_descInt_t description, int32_t lineno, c_string filename) {
+static void addMemTableEntry(void *memAlloc, size_t number, size_t size,
+                             chpl_mem_descInt_t description, int32_t lineno,
+                             int32_t filename) {
   unsigned hashValue;
   memTableEntry* memEntry;
 
   if ((totalEntries+1)*2 > hashSize && hashSizeIndex < NUM_HASH_SIZE_INDICES-1)
     resizeTable(1);
 
-  memEntry = (memTableEntry*) calloc(1, sizeof(memTableEntry));
+  memEntry = (memTableEntry*) sys_calloc(1, sizeof(memTableEntry));
   if (!memEntry) {
     chpl_error("memtrack fault: out of memory allocating memtrack table",
                lineno, filename);
@@ -230,7 +238,7 @@ static void addMemTableEntry(void* memAlloc, size_t number, size_t size, chpl_me
   memEntry->description = description;
   memEntry->memAlloc = memAlloc;
   memEntry->lineno = lineno;
-  memEntry->filename = filename; // do we want to copy this string?
+  memEntry->filename = filename;
   memEntry->number = number;
   memEntry->size = size;
   increaseMemStat(number*size, lineno, filename);
@@ -272,18 +280,24 @@ static memTableEntry* removeMemTableEntry(void* address) {
 }
 
 
-uint64_t chpl_memoryUsed(int32_t lineno, c_string filename) {
-  if (!chpl_memTrack)
-    chpl_error("invalid call to memoryUsed(); rerun with --memTrack",
-               lineno, filename);
+uint64_t chpl_memoryUsed(int32_t lineno, int32_t filename) {
+  if (!chpl_memTrack) {
+    chpl_warning("invalid call to memoryUsed(); rerun with --memTrack",
+                 lineno, filename);
+    return 0;
+  }
+
   return (uint64_t)totalMem;
 }
 
 
-void chpl_printMemStat(int32_t lineno, c_string filename) {
-  if (!chpl_memTrack)
-    chpl_error("invalid call to printMemStat(); rerun with --memTrack",
-               lineno, filename);
+void chpl_printMemAllocStats(int32_t lineno, int32_t filename) {
+  if (!chpl_memTrack) {
+    chpl_warning("invalid call to printMemAllocStats(); rerun with --memTrack",
+                 lineno, filename);
+    return;
+  }
+
   chpl_sync_lock(&memTrack_sync);
   fprintf(memLogFile, "=================\n");
   fprintf(memLogFile, "Memory Statistics\n");
@@ -305,10 +319,10 @@ void chpl_printMemStat(int32_t lineno, c_string filename) {
     fprintf(memLogFile, "==============================================================\n");
     for (i = 0; i < chpl_numNodes; i++) {
       static size_t m1, m2, m3, m4;
-      chpl_gen_comm_get(&m1, i, &totalMem, sizeof(size_t), -1 /* broke for hetero */, 1, lineno, filename);
-      chpl_gen_comm_get(&m2, i, &maxMem, sizeof(size_t), -1 /* broke for hetero */, 1, lineno, filename);
-      chpl_gen_comm_get(&m3, i, &totalAllocated,  sizeof(size_t), -1 /* broke for hetero */, 1, lineno, filename);
-      chpl_gen_comm_get(&m4, i, &totalFreed, sizeof(size_t), -1 /*broke for hetero */, 1, lineno, filename);
+      chpl_gen_comm_get(&m1, i, &totalMem,       sizeof(size_t), -1 /* broke for hetero */, CHPL_COMM_UNKNOWN_ID, lineno, filename);
+      chpl_gen_comm_get(&m2, i, &maxMem,         sizeof(size_t), -1 /* broke for hetero */, CHPL_COMM_UNKNOWN_ID, lineno, filename);
+      chpl_gen_comm_get(&m3, i, &totalAllocated, sizeof(size_t), -1 /* broke for hetero */, CHPL_COMM_UNKNOWN_ID, lineno, filename);
+      chpl_gen_comm_get(&m4, i, &totalFreed,     sizeof(size_t), -1 /* broke for hetero */, CHPL_COMM_UNKNOWN_ID, lineno, filename);
       fprintf(memLogFile, "%-9d  %-9zu  %-9zu  %-9zu  %-9zu\n", i, m1, m2, m3, m4);
     }
     fprintf(memLogFile, "==============================================================\n");
@@ -317,18 +331,28 @@ void chpl_printMemStat(int32_t lineno, c_string filename) {
 }
 
 
-static int leakedMemTableEntryCmp(const void* p1, const void* p2) {
+
+static int memTableEntryCmp(const void* p1, const void* p2) {
   return *(size_t*)p2 - *(size_t*)p1;
 }
 
-void chpl_printLeakedMemTable(void) {
+
+static void printMemAllocsByType(_Bool forLeaks,
+                                 int32_t lineno, int32_t filename) {
   size_t* table;
   memTableEntry* me;
   int i;
   const int numberWidth   = 9;
   const int numEntries = CHPL_RT_MD_NUM+chpl_mem_numDescs;
 
-  table = (size_t*)calloc(numEntries, 3*sizeof(size_t));
+  if (!chpl_memTrack) {
+    chpl_warning("invalid call to printMemAllocsByType(); rerun with "
+                 "--memTrack",
+                 lineno, filename);
+    return;
+  }
+
+  table = (size_t*)sys_calloc(numEntries, 3*sizeof(size_t));
 
   for (i = 0; i < hashSize; i++) {
     for (me = memTable[i]; me != NULL; me = me->nextInBucket) {
@@ -338,13 +362,23 @@ void chpl_printLeakedMemTable(void) {
     }
   }
 
-  qsort(table, numEntries, 3*sizeof(size_t), leakedMemTableEntryCmp);
+  qsort(table, numEntries, 3*sizeof(size_t), memTableEntryCmp);
 
-  fprintf(memLogFile, "====================\n");
-  fprintf(memLogFile, "Leaked Memory Report\n");
-  fprintf(memLogFile, "==============================================================\n");
-  fprintf(memLogFile, "Number of leaked allocations\n");
-  fprintf(memLogFile, "           Total leaked memory (bytes)\n");
+  if (forLeaks) {
+    fprintf(memLogFile, "====================\n");
+    fprintf(memLogFile, "Leaked Memory Report\n");
+    fprintf(memLogFile, "==============================================================\n");
+    fprintf(memLogFile, "Number of leaked allocations\n");
+    fprintf(memLogFile, "           Total leaked memory (bytes)\n");
+  }
+  else {
+    fprintf(memLogFile, "================================\n");
+    fprintf(memLogFile, "Memory Allocation Report by Type\n");
+    fprintf(memLogFile, "==============================================================\n");
+    fprintf(memLogFile, "Number of allocations\n");
+    fprintf(memLogFile, "           Total allocated bytes\n");
+  }
+
   fprintf(memLogFile, "                      Description of allocation\n");
   fprintf(memLogFile, "==============================================================\n");
   for (i = 0; i < 3*(CHPL_RT_MD_NUM+chpl_mem_numDescs); i += 3) {
@@ -357,78 +391,100 @@ void chpl_printLeakedMemTable(void) {
   }
   fprintf(memLogFile, "==============================================================\n");
 
-  free(table);
+  sys_free(table);
 }
 
 
-void chpl_reportMemInfo() {
-  if (memStats) {
-    fprintf(memLogFile, "\n");
-    chpl_printMemStat(0, 0);
-  }
-  if (memLeaks) {
-    fprintf(memLogFile, "\n");
-    chpl_printLeakedMemTable();
-  }
-  if (memLeaksTable) {
-    fprintf(memLogFile, "\n");
-    chpl_printMemTable(0, 0, 0);
-  }
-  if (memLogFile && memLogFile != stdout)
-    fclose(memLogFile);
-  if (memLeaksLog && strcmp(memLeaksLog, "")) {
-    memLogFile = fopen(memLeaksLog, "a");
-    fprintf(memLogFile, "\nCompiler Command : %s\n", chpl_compileCommand);
-    fprintf(memLogFile, "Execution Command: %s\n\n", chpl_executionCommand);
-    chpl_printMemStat(0, 0);
-    fprintf(memLogFile, "\n");
-    chpl_printLeakedMemTable();
-    fclose(memLogFile);
-  }
+void chpl_printMemAllocsByType(int32_t lineno, int32_t filename) {
+  printMemAllocsByType(false /* forLeaks */, lineno, filename);
+}
+
+
+static chpl_mem_descInt_t
+find_desc(const char* descString)
+{
+  const int numEntries = CHPL_RT_MD_NUM+chpl_mem_numDescs;
+  for (chpl_mem_descInt_t i = 0; i < numEntries; ++i)
+    if (! strcmp(descString, chpl_mem_descString(i)))
+      return i;
+  return -1;
+}
+
+
+// Print only those memTable entries that match the given descriptor string and
+// exceed the given threshold.
+// If no match is found, all entries (exceeding the given threshold) are printed.
+void chpl_printMemAllocsByDesc(const char* descString, int64_t threshold,
+                               int32_t lineno, int32_t filename)
+{
+  chpl_mem_descInt_t description = find_desc(descString);
+  printMemAllocs(description, threshold, lineno, filename);
 }
 
 
 static int descCmp(const void* p1, const void* p2) {
   memTableEntry* m1 = *(memTableEntry**)p1;
   memTableEntry* m2 = *(memTableEntry**)p2;
+  c_string m1Filename;
+  c_string m2Filename;
 
   int val = strcmp(chpl_mem_descString(m1->description), chpl_mem_descString(m2->description));
-  if (val == 0 && m1->filename && m2->filename)
-    val = strcmp(m1->filename, m2->filename);
+  if (val == 0 && m1->filename && m2->filename) {
+    m1Filename = chpl_lookupFilename(m1->filename);
+    m2Filename = chpl_lookupFilename(m2->filename);
+    val = strcmp(m1Filename, m2Filename);
+  }
   if (val == 0)
     val = (m1->lineno < m2->lineno) ? -1 : ((m1->lineno > m2->lineno) ? 1 : 0);
   return val;
 }
 
 
-void chpl_printMemTable(int64_t threshold, int32_t lineno, c_string filename) {
+// If description is -1, print all entries; otherwise print only those with the
+// matching CHPL_RT_MD_ descriptor.
+// Print only those entries exceeding threshold.
+void chpl_printMemAllocs(int64_t threshold, int32_t lineno, int32_t filename) {
+  printMemAllocs(-1, threshold, lineno, filename);
+}
+
+static void
+printMemAllocs(chpl_mem_descInt_t description, int64_t threshold,
+               int32_t lineno, int32_t filename) {
   const int numberWidth   = 9;
   const int precision     = sizeof(uintptr_t) * 2;
   const int addressWidth  = precision+4;
   const int descWidth     = 33;
   int filenameWidth       = strlen("Allocated Memory (Bytes)");
   int totalWidth;
+  int filenameLength;
 
   memTableEntry* memEntry;
+  c_string memEntryFilename;
   int n, i;
   char* loc;
   memTableEntry** table;
 
-  if (!chpl_memTrack)
-    chpl_error("The printMemTable function only works with the --memTrack flag", lineno, filename);
+  if (!chpl_memTrack) {
+    chpl_warning("invalid call to printMemAllocs(); rerun with --memTrack",
+                 lineno, filename);
+    return;
+  }
 
   n = 0;
   filenameWidth = strlen("Allocated Memory (Bytes)");
   for (i = 0; i < hashSize; i++) {
     for (memEntry = memTable[i]; memEntry != NULL; memEntry = memEntry->nextInBucket) {
       size_t chunk = memEntry->number * memEntry->size;
-      if (chunk >= threshold) {
-        n += 1;
-        if (memEntry->filename) {
-          int filenameLength = strlen(memEntry->filename);
-          if (filenameLength > filenameWidth)
-            filenameWidth = filenameLength;
-        }
+      if (chunk < threshold)
+        continue;
+      if (description != -1 && memEntry->description != description)
+        continue;
+      n += 1;
+      if (memEntry->filename) {
+        memEntryFilename = chpl_lookupFilename(memEntry->filename);
+        filenameLength = strlen(memEntryFilename);
+        if (filenameLength > filenameWidth)
+          filenameWidth = filenameLength;
       }
     }
   }
@@ -448,7 +504,7 @@ void chpl_printMemTable(int64_t threshold, int32_t lineno, c_string filename) {
     fprintf(memLogFile, "=");
   fprintf(memLogFile, "\n");
 
-  table = (memTableEntry**)malloc(n*sizeof(memTableEntry*));
+  table = (memTableEntry**)sys_malloc(n*sizeof(memTableEntry*));
   if (!table)
     chpl_error("out of memory printing memory table", lineno, filename);
 
@@ -456,21 +512,25 @@ void chpl_printMemTable(int64_t threshold, int32_t lineno, c_string filename) {
   for (i = 0; i < hashSize; i++) {
     for (memEntry = memTable[i]; memEntry != NULL; memEntry = memEntry->nextInBucket) {
       size_t chunk = memEntry->number * memEntry->size;
-      if (chunk >= threshold) {
-        table[n++] = memEntry;
-      }
+      if (chunk < threshold)
+        continue;
+      if (description != -1 && memEntry->description != description)
+        continue;
+      table[n++] = memEntry;
     }
   }
   qsort(table, n, sizeof(memTableEntry*), descCmp);
 
-  loc = (char*)malloc((filenameWidth+numberWidth+1)*sizeof(char));
+  loc = (char*)sys_malloc((filenameWidth+numberWidth+1)*sizeof(char));
 
   for (i = 0; i < n; i++) {
     memEntry = table[i];
-    if (memEntry->filename)
-      sprintf(loc, "%s:%"PRId32, memEntry->filename, memEntry->lineno);
-    else
+    if (memEntry->filename) {
+      memEntryFilename = chpl_lookupFilename(memEntry->filename);
+      sprintf(loc, "%s:%" PRId32, memEntryFilename, memEntry->lineno);
+    } else {
       sprintf(loc, "--");
+    }
     fprintf(memLogFile, "%-*s%-*zu%-*zu%-*zu%-*s%#-*.*" PRIxPTR "\n",
            filenameWidth+numberWidth, loc,
            numberWidth, memEntry->number,
@@ -484,59 +544,89 @@ void chpl_printMemTable(int64_t threshold, int32_t lineno, c_string filename) {
   fprintf(memLogFile, "\n");
   putchar('\n');
 
-  free(table);
-  free(loc);
+  sys_free(table);
+  sys_free(loc);
+}
+
+
+void chpl_reportMemInfo() {
+  if (memStats) {
+    fprintf(memLogFile, "\n");
+    chpl_printMemAllocStats(0, 0);
+  }
+  if (memLeaksByType) {
+    fprintf(memLogFile, "\n");
+    printMemAllocsByType(true /* forLeaks */, 0, 0);
+  }
+  if (memLeaksByDesc && strcmp(memLeaksByDesc, "")) {
+    fprintf(memLogFile, "\n");
+    chpl_printMemAllocsByDesc(memLeaksByDesc, memThreshold, 0, 0);
+  }
+  if (memLeaks) {
+    fprintf(memLogFile, "\n");
+    printMemAllocs(-1, memThreshold, 0, 0);
+  }
+  if (memLogFile && memLogFile != stdout)
+    fclose(memLogFile);
+  if (memLeaksLog && strcmp(memLeaksLog, "")) {
+    memLogFile = fopen(memLeaksLog, "a");
+    fprintf(memLogFile, "\nCompiler Command : %s\n", chpl_compileCommand);
+    fprintf(memLogFile, "Execution Command: %s\n\n", chpl_executionCommand);
+    chpl_printMemAllocStats(0, 0);
+    fprintf(memLogFile, "\n");
+    printMemAllocsByType(true /* forLeaks */, 0, 0);
+    fclose(memLogFile);
+  }
 }
 
 
 void chpl_track_malloc(void* memAlloc, size_t number, size_t size,
                        chpl_mem_descInt_t description,
-                       int32_t lineno, c_string filename) {
+                       int32_t lineno, int32_t filename) {
   if (number * size > memThreshold) {
-    if (chpl_memTrack) {
+    if (chpl_memTrack && chpl_mem_descTrack(description)) {
       chpl_sync_lock(&memTrack_sync);
       addMemTableEntry(memAlloc, number, size, description, lineno, filename);
       chpl_sync_unlock(&memTrack_sync);
     }
     if (chpl_verbose_mem) {
-      fprintf(memLogFile,
-              "%" FORMAT_c_nodeid_t ": %s:%" PRId32
-              ": allocate %zuB of %s at %p\n",
-              chpl_nodeID, (filename ? filename : "--"), lineno,
-              number*size, chpl_mem_descString(description), memAlloc);
+      fprintf(memLogFile, "%" FORMAT_c_nodeid_t ": %s:%" PRId32
+                          ": allocate %zuB of %s at %p\n",
+              chpl_nodeID, (filename ? chpl_lookupFilename(filename) : "--"),
+              lineno, number * size, chpl_mem_descString(description),
+              memAlloc);
     }
   }
 }
 
 
-void chpl_track_free(void* memAlloc, int32_t lineno, c_string filename) {
+void chpl_track_free(void* memAlloc, int32_t lineno, int32_t filename) {
   memTableEntry* memEntry = NULL;
   if (chpl_memTrack) {
     chpl_sync_lock(&memTrack_sync);
     memEntry = removeMemTableEntry(memAlloc);
     if (memEntry) {
       if (chpl_verbose_mem) {
-        fprintf(memLogFile,
-                "%" FORMAT_c_nodeid_t ": %s:%" PRId32
-                ": free %zuB of %s at %p\n",
-                chpl_nodeID, (filename ? filename : "--"), lineno,
-                memEntry->number*memEntry->size,
+        fprintf(memLogFile, "%" FORMAT_c_nodeid_t ": %s:%" PRId32
+                            ": free %zuB of %s at %p\n",
+                chpl_nodeID, (filename ? chpl_lookupFilename(filename) : "--"),
+                lineno, memEntry->number * memEntry->size,
                 chpl_mem_descString(memEntry->description), memAlloc);
       }
-      free(memEntry);
+      sys_free(memEntry);
     }
     chpl_sync_unlock(&memTrack_sync);
   } else if (chpl_verbose_mem && !memEntry) {
-    fprintf(memLogFile,
-            "%" FORMAT_c_nodeid_t ": %s:%" PRId32 ": free at %p\n",
-            chpl_nodeID, (filename ? filename : "--"), lineno, memAlloc);
+    fprintf(memLogFile, "%" FORMAT_c_nodeid_t ": %s:%" PRId32 ": free at %p\n",
+            chpl_nodeID, (filename ? chpl_lookupFilename(filename) : "--"),
+            lineno, memAlloc);
   }
 }
 
 
 void chpl_track_realloc_pre(void* memAlloc, size_t size,
                          chpl_mem_descInt_t description,
-                         int32_t lineno, c_string filename) {
+                         int32_t lineno, int32_t filename) {
   memTableEntry* memEntry = NULL;
 
   if (chpl_memTrack && size > memThreshold) {
@@ -544,7 +634,7 @@ void chpl_track_realloc_pre(void* memAlloc, size_t size,
     if (memAlloc) {
       memEntry = removeMemTableEntry(memAlloc);
       if (memEntry)
-        free(memEntry);
+        sys_free(memEntry);
     }
     chpl_sync_unlock(&memTrack_sync);
   }
@@ -554,19 +644,19 @@ void chpl_track_realloc_pre(void* memAlloc, size_t size,
 void chpl_track_realloc_post(void* moreMemAlloc,
                          void* memAlloc, size_t size,
                          chpl_mem_descInt_t description,
-                         int32_t lineno, c_string filename) {
+                         int32_t lineno, int32_t filename) {
   if (size > memThreshold) {
-    if (chpl_memTrack) {
+    if (chpl_memTrack && chpl_mem_descTrack(description)) {
       chpl_sync_lock(&memTrack_sync);
       addMemTableEntry(moreMemAlloc, 1, size, description, lineno, filename);
       chpl_sync_unlock(&memTrack_sync);
     }
     if (chpl_verbose_mem) {
-      fprintf(memLogFile,
-              "%" FORMAT_c_nodeid_t ": %s:%" PRId32
-              ": reallocate %zuB of %s at %p -> %p\n",
-              chpl_nodeID, (filename ? filename : "--"), lineno,
-              size, chpl_mem_descString(description), memAlloc, moreMemAlloc);
+      fprintf(memLogFile, "%" FORMAT_c_nodeid_t ": %s:%" PRId32
+                          ": reallocate %zuB of %s at %p -> %p\n",
+              chpl_nodeID, (filename ? chpl_lookupFilename(filename) : "--"),
+              lineno, size, chpl_mem_descString(description), memAlloc,
+              moreMemAlloc);
     }
   }
 }

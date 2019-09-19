@@ -8,6 +8,7 @@ module HPCC_PTRANS {
 
 
   config param printTimings = true;
+  config const printPassFailOnly = false;
 
   //  default dimensions (overridable from command line)
 
@@ -272,7 +273,7 @@ module HPCC_PTRANS {
     // processor grid from A's distribution
     // --------------------------------------------
 
-    const C_locale_grid = C.domain.dist._value.targetLocales; // block version
+    const C_locale_grid = C.domain.dist.targetLocales(); // block version
     const C_grid_domain = C_locale_grid.domain,
           n_processors  = C_grid_domain.numIndices;
 
@@ -389,12 +390,18 @@ module HPCC_PTRANS {
     //  break;
     //    }
       
-    if ( error > error_tolerance ) then 
-      writeln ( "    *** FAILURE *** error     : ", error );
-    else if ( error != zero ) then
-      writeln ( "    *** SUCCESS ***  error    : ", error );
-    else
-      writeln ( "    *** SUCCESS***  exact match" );
+    if printPassFailOnly then
+      writeln ( if error > error_tolerance
+                then "    *** FAILURE ***"
+                else "    *** SUCCESS ***" );
+    else {
+      if ( error > error_tolerance ) then 
+        writeln ( "    *** FAILURE *** error     : ", error );
+      else if ( error != zero ) then
+        writeln ( "    *** SUCCESS ***  error    : ", error );
+      else
+        writeln ( "    *** SUCCESS ***  exact match" );
+    }
 
     const elapsed_time = PTRANS_time.elapsed (TimeUnits.seconds);
     

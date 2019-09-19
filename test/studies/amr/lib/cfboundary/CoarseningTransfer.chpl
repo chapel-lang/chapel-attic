@@ -30,14 +30,15 @@ class GridInvalidRegion {
     
   
   //|\''''''''''''''''''''|\
-  //| >    constructor    | >
+  //| >    initializer    | >
   //|/....................|/
   
-  proc GridInvalidRegion (
+  proc init (
     grid:         Grid,
     parent_level: Level,
     fine_level:   Level )
   {
+    this.initDone();
     //==== Calculate refinement ratio ====
     const ref_ratio = refinementRatio(parent_level, fine_level);
     
@@ -53,7 +54,7 @@ class GridInvalidRegion {
     }
   }
   // /|''''''''''''''''''''/|
-  //< |    constructor    < |
+  //< |    initializer    < |
   // \|....................\|
   
   
@@ -74,13 +75,13 @@ class GridInvalidRegion {
   
   
   //|\'''''''''''''''''''|\
-  //| >    destructor    | >
+  //| >  deinitializer   | >
   //|/...................|/
   
-  proc ~GridInvalidRegion () {}
+  proc deinit () {}
 
   // /|'''''''''''''''''''/|
-  //< |    destructor    < |
+  //< |  deinitializer   < |
   // \|...................\|
   
 }
@@ -137,15 +138,15 @@ class LevelInvalidRegion {
 
 
   //|\'''''''''''''''''''|\
-  //| >    destructor    | >
+  //| >  deinitializer   | >
   //|/...................|/
   
-  proc ~LevelInvalidRegion ()
+  proc deinit ()
   {
     for region in grid_invalid_regions do delete region;
   }
   // /|'''''''''''''''''''/|
-  //< |    destructor    < |
+  //< |  deinitializer   < |
   // \|...................\|
   
 

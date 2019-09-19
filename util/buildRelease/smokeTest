@@ -45,6 +45,15 @@ if (( $num_tabs > 0 )) ; then
     exit 1
 fi
 
+# Need to clean up all of the trailing spaces before adding this
+# Check for trailing spaces
+#num_trailing_space_lines=$($CHPL_HOME/util/devel/lookForTrailingSpaces | wc -l)
+#if (( $num_trailing_space_lines > 0 )) ; then
+#    echo "Found $num_trailing_space_lines lines with trailing spaces :-("
+#    echo $($CHPL_HOME/util/devel/lookForTrailingSpaces)
+#    exit 1
+#fi
+
 # Check for standard C headers.
 standard_c_headers=$($CHPL_HOME/util/devel/grepstdchdrs || :)
 if [ -n "${standard_c_headers}" ] ; then
@@ -106,11 +115,16 @@ num_procs=$(python -c "import multiprocessing; print(multiprocessing.cpu_count()
 # in $CHPL_HOME where the hello*.chpl tests are copied and run.
 export CHPL_CHECK_INSTALL_DIR=$CHPL_HOME
 
-if [ "${TRAVIS}" = "true" ] ; then
-    export CHPL_CHECK_INSTALL_PRINT_ERROR="true"
+if [ "${CHPL_SMOKE_SKIP_MAKE_CHECK}" != "true" ] ; then
+    # Compile chapel and make sure `make check` works. Compile first with parallel
+    # execution, but call `make check` without it.
+    make -j${num_procs} $chpl_make_args && \
+        CHPL_CHECK_DEBUG=1 make $chpl_make_args check || exit 2
 fi
 
-# Compile chapel and make sure the hello world examples run. Compile first with
-# parallel execution, but call `make check` without it.
-make -j${num_procs} $chpl_make_args && \
-    make $chpl_make_args check
+if [ "${CHPL_SMOKE_SKIP_DOC}" != "true" ] ; then
+    # Build chpldoc, make sure the chpldoc primer runs, and the docs build.
+    make -j${num_procs} $chpl_make_args chpldoc && \
+        make $chpl_make_args check-chpldoc && \
+        make docs || exit 2
+fi

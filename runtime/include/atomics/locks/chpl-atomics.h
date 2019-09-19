@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2014 Cray Inc.
+ * Copyright 2004-2018 Cray Inc.
  * Other additional copyright holders may be indicated within.
  * 
  * The entirety of this work is licensed under the Apache License,
@@ -76,10 +76,10 @@ typedef struct atomic_uintptr_s {
   uintptr_t v;
 } atomic_uintptr_t;
 
-typedef struct atomic_flag_s {
+typedef struct atomic_bool_s {
   chpl_sync_aux_t sv;
   chpl_bool v;
-} atomic_flag;
+} atomic_bool;
 
 typedef struct atomic__real32_s {
   chpl_sync_aux_t sv;
@@ -106,31 +106,9 @@ void atomic_thread_fence(memory_order order)
   // No idea!
 }
 static inline
-void atomic_signal_thread_fence(memory_order order)
+void atomic_signal_fence(memory_order order)
 {
   // No idea!
-}
-
-static MAYBE_INLINE chpl_bool
-atomic_flag_test_and_set_explicit(atomic_flag *obj, memory_order order) {
-  chpl_bool ret;
-  chpl_sync_lock(&obj->sv);
-  ret = obj->v;
-  obj->v = true;
-  chpl_sync_unlock(&obj->sv);
-  return ret;
-}
-static inline chpl_bool atomic_flag_test_and_set(atomic_flag *obj) {
-  return atomic_flag_test_and_set_explicit(obj, memory_order_seq_cst);
-}
-static MAYBE_INLINE void
-atomic_flag_clear_explicit(atomic_flag *obj, memory_order order) {
-  chpl_sync_lock(&obj->sv);
-  obj->v = false;
-  chpl_sync_unlock(&obj->sv);
-}
-static inline void atomic_flag_clear(atomic_flag *obj) {
-  atomic_flag_clear_explicit(obj, memory_order_seq_cst);
 }
 
 #define DECLARE_ATOMICS_BASE(type, basetype) \
@@ -287,7 +265,7 @@ static inline type atomic_fetch_sub_ ## type(atomic_ ## type * obj, type operand
   return atomic_fetch_sub_explicit_ ## type(obj, operand, memory_order_seq_cst); \
 }
 
-DECLARE_ATOMICS_BASE(flag, chpl_bool);
+DECLARE_ATOMICS_BASE(bool, chpl_bool);
 
 #define DECLARE_ATOMICS(type) \
   DECLARE_ATOMICS_BASE(type, type) \
@@ -305,7 +283,23 @@ DECLARE_ATOMICS(uint_least8_t);
 DECLARE_ATOMICS(uint_least16_t);
 DECLARE_ATOMICS(uint_least32_t);
 DECLARE_ATOMICS(uint_least64_t);
-DECLARE_ATOMICS(uintptr_t);
+
+// On netbsd the DECLARE_ATOMICS macro doesn't work for uintptr_t. From gbt:
+// The root of the problem is the fact the on netbsd <stdint.h> (indirectly via
+// <sys.stdint.h>) #defines uintptr_t as __uintptr_t.  (__uintptr_t is in turn
+// typedef'd as unsigned long, but that doesn't matter to us.)  The C standard
+// (6.3.10.1(1) for C99) says that the actual arguments in a macro invocation
+// are themselves macro-expanded before being substituted into the replacement
+// text, unless they are preceded by a # or ## token.  In our case, the "type"
+// formal argument of DECLARE_ATOMICS_BASE has a ## before it in the
+// replacement text, so uintptr_t is not macro-expanded and the concatenation
+// produces the expected atomic_uintptr_t typedef name.  But in the case of
+// DECLARE_ATOMICS there is neither a # or ## before "type" in the replacement
+// text, so the uintptr_t actual becomes __uintptr_t via macro expansion before
+// DECLARE_ATOMICS_BASE is invoked, and we get a syntax error on the resulting
+// atomic___uintptr_t because it's not a typedef type.
+DECLARE_ATOMICS_BASE(uintptr_t, uintptr_t);
+DECLARE_ATOMICS_FETCH_OPS(uintptr_t);
 
 DECLARE_REAL_ATOMICS(_real32);
 DECLARE_REAL_ATOMICS(_real64);

@@ -33,7 +33,7 @@ proc foo(x: real, y: real) {
 }
 
 proc testPromote(AAssoc) {
-  type idxType = AAssoc.domain._value.idxType;
+  type idxType = AAssoc.domain.idxType;
   var AA: AAssoc.type;
   if debug then writeln(AA);
   AA = foo(AAssoc, AAssoc):idxType;
@@ -45,7 +45,7 @@ proc testPromote(AAssoc) {
       break;
     }
   }
-  writeln("Zippered promotion (", typeToString(idxType), ") : ",
+  writeln("Zippered promotion (", idxType:string, ") : ",
           if success then "SUCCESS" else "FAILED");
 }
 

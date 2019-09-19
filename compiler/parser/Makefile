@@ -1,14 +1,14 @@
-# Copyright 2004-2014 Cray Inc.
+# Copyright 2004-2018 Cray Inc.
 # Other additional copyright holders may be indicated within.
-# 
+#
 # The entirety of this work is licensed under the Apache License,
 # Version 2.0 (the "License"); you may not use this file except
 # in compliance with the License.
-# 
+#
 # You may obtain a copy of the License at
-# 
+#
 #     http://www.apache.org/licenses/LICENSE-2.0
-# 
+#
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -36,22 +36,34 @@ include $(COMPILER_ROOT)/make/Makefile.compiler.subdirrules
 
 ifdef CHPL_DEVELOPER
 CLEAN_TARGS += \
-	*.tab.cpp \
-	*.yy.cpp \
-	*.tab.h \
-	*.output \
+               bison-chapel.output
 
 endif
 
-lex.yy.cpp: chapel.lex chapel.tab.h
-	flex -o$@ chapel.lex
+# Don't create rules for bison-chapel.cpp or flex-chapel.cpp since we don't
+# want them to be rebuilt automatically. (This is because of the bison version
+# 2.5 requirement)
+parser: FORCE flex_version_check
+	@rm -f bison-chapel.output bison-chapel.cpp flex-chapel.cpp
+	@rm -f ../include/bison-chapel.h ../include/flex-chapel.h
+	bison chapel.ypp
+	@if grep -q "conflicts:" bison-chapel.output; \
+		then echo "PROBLEM: chapel.ypp contains conflicts"; \
+		rm -f bison-chapel.cpp; \
+		exit 1; \
+	fi;
+	flex chapel.lex
 
-chapel.tab.h chapel.tab.cpp: chapel.ypp
-	bison --defines=chapel.tab.h -v -t $<
-	@if [ `grep "conflicts:" chapel.output | wc -l` -ne 0 ]; then echo "PROBLEM: chapel.y contains conflicts"; exit 1; fi;
-
-
-FORCE:
+# Require that the flex version is at least 2.6.0
+flex_version_check:
+	@if python -c "import sys;                                        \
+                       from distutils.version import LooseVersion as LV;  \
+                       sys.exit(LV(sys.argv[1]) >= LV(sys.argv[2]))"      \
+                   `flex --version | sed -e 's/flex //' -e 's/ .*//'`     \
+                   "2.6.0";                                               \
+		then echo "PROBLEM: flex version must be at least 2.6.0"; \
+		exit 1;                                                   \
+	fi
 
 #
 # standard footer
@@ -59,24 +71,14 @@ FORCE:
 include $(COMPILER_ROOT)/make/Makefile.compiler.foot
 
 
-# Use chapel.tab.h as prerequisite, to ensure bison only invoked once, even
+# Use bison-chapel.h as prerequisite, to ensure bison only invoked once, even
 # with parallel execution.
 #
-# no-error required here for bison 1.875 (not 1.875d)
-$(OBJ_SUBDIR)/chapel.tab.o: chapel.tab.h $(OBJ_SUBDIR_MADE) $(LEXYACC_INCLUDES)
-	$(CXX) -c $(COMP_CFLAGS) $(COMP_CFLAGS_NONCHPL) -o $@ chapel.tab.cpp $(OBJ_SUBDIR_MADE) $(LEXYACC_INCLUDES)
+$(OBJ_SUBDIR)/bison-chapel.o: ../include/bison-chapel.h bison-chapel.cpp $(OBJ_SUBDIR_MADE)
+	$(CXX) -c $(COMP_CXXFLAGS) $(COMP_CXXFLAGS_NONCHPL) -o $@ bison-chapel.cpp
 
+$(OBJ_SUBDIR)/flex-chapel.o: ../include/bison-chapel.h ../include/flex-chapel.h flex-chapel.cpp $(OBJ_SUBDIR_MADE)
+	$(CXX) -c $(COMP_CXXFLAGS) $(COMP_CXXFLAGS_NONCHPL) -o $@ flex-chapel.cpp
 
-# no-error required here for flex 2.5.33
-$(OBJ_SUBDIR)/lex.yy.o: lex.yy.cpp $(OBJ_SUBDIR_MADE) chapel.tab.h $(LEXYACC_INCLUDES)
-	$(CXX) -c $(COMP_CFLAGS) $(COMP_CFLAGS_NONCHPL) -o $@ $<
-
-#
-# need to handle these ones specially as well on intel because it
-# #includes chapel.tab.h
-#
-$(OBJ_SUBDIR)/parser.o: parser.cpp $(OBJ_SUBDIR_MADE) chapel.tab.h
-	$(CXX) -c $(COMP_CFLAGS) $(COMP_CFLAGS_NONCHPL) -o $@ $<
-
-$(OBJ_SUBDIR)/processTokens.o: processTokens.cpp $(OBJ_SUBDIR_MADE) chapel.tab.h
-	$(CXX) -c $(COMP_CFLAGS) $(COMP_CFLAGS_NONCHPL) -o $@ $<
+$(OBJ_SUBDIR)/parser.o:  ../include/bison-chapel.h ../include/flex-chapel.h parser.cpp $(OBJ_SUBDIR_MADE)
+	$(CXX) -c $(COMP_CXXFLAGS) -o $@ parser.cpp

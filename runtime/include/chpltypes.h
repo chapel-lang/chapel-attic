@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2014 Cray Inc.
+ * Copyright 2004-2018 Cray Inc.
  * Other additional copyright holders may be indicated within.
  * 
  * The entirety of this work is licensed under the Apache License,
@@ -25,7 +25,11 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stddef.h> // for ptrdiff_t
 #include <sys/time.h> // for struct timeval
+#ifndef __cplusplus
+#include <complex.h>
+#endif
 
 // C types usable from Chapel.
 typedef char c_char;
@@ -42,6 +46,10 @@ typedef unsigned long long c_ulonglong;
 typedef float c_float;
 typedef double c_double;
 typedef void* c_void_ptr;
+typedef void* c_fn_ptr;  // a white lie
+typedef uintptr_t c_uintptr;
+typedef intptr_t c_intptr;
+typedef ptrdiff_t c_ptrdiff;
 
 // C++ does not support c99 bools
 #ifndef __cplusplus
@@ -102,12 +110,19 @@ typedef int32_t c_sublocid_t;
 #define FORMAT_c_sublocid_t PRId32
 typedef int64_t c_localeid_t;
 
-// These are special values that mean "no sublocale and "any sublocale".
+// These are special values that mean "no", "any", and "all sublocales",
+// respectively.
 #define c_sublocid_none_val -1
 #define c_sublocid_any_val  -2
+#define c_sublocid_all_val  -3
 
 static const c_sublocid_t c_sublocid_none = c_sublocid_none_val;
 static const c_sublocid_t c_sublocid_any  = c_sublocid_any_val;
+static const c_sublocid_t c_sublocid_all  = c_sublocid_all_val;
+
+static inline int isActualSublocID(c_sublocid_t subloc) {
+  return subloc >= 0;
+}
 
 #ifndef LAUNCHER
 
@@ -120,24 +135,12 @@ static const c_sublocid_t c_sublocid_any  = c_sublocid_any_val;
 // include chpl-locale-model.h.  (note: moving it out of the #ifdef leads to
 // problems building the launcher).
 
-#ifdef CHPL_WIDE_POINTER_STRUCT
 #include "chpl-locale-model.h"
 typedef struct wide_ptr_s {
   chpl_localeID_t locale;
   void* addr;
 } wide_ptr_t;
 typedef wide_ptr_t* ptr_wide_ptr_t;
-#else
-// It's useful to have the type for a wide pointer-to-void.
-// This is the packed pointer version (the other version would be
-// {{node,subloc}, address}).
-#ifdef CHPL_WIDE_POINTER_PACKED
-#include "chpl-locale-model.h"
-typedef void * wide_ptr_t;
-typedef wide_ptr_t* ptr_wide_ptr_t;
-#ifndef CHPL_WIDE_POINTER_NODE_BITS
-#error Missing packed wide pointer definition CHPL_WIDE_POINTER_NODE_BITS
-#endif
 
 #else
 // Just don't define wide_ptr_t. That way, other programs
@@ -149,10 +152,6 @@ typedef wide_ptr_t* ptr_wide_ptr_t;
 // builds using chpl-comm.h (which uses that type to declare the
 // global variables registry), can continue to work.
 typedef void* ptr_wide_ptr_t;
-#endif
-
-#endif
-
 #endif // LAUNCHER
 
 #define nil 0 
@@ -174,6 +173,8 @@ typedef void* chpl_opaque;
 #define UINT32( i) ((uint32_t)(UINT32_C(i)))
 #define UINT64( i) ((uint64_t)(UINT64_C(i)))
 
+#define COMMID( i)  ((int64_t)(INT64_C(i)))
+
 
 typedef int8_t chpl_bool8;
 typedef int16_t chpl_bool16;
@@ -183,22 +184,33 @@ typedef int64_t chpl_bool64;
 typedef void (*chpl_fn_p)(void*); // function pointer for runtime ftable
 typedef int16_t chpl_fn_int_t;    // int type for ftable indexing
 
+// Function table names and information, for VisualDebug use
+typedef struct _chpl_fn_info {
+  const char *name;
+  int fileno;
+  int lineno;
+} chpl_fn_info;
+
 // It is tempting to #undef true and false and then #define them just to be sure
 // they expand correctly, but future versions of the C standard may not allow this!
+#ifndef __cplusplus
 #ifndef false
 #define false 0
 #endif
 #ifndef  true
 #define  true 1
 #endif
+#endif
 
 typedef float               _real32;
 typedef double              _real64;
 typedef float               _imag32;
 typedef double              _imag64;
-typedef struct __complex64 { _real32 re; _real32 im; } _complex64;
-typedef struct __complex128 { _real64 re; _real64 im; } _complex128;
-typedef int64_t              _symbol;
+#ifndef __cplusplus
+typedef float complex       _complex64;
+typedef double complex      _complex128;
+#endif
+typedef int64_t             _symbol;
 
 // macros for Chapel min/max -> C stdint.h or values.h min/max
 #define MIN_INT8            INT8_MIN
@@ -234,6 +246,58 @@ typedef struct chpl_main_argument_s {
   const char **argv;
   int32_t return_value;
 } chpl_main_argument;
+
+#ifndef __cplusplus
+_complex128 _chpl_complex128(_real64 re, _real64 im);
+_complex64 _chpl_complex64(_real32 re, _real32 im);
+
+static inline _real64* complex128GetRealRef(_complex128* cplx) {
+  return ((_real64*)cplx) + 0;
+}
+static inline _real64* complex128GetImagRef(_complex128* cplx) {
+  return ((_real64*)cplx) + 1;
+}
+static inline _real32* complex64GetRealRef(_complex64* cplx) {
+  return ((_real32*)cplx) + 0;
+}
+static inline _real32* complex64GetImagRef(_complex64* cplx) {
+  return ((_real32*)cplx) + 1;
+}
+
+/* 128 bit complex operators for LLVM use */
+static inline _complex128 complexMultiply128(_complex128 c1, _complex128 c2) {
+  return c1*c2;
+}
+static inline _complex128 complexDivide128(_complex128 c1, _complex128 c2) {
+  return c1/c2;
+}
+static inline _complex128 complexAdd128(_complex128 c1, _complex128 c2) {
+  return c1+c2;
+}
+static inline _complex128 complexSubtract128(_complex128 c1, _complex128 c2) {
+  return c1-c2;
+}
+static inline _complex128 complexUnaryMinus128(_complex128 c1) {
+  return -c1;
+}
+
+/* 64 bit complex operators for LLVM use */
+static inline _complex64 complexMultiply64(_complex64 c1, _complex64 c2) {
+  return c1*c2;
+}
+static inline _complex64 complexDivide64(_complex64 c1, _complex64 c2) {
+  return c1/c2;
+}
+static inline _complex64 complexAdd64(_complex64 c1, _complex64 c2) {
+  return c1+c2;
+}
+static inline _complex64 complexSubtract64(_complex64 c1, _complex64 c2) {
+  return c1-c2;
+}
+static inline _complex64 complexUnaryMinus64(_complex64 c1) {
+  return -c1;
+}
+#endif
 
 /* This should be moved somewhere else, but where is the question */
 const char* chpl_get_argument_i(chpl_main_argument* args, int32_t i);

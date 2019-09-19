@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2014 Cray Inc.
+ * Copyright 2004-2018 Cray Inc.
  * Other additional copyright holders may be indicated within.
  * 
  * The entirety of this work is licensed under the Apache License,
@@ -19,20 +19,23 @@
 
 
 
-#ifndef SIMPLE_TEST
+#ifndef CHPL_RT_UNIT_TEST
 #include "chplrt.h"
 #endif
 
 #include "qbuffer.h"
+
+#include "error.h"
 
 #include "sys.h"
 
 #include <limits.h>
 #include <sys/mman.h>
 
+#include <ctype.h>
 #include <assert.h>
 
-// 64kb blocks... note tile64 page size is 64K
+// 64kb blocks...
 // this really should be a multiple of page size...
 // but we can't know page size at compile time
 size_t qbytes_iobuf_size = 64*1024;
@@ -70,7 +73,10 @@ void qbytes_free_munmap(qbytes_t* b) {
   */
 
   err = sys_munmap(b->data, b->len);
-  assert( !err );
+
+  if (err) {
+    chpl_internal_error("sys_munmap() failed");
+  }
 
   _qbytes_free_qbytes(b);
 }
@@ -79,15 +85,9 @@ void qbytes_free_qio_free(qbytes_t* b) {
   qio_free(b->data);
   _qbytes_free_qbytes(b);
 }
-void qbytes_free_sys_free(qbytes_t* b) {
-  // We need to use the system 'free' function here.
-  sys_free(b->data);
-  _qbytes_free_qbytes(b);
-}
-
 void qbytes_free_iobuf(qbytes_t* b) {
   // iobuf is just something to be freed with free()
-  qbytes_free_sys_free(b);
+  qbytes_free_qio_free(b);
 }
 
 void debug_print_bytes(qbytes_t* b)
@@ -95,6 +95,23 @@ void debug_print_bytes(qbytes_t* b)
   fprintf(stderr, "bytes %p: data=%p len=%lli ref_cnt=%" PRIu64 " free_function=%p flags=%i\n",
           b, b->data, (long long int) b->len, DO_GET_REFCNT(b),
           b->free_function, b->flags);
+}
+
+void debug_print_iovec(const struct iovec* iov, int iovcnt, size_t maxbytes)
+{
+  int i;
+  size_t j;
+  size_t nb = 0;
+  for( i = 0; i < iovcnt; i++ ) {
+    for( j = 0; j < iov[i].iov_len && nb < maxbytes; j++,nb++) {
+      char* buf = (char*) iov[i].iov_base;
+      char c = '.';
+      if (isprint(buf[j]))
+        c = buf[j];
+      printf("%c", c);
+    }
+  }
+  printf("\n");
 }
 
 // On return the ref count is 1.
@@ -131,14 +148,8 @@ qioerr _qbytes_init_iobuf(qbytes_t* ret)
 {
   void* data = NULL;
   
-  // allocate 4K-aligned (or page size aligned)
-  // multiple of 4K
-  data = valloc(qbytes_iobuf_size);
+  data = qio_memalign(sys_page_size(), qbytes_iobuf_size);
   if( !data ) return QIO_ENOMEM;
-  // We used to use posix_memalign, but that didn't work on an old Mac;
-  // also, this should be page-aligned (vs iobuf_size aligned).
-  //err_t err = posix_memalign(&data, qbytes_iobuf_size, qbytes_iobuf_size);
-  //if( err ) return err;
   memset(data, 0, qbytes_iobuf_size);
 
   // The ref count in ret is initially 1.

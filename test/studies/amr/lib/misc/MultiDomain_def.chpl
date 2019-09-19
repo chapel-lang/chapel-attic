@@ -62,19 +62,21 @@ class MultiDomain
   var root: MDNode(rank,stridable);
 
 
-  proc initialize ()
+  proc init (param rank=0, param stridable=false)
   {
+    this.rank = rank;
+    this.stridable = stridable;
     root = new MDNode( rank, stridable );
   }
 
 
-  proc ~MultiDomain () { root.clearChildren();  delete root; }
+  proc deinit () { root.clearChildren();  delete root; }
 
 
   proc copy ()
   {
     const new_mD = new MultiDomain(rank,stridable);
-    new_mD.root = root.copy();
+    root.copy(new_mD.root);  // the initializer has already allocated 'root', so pass it in for re-use
     return new_mD;
   }
 
@@ -153,6 +155,8 @@ class MultiDomain
         if node.right then q.enqueue( node.right );
       }
     }
+
+    delete q;
   }
   
   
@@ -173,6 +177,8 @@ class MultiDomain
       if node.left  then q.enqueue( node.left );
       if node.right then q.enqueue( node.right );
     }
+
+    delete q;
   }
     
 
@@ -227,7 +233,7 @@ class MDNode
 
 
 
-  proc ~MDNode () {}  // Can't clear children here or node merging breaks
+  proc deinit () {}  // Can't clear children here or node merging breaks
   
 
   proc clearChildren ()
@@ -237,9 +243,10 @@ class MDNode
   }
 
 
-  proc copy () : MDNode(rank,stridable)
+  proc copy (in new_node: MDNode(rank, stridable) = nil) : MDNode(rank,stridable)
   {
-    const new_node = new MDNode(rank, stridable);
+    if new_node == nil then
+      new_node = new MDNode(rank, stridable);
 
     new_node.Domain     = Domain;
     new_node.bisect_dim = bisect_dim;

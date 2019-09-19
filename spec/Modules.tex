@@ -9,9 +9,10 @@ and types, is associated with some module.
 Module definitions are described in~\rsec{Module_Definitions}.  The
 relation between files and modules is described
 in~\rsec{Implicit_Modules}.  Nested modules are described
-in~\rsec{Nested_Modules}.  Module uses and explicit naming of symbols
-are described in~\rsec{Using_Modules}.  The execution of a program and
-module initialization is described in~\rsec{Program_Execution}.
+in~\rsec{Nested_Modules}.  The visibility of a module's symbols by
+users of the module is described in~\rsec{Visibility_Of_Symbols}.  The execution
+of a program and module initialization/deinitialization are described
+in~\rsec{Program_Execution}.
 
 \section{Module Definitions}
 \label{Module_Definitions}
@@ -21,7 +22,11 @@ module initialization is described in~\rsec{Program_Execution}.
 A module is declared with the following syntax:
 \begin{syntax}
 module-declaration-statement:
-  `module' module-identifier block-statement
+  privacy-specifier[OPT] `module' module-identifier block-statement
+
+privacy-specifier:
+  `private'
+  `public'
 
 module-identifier:
   identifier
@@ -30,7 +35,8 @@ module-identifier:
 A module's name is specified after the \chpl{module} keyword.
 The \sntx{block-statement} opens the module's scope.  Symbols defined
 in this block statement are defined in the module's scope and are
-called \emph{top-level module symbols}.
+called \emph{top-level module symbols}.  The visibility of a module is
+defined by its \sntx{privacy-specifier}~(\rsec{Visibility_Of_A_Module}).
 
 Module declaration statements must be top-level statements within a
 module.  A module that is declared within another module is called a
@@ -85,8 +91,8 @@ specified filename.  If the resulting name is not a legal Chapel
 identifier, it cannot be referenced in a use statement.
 
 \begin{chapelexample}{implicit.chpl}
-The following file, named myModule.chpl, defines an implicitly named
-module called myModule.
+The following file, named implicit.chpl, defines an implicitly named
+module called implicit.
 \begin{chapel}
 var x: int = 0;
 var y: int = 1;
@@ -106,7 +112,7 @@ printY();
 0
 1
 \end{chapeloutput}
-Module myModule defines the top-level module symbols x, y, printX, and
+Module implicit defines the top-level module symbols x, y, printX, and
 printY.
 \end{chapelexample}
 
@@ -149,8 +155,8 @@ Files with both module declarations and top-level statements result in
 nested modules.
 
 \begin{chapelexample}{nested.chpl}
-The following file, named myModule.chpl, defines an
-implicitly named module called myModule, with nested modules
+The following file, named nested.chpl, defines an
+implicitly named module called nested, with nested modules
 MX and MY.
 \begin{chapel}
 module MX {
@@ -182,21 +188,48 @@ printY();
 \end{chapelexample}
 
 
-\section{Using Modules}
-\label{Using_Modules}
-\index{modules!using}
+\section{Access of Module Contents}
+\label{Access_Of_Module_Contents}
+\index{modules!access}
 
-A module can be used by code outside of that module.  This allows
-access to the top-level module symbols without the need for explicit
-naming~(\rsec{Explicit_Naming}).  Using modules is accomplished via
-the use statement as defined in~\rsec{The_Use_Statement}.
+A module's contents can be accessed by code outside of that module
+depending on the visibility of the module
+itself~(\rsec{Visibility_Of_A_Module}) and the visibility of each
+individual symbol~(\rsec{Visibility_Of_Symbols}).  This can be done
+via explicit naming~(\rsec{Explicit_Naming}) or the use
+statement~(\rsec{Using_Modules}).
+
+\subsection{Visibility Of A Module}
+\label{Visibility_Of_A_Module}
+\index{modules!access}
+
+A module defined at file scope is visible anywhere. The visibility of a nested
+module is subject to the rules of~\rsec{Visibility_Of_Symbols}. There,
+the nested module is considered a "symbol defined at the top level
+scope" of its outer module.
+
+\subsection{Visibility Of A Module's Symbols}
+\label{Visibility_Of_Symbols}
+\index{modules!access}
+
+A symbol defined at the top level scope of a module is \emph{visible}
+from outside the module when the \sntx{privacy-specifier} of its
+definition is \chpl{public} or is omitted (i.e. by default). When a
+symbol defined at the top level scope of a module is declared
+\chpl{private}, it is not visible outside of that module. A
+symbol's visibility inside its module is controlled by normal lexical
+scoping and is not affected by its \sntx{privacy-specifier}.  A
+module's visible symbols are accessible via explicit
+naming~(\rsec{Explicit_Naming}) or the use
+statement~(\rsec{Using_Modules}) only where the module's symbol is
+visible~(\rsec{Visibility_Of_A_Module}).
 
 \subsection{Explicit Naming}
 \label{Explicit_Naming}
 \index{modules!explicitly named}
 
-All top-level module symbols can be named explicitly with the
-following syntax:
+All publicly visible top-level module symbols can be named explicitly
+with the following syntax:
 \begin{syntax}
 module-access-expression:
   module-identifier-list . identifier
@@ -275,10 +308,28 @@ because it is defined in both M1 and M3.  This will result in a
 compiler error.
 \end{chapelexample}
 
+\subsection{Using Modules}
+\label{Using_Modules}
+\index{modules!using}
+
+If a module is visible to the scope in which accessing its symbols is desirable,
+then a use statement on that module may be employed.  Use statements
+make a module's visible symbols available without requiring them to be
+prefixed by the module's name.  For information about use statements in general,
+see~\rsec{The_Use_Statement}.
+
+If a type is specified in the \sntx{limitation-clause}, then the type's fields
+and methods are treated similarly to the type name.  These fields and methods
+cannot be specified in a \sntx{limitation-clause} on their own.
+
+% We need to figure out what to do about functions that return types which due
+% to the limitation-clause are not visible without prefix.
+
 
 \subsection{Module Initialization}
 \label{Module_Initialization}
 \index{modules!initialization}
+\index{initialization!modules}
 
 Module initialization occurs at program start-up.  All top-level
 statements in a module other than function and type declarations are
@@ -307,6 +358,32 @@ The function foo() will be invoked and its result assigned to x.  Then
 
 Module initialization order is discussed
 in~\rsec{Module_Initialization_Order}.
+
+
+\subsection{Module Deinitialization}
+\label{Module_Deinitialization}
+\index{modules!deinitialization}
+\index{deinitialization!modules}
+
+Module deinitialization occurs at program tear-down.
+During module deinitialization:
+
+\begin{itemize}
+
+\item If the module contains a deinitializer, which is a function
+named \chpl{deinit()} that is declared at the module level,
+it is executed first.
+
+\item If the module declares global variables, they are deinitialized
+in the reverse declaration order.
+
+\end{itemize}
+
+% TODO: add examples. For example, adapt this test:
+%   test/modules/vass/deinit-order-modules.chpl
+
+Module deinitialization order is discussed
+in~\rsec{Module_Deinitialization_Order}.
 
 
 \section{Program Execution}
@@ -453,3 +530,15 @@ initialized.  Because M2.M3 is a nested module, M4 (which is used by
 M2) must be initialized first.  M2 itself is initialized, followed by
 M2.M3.  Finally M1 is initialized, and the main function is run.
 \end{chapelexample}
+
+
+\subsection{Module Deinitialization Order}
+\label{Module_Deinitialization_Order}
+\index{modules!deinitialization order}
+
+Module deinitialization is performed in the reverse order of
+module initialization, as specified in
+\rsec{Module_Initialization_Order}.
+
+% TODO: add examples. For example, adapt this test:
+%   test/modules/vass/deinit-order-modules.chpl

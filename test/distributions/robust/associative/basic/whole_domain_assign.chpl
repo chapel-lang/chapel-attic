@@ -13,7 +13,7 @@ for i in D {
   DomUintType += myIdx:uintType;
   DomRealType += myIdx:realType;
   var s: string;
-  s.write(myIdx);
+  s = myIdx:string;
   DomStringType += s;
 }
 if debug then writeln(DomIntType);
@@ -27,7 +27,7 @@ testWhole(DomRealType);
 testWhole(DomStringType);
 
 proc testWhole(DA) {
-  type idxType = DA._value.idxType;
+  type idxType = DA.idxType;
   var DA2: DA.type;
   if debug then writeln(DA2);
   DA2 = DA;
@@ -39,7 +39,7 @@ proc testWhole(DA) {
       break;
     }
   }
-  writeln("Whole domain assignment (", typeToString(idxType), ") : ",
+  writeln("Whole domain assignment (", idxType:string, ") : ",
           if success then "SUCCESS" else "FAILED");
 }
 

@@ -44,7 +44,7 @@ config const epsilon = 2.0 ** -51.0,
 // specify the fixed seed explicitly
 //
 config const useRandomSeed = true,
-  seed = if useRandomSeed then SeedGenerator.currentTime else 314159265;
+  seed = if useRandomSeed then SeedGenerator.oddCurrentTime else 314159265;
 
 //
 // Configuration constants to control what's printed -- benchmark
@@ -186,7 +186,7 @@ proc dfft(A: [?ADom], W, cyclicPhase) {
       //
       forall lo in bankStart..#str do
         on ADom.dist.idxToLocale(lo) do
-          local butterfly(wk1, wk2, wk3, A.localSlice(lo..by str #radix));
+          local do butterfly(wk1, wk2, wk3, A.localSlice(lo..by str #radix));
 
       //
       // update the multipliers for the high bank
@@ -201,7 +201,7 @@ proc dfft(A: [?ADom], W, cyclicPhase) {
       //
       forall lo in bankStart+span..#str do
         on ADom.dist.idxToLocale(lo) do
-          local butterfly(wk1, wk2, wk3, A.localSlice(lo.. by str #radix));
+          local do butterfly(wk1, wk2, wk3, A.localSlice(lo.. by str #radix));
     }
   }
 
@@ -217,7 +217,7 @@ proc dfft(A: [?ADom], W, cyclicPhase) {
     if (str*radix == numElements) {
       forall lo in 0..#str do
         on ADom.dist.idxToLocale(lo) do
-          local butterfly(1.0, 1.0, 1.0, A.localSlice(lo.. by str # radix));
+          local do butterfly(1.0, 1.0, 1.0, A.localSlice(lo.. by str # radix));
     }
     //
     // ...otherwise using a simple radix-2 butterfly scheme
@@ -238,20 +238,25 @@ proc dfft(A: [?ADom], W, cyclicPhase) {
 // this is the radix-4 butterfly routine that takes multipliers wk1,
 // wk2, and wk3 and a 4-element array (slice) A.
 //
-proc butterfly(wk1, wk2, wk3, X:[0..3]) {
-  var x0 = X(0) + X(1),
-    x1 = X(0) - X(1),
-    x2 = X(2) + X(3),
-    x3rot = (X(2) - X(3))*1.0i;
+proc butterfly(wk1, wk2, wk3, X:[?D]) {
+  const i0 = D.low,
+        i1 = i0 + D.stride,
+        i2 = i1 + D.stride,
+        i3 = i2 + D.stride;
+  var x0 = X(i0) + X(i1),
+      x1 = X(i0) - X(i1),
+      x2 = X(i2) + X(i3),
+      x3rot = (X(i2) - X(i3))*1.0i;
 
-  X(0) = x0 + x2;                   // compute the butterfly in-place on X
+  X(i0) = x0 + x2;                   // compute the butterfly in-place on X
   x0 -= x2;
-  X(2) = wk2 * x0;
+  X(i2) = wk2 * x0;
   x0 = x1 + x3rot;
-  X(1) = wk1 * x0;
+  X(i1) = wk1 * x0;
   x0 = x1 - x3rot;
-  X(3) = wk3 * x0;
+  X(i3) = wk3 * x0;
 }
+
 
 //
 // this iterator generates the stride and span values for the phases
@@ -329,7 +334,7 @@ proc bitReverseShuffle(Vect: [?Dom]) {
 proc bitReverse(val: ?valType, revBits = 64) {
   param mask = 0x0102040810204080;
   const valReverse64 = bitMatMultOr(mask, bitMatMultOr(val:uint(64), mask)),
-    valReverse = bitRotLeft(valReverse64, revBits);
+    valReverse = rotl(valReverse64, revBits);
   return valReverse: valType;
 }
 

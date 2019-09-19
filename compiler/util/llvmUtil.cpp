@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2014 Cray Inc.
+ * Copyright 2004-2018 Cray Inc.
  * Other additional copyright holders may be indicated within.
  * 
  * The entirety of this work is licensed under the Apache License,
@@ -66,7 +66,7 @@ llvm::Constant* codegenSizeofLLVM(llvm::Type* type)
 }
 
 static
-bool isTypeEquivalent(LLVM_TARGET_DATA * targetData, llvm::Type* a, llvm::Type* b, bool force)
+bool isTypeEquivalent(const llvm::DataLayout& layout, llvm::Type* a, llvm::Type* b, bool force)
 {
   int64_t aN = arrayVecN(a);
   int64_t bN = arrayVecN(a);
@@ -88,10 +88,10 @@ bool isTypeEquivalent(LLVM_TARGET_DATA * targetData, llvm::Type* a, llvm::Type* 
   }
 
 
-  alignA = targetData->getPrefTypeAlignment(a);
-  alignB = targetData->getPrefTypeAlignment(b);
-  sizeA = targetData->getTypeStoreSize(a);
-  sizeB = targetData->getTypeStoreSize(b);
+  alignA = layout.getPrefTypeAlignment(a);
+  alignB = layout.getPrefTypeAlignment(b);
+  sizeA = layout.getTypeStoreSize(a);
+  sizeB = layout.getTypeStoreSize(b);
 
   // Are they the same size?
   if( sizeA == sizeB ) return true;
@@ -101,11 +101,11 @@ bool isTypeEquivalent(LLVM_TARGET_DATA * targetData, llvm::Type* a, llvm::Type* 
   // Are they the same size, within alignment?
   if( sizeA < sizeB ) {
     // Try making size A bigger...
-    if( sizeA + alignA > sizeB ) return true;
+    if( sizeA + alignA >= sizeB ) return true;
   } else {
     // A >= B
     // Try making size B bigger...
-    if( sizeB + alignB > sizeA ) return true;
+    if( sizeB + alignB >= sizeA ) return true;
   }
 
   return false;
@@ -121,6 +121,9 @@ llvm::AllocaInst* makeAlloca(llvm::Type* type,
   // stack overflow.
   llvm::Function *func = insertBefore->getParent()->getParent();
   llvm::BasicBlock* entryBlock = & func->getEntryBlock();
+#if HAVE_LLVM_VER >= 50
+  const llvm::DataLayout &DL = func->getParent()->getDataLayout();
+#endif
 
   if( insertBefore->getParent() == entryBlock ) {
     // Add before specific instruction in entry block.
@@ -138,34 +141,42 @@ llvm::AllocaInst* makeAlloca(llvm::Type* type,
     llvm::ConstantInt::get(llvm::Type::getInt32Ty(type->getContext()), n);
 
   if( insertBefore ) {
-    tempVar = new llvm::AllocaInst(type, size, align, name, insertBefore);
+    tempVar = new llvm::AllocaInst(type,
+#if HAVE_LLVM_VER >= 50
+                                   DL.getAllocaAddrSpace(),
+#endif
+                                   size, align, name, insertBefore);
   } else {
-    tempVar = new llvm::AllocaInst(type, size, align, name, entryBlock);
+    tempVar = new llvm::AllocaInst(type,
+#if HAVE_LLVM_VER >= 50
+                                   DL.getAllocaAddrSpace(),
+#endif
+                                   size, align, name, entryBlock);
   }
 
   return tempVar;
 }
 
-llvm::Value* createTempVarLLVM(llvm::IRBuilder<>* builder, llvm::Type* type, const char* name)
+llvm::Value* createTempVarLLVM(llvm::IRBuilder<>* irBuilder, llvm::Type* type, const char* name)
 {
   // It's important to alloca at the front of the function in order
   // to avoid having an alloca in a loop which is a good way to achieve
   // stack overflow.
-  llvm::Function *func = builder->GetInsertBlock()->getParent();
+  llvm::Function *func = irBuilder->GetInsertBlock()->getParent();
   if(llvm::Instruction *i = func->getEntryBlock().getTerminator()) {
-    builder->SetInsertPoint(i);
+    irBuilder->SetInsertPoint(i);
   } else {
-    builder->SetInsertPoint(&func->getEntryBlock());
+    irBuilder->SetInsertPoint(&func->getEntryBlock());
   }
 
-  llvm::AllocaInst *tempVar = builder->CreateAlloca(type, 0, name);
-  builder->SetInsertPoint(&func->back());
+  llvm::AllocaInst *tempVar = irBuilder->CreateAlloca(type, 0, name);
+  irBuilder->SetInsertPoint(&func->back());
   return tempVar;
 }
 
 llvm::Value *convertValueToType(
-    llvm::IRBuilder<> *builder,
-    LLVM_TARGET_DATA * targetData,
+    llvm::IRBuilder<> *irBuilder,
+    const llvm::DataLayout& layout,
     llvm::Value *value,
     llvm::Type *newType,
     bool isSigned,
@@ -182,45 +193,50 @@ llvm::Value *convertValueToType(
     if(newType->getPrimitiveSizeInBits() > curType->getPrimitiveSizeInBits()) {
       // Sign extend if isSigned, but never sign extend single bits.
       if(isSigned && ! curType->isIntegerTy(1)) {
-        return builder->CreateSExtOrBitCast(value, newType);
+        return irBuilder->CreateSExtOrBitCast(value, newType);
       }
       else {
-        return builder->CreateZExtOrBitCast(value, newType);
+        return irBuilder->CreateZExtOrBitCast(value, newType);
       }
     }
     else {
-      return builder->CreateTruncOrBitCast(value, newType);
+      return irBuilder->CreateTruncOrBitCast(value, newType);
     }
   }
   
   //Floating point values
   if(newType->isFloatingPointTy() && curType->isFloatingPointTy()) {
     if(newType->getPrimitiveSizeInBits() > curType->getPrimitiveSizeInBits()) {
-      return builder->CreateFPExt(value, newType);
+      return irBuilder->CreateFPExt(value, newType);
     }
     else {
-      return builder->CreateFPTrunc(value, newType);
+      return irBuilder->CreateFPTrunc(value, newType);
     }
   }
 
   //Integer value to floating point value
   if(newType->isFloatingPointTy() && curType->isIntegerTy()) {
     if(isSigned) {
-      return builder->CreateSIToFP(value, newType);
+      return irBuilder->CreateSIToFP(value, newType);
     }
     else {
-      return builder->CreateUIToFP(value, newType);
+      return irBuilder->CreateUIToFP(value, newType);
     }
   }
 
   //Floating point value to integer value
   if(newType->isIntegerTy() && curType->isFloatingPointTy()) {
-    return builder->CreateFPToSI(value, newType);
+    return irBuilder->CreateFPToSI(value, newType);
   }
   
   //Integer to pointer
   if(newType->isPointerTy() && curType->isIntegerTy()) {
-    return builder->CreateIntToPtr(value, newType);
+    return irBuilder->CreateIntToPtr(value, newType);
+  }
+
+  //Pointer to integer
+  if(newType->isIntegerTy() && curType->isPointerTy()) {
+    return irBuilder->CreatePtrToInt(value, newType);
   }
 
   //Pointers
@@ -229,31 +245,31 @@ llvm::Value *convertValueToType(
         curType->getPointerAddressSpace() ) {
       assert( 0 && "Can't convert pointer to different address space");
     }
-    return builder->CreatePointerCast(value, newType);
+    return irBuilder->CreatePointerCast(value, newType);
   }
 
   // Structure types. 
   // This is important in order to handle clang structure expansion
   // (e.g. calling a function that returns {int64,int64})
   if( isArrayVecOrStruct(curType) || isArrayVecOrStruct(newType) ) {
-    if( isTypeEquivalent(targetData, curType, newType, force) ) {
+    if( isTypeEquivalent(layout, curType, newType, force) ) {
       // We turn it into a store/load to convert the type
       // since LLVM does not allow bit casts on structure types.
       llvm::Value* tmp_alloc;
-      if( targetData->getTypeStoreSize(newType) >=
-          targetData->getTypeStoreSize(curType) )
-        tmp_alloc = createTempVarLLVM(builder, newType, "");
+      if( layout.getTypeStoreSize(newType) >=
+          layout.getTypeStoreSize(curType) )
+        tmp_alloc = createTempVarLLVM(irBuilder, newType, "");
       else {
-        tmp_alloc = createTempVarLLVM(builder, curType, "");
+        tmp_alloc = createTempVarLLVM(irBuilder, curType, "");
       }
       // Now cast the allocation to both fromType and toType.
       llvm::Type* curPtrType = curType->getPointerTo();
       llvm::Type* newPtrType = newType->getPointerTo();
       // Now get cast pointers 
-      llvm::Value* tmp_cur = builder->CreatePointerCast(tmp_alloc, curPtrType);
-      llvm::Value* tmp_new = builder->CreatePointerCast(tmp_alloc, newPtrType);
-      builder->CreateStore(value, tmp_cur);
-      return builder->CreateLoad(tmp_new);
+      llvm::Value* tmp_cur = irBuilder->CreatePointerCast(tmp_alloc, curPtrType);
+      llvm::Value* tmp_new = irBuilder->CreatePointerCast(tmp_alloc, newPtrType);
+      irBuilder->CreateStore(value, tmp_cur);
+      return irBuilder->CreateLoad(tmp_new);
     }
   }
 
@@ -297,7 +313,7 @@ Otherwise, both operands are converted to the unsigned integer type
 corresponding to the type of the operand with signed integer type.
 */
 PromotedPair convertValuesToLarger(
-    llvm::IRBuilder<> *builder,
+    llvm::IRBuilder<> *irBuilder,
     llvm::Value *value1,
     llvm::Value *value2,
     bool isSigned1,
@@ -314,9 +330,9 @@ PromotedPair convertValuesToLarger(
   if(type1->isFloatingPointTy() && type2->isFloatingPointTy()) {
     if(type1->getPrimitiveSizeInBits() > type2->getPrimitiveSizeInBits()) {
       return PromotedPair(value1,
-                          builder->CreateFPExt(value2, type1), true);
+                          irBuilder->CreateFPExt(value2, type1), true);
     } else {
-      return PromotedPair(builder->CreateFPTrunc(value1, type2),
+      return PromotedPair(irBuilder->CreateFPTrunc(value1, type2),
                           value2, true);
     }
   }
@@ -325,20 +341,20 @@ PromotedPair convertValuesToLarger(
   if(type1->isFloatingPointTy() && type2->isIntegerTy()) {
     if(isSigned2) {
       return PromotedPair(value1,
-                          builder->CreateSIToFP(value2, type1), true);
+                          irBuilder->CreateSIToFP(value2, type1), true);
     } else {
       return PromotedPair(value1,
-                          builder->CreateUIToFP(value2, type1), true);
+                          irBuilder->CreateUIToFP(value2, type1), true);
     }
   }
 
   //Integer / Floating point values
   if(type2->isFloatingPointTy() && type1->isIntegerTy()) {
     if(isSigned1) {
-      return PromotedPair(builder->CreateSIToFP(value1, type2),
+      return PromotedPair(irBuilder->CreateSIToFP(value1, type2),
                           value2, true);
     } else {
-      return PromotedPair(builder->CreateUIToFP(value1, type2),
+      return PromotedPair(irBuilder->CreateUIToFP(value1, type2),
                           value2, true);
     }
   }
@@ -350,22 +366,22 @@ PromotedPair convertValuesToLarger(
       if(type1->getPrimitiveSizeInBits() > type2->getPrimitiveSizeInBits()) {
         if(isSigned2) {
           return PromotedPair(value1,
-                        builder->CreateSExtOrBitCast(value2, type1),
+                        irBuilder->CreateSExtOrBitCast(value2, type1),
                         true);
         } else {
           return PromotedPair(
                         value1,
-                        builder->CreateZExtOrBitCast(value2, type1),
+                        irBuilder->CreateZExtOrBitCast(value2, type1),
                         false);
         }
       } else {
         if(isSigned1) {
           return PromotedPair(
-                        builder->CreateSExtOrBitCast(value1, type2),
+                        irBuilder->CreateSExtOrBitCast(value1, type2),
                         value2, true);
         } else {
           return PromotedPair(
-                        builder->CreateZExtOrBitCast(value1, type2),
+                        irBuilder->CreateZExtOrBitCast(value1, type2),
                         value2, false);
         }
       }
@@ -377,13 +393,13 @@ PromotedPair convertValuesToLarger(
               type2->getPrimitiveSizeInBits()) {
         // value1 is unsigned and >= bits; value2 is signed
         return PromotedPair(value1,
-                            builder->CreateSExtOrBitCast(value2, type1),
+                            irBuilder->CreateSExtOrBitCast(value2, type1),
                             false);
       } else if( !isSigned2 &&
                      type1->getPrimitiveSizeInBits() <=
                      type2->getPrimitiveSizeInBits() ) {
         // value2 is unsigned and >= bits; value1 is signed
-        return PromotedPair(builder->CreateSExtOrBitCast(value1, type2),
+        return PromotedPair(irBuilder->CreateSExtOrBitCast(value1, type2),
                             value2, false);
       } else {
         // Otherwise, if the type of the operand with signed integer
@@ -396,13 +412,13 @@ PromotedPair convertValuesToLarger(
                type2->getPrimitiveSizeInBits()) {
           // value1 is signed, value2 is not
           return PromotedPair(value1,
-                        builder->CreateZExtOrBitCast(value2, type1),
+                        irBuilder->CreateZExtOrBitCast(value2, type1),
                         true);
         } else if( isSigned2 &&
                       type1->getPrimitiveSizeInBits() <=
                       type2->getPrimitiveSizeInBits() - 1) {
           return PromotedPair(
-                        builder->CreateZExtOrBitCast(value1, type2),
+                        irBuilder->CreateZExtOrBitCast(value1, type2),
                         value2, true);
         } else {
           // otherwise, both operands are converted to the unsigned
@@ -411,12 +427,12 @@ PromotedPair convertValuesToLarger(
           if( isSigned1 ) {
             // convert both to unsigned type1
             return PromotedPair(value1,
-                          builder->CreateZExtOrBitCast(value2, type1),
+                          irBuilder->CreateZExtOrBitCast(value2, type1),
                           false);
           } else {
             // convert both to unsigned type2
             return PromotedPair(
-                          builder->CreateZExtOrBitCast(value1, type2),
+                          irBuilder->CreateZExtOrBitCast(value1, type2),
                           value2, false);
           }
         }
@@ -441,24 +457,24 @@ PromotedPair convertValuesToLarger(
       castTy = type1;
     }
 
-    return PromotedPair(builder->CreatePointerCast(value1, castTy),
-                        builder->CreatePointerCast(value2, castTy),
+    return PromotedPair(irBuilder->CreatePointerCast(value1, castTy),
+                        irBuilder->CreatePointerCast(value2, castTy),
                         false);
   }
   
   return PromotedPair(NULL, NULL, false);
 }
 
-int64_t getTypeSizeInBytes(LLVM_TARGET_DATA * layout, llvm::Type* ty)
+int64_t getTypeSizeInBytes(const llvm::DataLayout& layout, llvm::Type* ty)
 {
   if( ! ty->isSized() ) return -1; // who knows how big it is!
 
-  int64_t sz = layout->getTypeSizeInBits(ty);
+  int64_t sz = layout.getTypeSizeInBits(ty);
   sz = (sz + 7)/8; // now in bytes.
   return sz;
 }
 
-bool isTypeSizeSmallerThan(LLVM_TARGET_DATA * layout, llvm::Type* ty, uint64_t max_size_bytes)
+bool isTypeSizeSmallerThan(const llvm::DataLayout& layout, llvm::Type* ty, uint64_t max_size_bytes)
 {
   if( ! ty->isSized() ) return false; // who knows how big it is!
 
@@ -477,7 +493,7 @@ bool isTypeSizeSmallerThan(LLVM_TARGET_DATA * layout, llvm::Type* ty, uint64_t m
      (so that it includes padding)
      */
 static
-uint64_t doGetTypeFieldNext(LLVM_TARGET_DATA * layout, llvm::Type* ty, uint64_t offset, uint64_t parent_this_offset, uint64_t parent_next_offset)
+uint64_t doGetTypeFieldNext(const llvm::DataLayout& layout, llvm::Type* ty, uint64_t offset, uint64_t parent_this_offset, uint64_t parent_next_offset)
 {
   llvm::SequentialType* stype = NULL;
   llvm::StructType* struct_type = NULL;
@@ -486,7 +502,7 @@ uint64_t doGetTypeFieldNext(LLVM_TARGET_DATA * layout, llvm::Type* ty, uint64_t 
   unsigned i, n;
   uint64_t local_offset, next_offset_here, offset_here;
 
-  //ty->dump();
+  //ty->print(dbgs(), true);
   //printf("offset %i parent %i,%i\n", (int) offset, (int) parent_this_offset, (int) parent_next_offset);
 
   assert(parent_this_offset <= offset && offset <= parent_next_offset);
@@ -503,7 +519,7 @@ uint64_t doGetTypeFieldNext(LLVM_TARGET_DATA * layout, llvm::Type* ty, uint64_t 
     // Not using getTypeSizeInBytes so that:
     // 1) we get an assertion error if the type is not sized
     // 2) we use uint64s for the type instead of int64s
-    uint64_t sz = layout->getTypeSizeInBits(eltType);
+    uint64_t sz = layout.getTypeSizeInBits(eltType);
     sz = (sz + 7)/8; // now in bytes.
     uint64_t this_offset = local_offset / sz;
     this_offset = parent_this_offset + this_offset*sz;
@@ -516,7 +532,7 @@ uint64_t doGetTypeFieldNext(LLVM_TARGET_DATA * layout, llvm::Type* ty, uint64_t 
   // structure type.
   struct_type = llvm::cast<llvm::StructType>(ty);
   n = struct_type->getNumElements();
-  struct_layout = layout->getStructLayout(struct_type);
+  struct_layout = layout.getStructLayout(struct_type);
 
   // Scroll forward in the structure until we find the last element
   // starting at offset.
@@ -547,7 +563,7 @@ uint64_t doGetTypeFieldNext(LLVM_TARGET_DATA * layout, llvm::Type* ty, uint64_t 
 }
 
 
-uint64_t getTypeFieldNext(LLVM_TARGET_DATA * layout, llvm::Type* ty, uint64_t offset)
+uint64_t getTypeFieldNext(const llvm::DataLayout& layout, llvm::Type* ty, uint64_t offset)
 {
   uint64_t sz;
 
@@ -555,7 +571,7 @@ uint64_t getTypeFieldNext(LLVM_TARGET_DATA * layout, llvm::Type* ty, uint64_t of
   // 1) we get an assertion error if the type is not sized
   // 2) we use uint64s for the type instead of int64s
   assert(ty->isSized());
-  sz = layout->getTypeSizeInBits(ty);
+  sz = layout.getTypeSizeInBits(ty);
   sz = (sz + 7)/8; // now in bytes.
 
 

@@ -1,7 +1,7 @@
 config param sgnParam1 = -5, sgnParam2 = 0, sgnParam3 = 7;
-compilerWarning(sgn(sgnParam1):c_string);
-compilerWarning(sgn(sgnParam2):c_string);
-compilerWarning(sgn(sgnParam3):c_string);
+compilerWarning(sgn(sgnParam1):string);
+compilerWarning(sgn(sgnParam2):string);
+compilerWarning(sgn(sgnParam3):string);
 
 var sgnResult3: uint(8) = sgn(sgnParam3);
 writeln(sgnResult3);
@@ -9,7 +9,7 @@ writeln(sgnResult3);
 proc test(type argT, type resT,
           arg1: argT, arg2: argT, arg3: argT)
 {
-  writeln(typeToString(argT), " -> ", typeToString(resT));
+  writeln(argT:string, " -> ", resT:string);
   var r: resT;
   r = sgn(arg1); writeln(r);
   r = sgn(arg2); writeln(r);

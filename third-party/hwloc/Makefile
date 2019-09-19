@@ -5,14 +5,36 @@ endif
 CHPL_MAKE_HOST_TARGET = --target
 include $(CHPL_MAKE_HOME)/make/Makefile.base
 
-CHPL_HWLOC_CFG_OPTIONS += --enable-static --disable-shared --disable-libxml2 --disable-pci
-
-ifneq ($(CHPL_MAKE_PLATFORM), darwin)
-ifeq ($(CHPL_MAKE_TARGET_COMPILER), pgi)
-  CHPL_HWLOC_CFG_OPTIONS += LDFLAGS=-Bstatic
-else
-  CHPL_HWLOC_CFG_OPTIONS += LDFLAGS=-static
+#
+# Cray X* builds are cross-compilations.
+#
+ifneq (, $(filter cray-x%,$(CHPL_MAKE_TARGET_PLATFORM)))
+CHPL_HWLOC_CFG_OPTIONS += --host=$(shell uname -m)-cle-linux-gnu
+else ifneq ($(CHPL_MAKE_HOST_PLATFORM),$(CHPL_MAKE_TARGET_PLATFORM))
+CHPL_HWLOC_CFG_OPTIONS += --host=$(CHPL_MAKE_TARGET_PLATFORM)-unknown-linux-gnu
 endif
+
+#
+# Something with ffsl is broken with cce >= 8.4.0 (and older
+# versions with -hgnu thrown.)
+#
+ifeq ($(CHPL_MAKE_TARGET_COMPILER),cray-prgenv-cray)
+CFLAGS += -DHWLOC_HAVE_BROKEN_FFS
+endif
+
+CHPL_HWLOC_CFG_OPTIONS += --enable-static \
+                          --disable-shared \
+                          --disable-cairo \
+                          --disable-libxml2 \
+                          --disable-libudev \
+                          --disable-cuda \
+                          --disable-opencl \
+                          --disable-pci
+
+# Libnuma requires dynamic linking, so for the flat locale model where
+# we have no need for NUMA info, disable it so we can link statically.
+ifeq ($(CHPL_MAKE_LOCALE_MODEL),flat)
+CHPL_HWLOC_CFG_OPTIONS += --disable-libnuma
 endif
 
 CHPL_HWLOC_CFG_OPTIONS += $(CHPL_HWLOC_MORE_CFG_OPTIONS)
@@ -41,7 +63,9 @@ hwloc-config: FORCE
 #
 	cd $(HWLOC_SUBDIR) && touch -c configure.ac
 	cd $(HWLOC_SUBDIR) && find . -name "*.m4" | xargs touch 
+	sleep 1
 	cd $(HWLOC_SUBDIR) && touch -c aclocal.m4
+	sleep 1
 	cd $(HWLOC_SUBDIR) && touch configure
 	cd $(HWLOC_SUBDIR) && find . -name "*.in" | xargs touch
 #
@@ -56,7 +80,10 @@ hwloc-config: FORCE
 # Then configure
 #
 	mkdir -p $(HWLOC_BUILD_DIR)
-	cd $(HWLOC_BUILD_DIR) && $(HWLOC_SUBDIR)/configure CC='$(CC)' CFLAGS='$(CFLAGS)' CXX='$(CXX)' CXXFLAGS='$(CFLAGS)' --prefix=$(HWLOC_INSTALL_DIR) $(CHPL_HWLOC_CFG_OPTIONS)
+	cd $(HWLOC_BUILD_DIR) && $(HWLOC_SUBDIR)/configure CC='$(CC)' \
+		CFLAGS='$(CFLAGS)' CXX='$(CXX)' CXXFLAGS='$(CFLAGS)' \
+		LDFLAGS='$(RUNTIME_LFLAGS)' --prefix=$(HWLOC_INSTALL_DIR) \
+		$(CHPL_HWLOC_CFG_OPTIONS)
 
 hwloc-build: FORCE
 	cd $(HWLOC_BUILD_DIR) && $(MAKE)

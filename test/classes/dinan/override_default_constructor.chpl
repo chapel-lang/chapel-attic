@@ -1,7 +1,7 @@
 class Foo {
   var x: int;
 
-  proc Foo(y: int) {
+  proc init(y: int) {
     x = 2*y;
   }
 }
@@ -9,3 +9,5 @@ class Foo {
 var bar = new Foo(5);
 
 writeln(bar.x);
+
+delete bar;

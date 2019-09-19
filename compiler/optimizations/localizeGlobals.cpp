@@ -1,15 +1,15 @@
 /*
- * Copyright 2004-2014 Cray Inc.
+ * Copyright 2004-2018 Cray Inc.
  * Other additional copyright holders may be indicated within.
- * 
+ *
  * The entirety of this work is licensed under the Apache License,
  * Version 2.0 (the "License"); you may not use this file except
  * in compliance with the License.
- * 
+ *
  * You may obtain a copy of the License at
- * 
+ *
  *     http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -20,7 +20,9 @@
 #include "passes.h"
 
 #include "astutil.h"
+#include "driver.h"
 #include "expr.h"
+#include "stlUtil.h"
 #include "stmt.h"
 #include "stringutil.h"
 
@@ -38,29 +40,46 @@ void localizeGlobals() {
   if (fNoGlobalConstOpt) return;
   forv_Vec(FnSymbol, fn, gFnSymbols) {
     Map<Symbol*,VarSymbol*> globals;
-    Vec<BaseAST*> asts;
+    std::vector<BaseAST*> asts;
     collect_asts(fn->body, asts);
-    forv_Vec(BaseAST, ast, asts) {
+    for_vector(BaseAST, ast, asts) {
       if (SymExpr* se = toSymExpr(ast)) {
-        Symbol* var = se->var;
+        Symbol* var = se->symbol();
         ModuleSymbol* parentmod = toModuleSymbol(var->defPoint->parentSymbol);
+        CallExpr* parentExpr = toCallExpr(se->parentExpr);
+        bool inAddrOf = parentExpr && (parentExpr->isPrimitive(PRIM_ADDR_OF) || parentExpr->isPrimitive(PRIM_SET_REFERENCE));
+        bool lhsOfMove = parentExpr && isMoveOrAssign(parentExpr) && (parentExpr->get(1) == se);
 
         // Is var a global constant?
         // Don't replace the var name in its init function since that's
-        //      where we're setting the value.
+        //      where we're setting the value. Similarly, dont replace them
+        //      inside initStringLiterals
         // If the parentSymbol is the rootModule, the var is 'void,'
         //      'false,' '0,' ...
+        // Also don't replace it when it's in an addr of primitive.
         if (parentmod &&
             fn != parentmod->initFn &&
+            fn != initStringLiterals &&
+            !inAddrOf &&
+            !lhsOfMove &&
             var->hasFlag(FLAG_CONST) &&
             var->defPoint->parentSymbol != rootModule) {
           VarSymbol* local_global = globals.get(var);
           SET_LINENO(se); // Set the se line number for output
           if (!local_global) {
             const char * newname = astr("local_", var->cname);
-            local_global = newTemp(newname, var->type);
+            local_global = newTemp(newname, var->qualType());
             fn->insertAtHead(new CallExpr(PRIM_MOVE, local_global, var));
             fn->insertAtHead(new DefExpr(local_global));
+
+            // Copy string immediates to localized strings so that
+            // we can show the string value in comments next to uses.
+            if (!llvmCodegen)
+              if (VarSymbol* localVarSym = toVarSymbol(var))
+                if (Immediate* immediate = localVarSym->immediate)
+                  if (immediate->const_kind == CONST_KIND_STRING)
+                    local_global->immediate =
+                      new Immediate(immediate->v_string, immediate->string_kind);
 
             globals.put(var, local_global);
           }

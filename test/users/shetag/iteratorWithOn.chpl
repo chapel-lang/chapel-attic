@@ -1,8 +1,8 @@
 config const n = 10;
 
-extern proc printf(x...);
+extern proc printf(fmt:c_string, x...);
 
-iter g() {
+iter g() : int {
   var loc = 0;
   for i in 0..n {
     on Locales(loc) do yield i;
@@ -11,4 +11,4 @@ iter g() {
 }
 
 for i in g() do
-  printf("%s\n", here.id + ":i=" + i);
+  printf("%s\n", (here.id + ":i=" + i).c_str());

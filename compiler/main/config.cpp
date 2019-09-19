@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2014 Cray Inc.
+ * Copyright 2004-2018 Cray Inc.
  * Other additional copyright holders may be indicated within.
  *
  * The entirety of this work is licensed under the Apache License,
@@ -20,10 +20,11 @@
 #include "config.h"
 
 #include "chpl.h"
+#include "driver.h"
 #include "expr.h"
+#include "parser.h"
 #include "stmt.h"
-
-#include "../parser/lexyacc.h"
+#include "stringutil.h"
 
 static Map<const char*, Expr*> configMap;
 static Vec<const char*>        usedConfigParams;
@@ -54,7 +55,7 @@ void checkConfigs() {
 // This function is designed to convert a name/value pair of C strings in to
 // corresponding AST that is then inserted into the "configMap".
 //
-// This is currently acheived by synthesizing a chapel statement as a string,
+// This is currently achieved by synthesizing a chapel statement as a string,
 // invoking the parser, and then extracting the desired portion of the result.
 // This means that this function has some knowledge of the structure of the
 // generated AST

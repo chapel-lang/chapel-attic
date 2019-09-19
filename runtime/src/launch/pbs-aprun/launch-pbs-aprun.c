@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2014 Cray Inc.
+ * Copyright 2004-2018 Cray Inc.
  * Other additional copyright holders may be indicated within.
  * 
  * The entirety of this work is licensed under the Apache License,
@@ -131,7 +131,7 @@ static char* genQsubOptions(char* genFilename, char* projectString, qsubVersion 
     fprintf(qsubScript, "#PBS -N Chpl-%.10s\n", genFilename);
   } else {
     optionString = chpl_mem_allocMany(maxOptLength, sizeof(char),
-                                      CHPL_RT_MD_COMMAND_BUFFER, -1, "");
+                                      CHPL_RT_MD_COMMAND_BUFFER, -1, 0);
     length += snprintf(optionString + length, maxOptLength - length,
                        "-z -V -I -N Chpl-%.10s", genFilename);
   }
@@ -161,7 +161,6 @@ static char* genQsubOptions(char* genFilename, char* projectString, qsubVersion 
     }
   }
   switch (qsub) {
-  case pbspro:
   case unknown:
     if (generate_qsub_script) {
       fprintf(qsubScript, "#PBS -l mppwidth=%d\n", numLocales);
@@ -171,6 +170,19 @@ static char* genQsubOptions(char* genFilename, char* projectString, qsubVersion 
       length += snprintf(optionString + length, maxOptLength - length,
                          " -l mppwidth=%d -l mppnppn=%d -l mppdepth=%d",
                          numLocales, procsPerNode, numCoresPerLocale);
+    }
+    break;
+  case pbspro:
+    if (generate_qsub_script) {
+      // We always want to use scatter since we use one PE per node
+      fprintf(qsubScript, "#PBS -l place=scatter\n");
+      fprintf(qsubScript, "#PBS -l select=%d:ncpus=%d\n", numLocales, numCoresPerLocale);
+    } else {
+      // We always want to use scatter since we use one PE per node
+      length += snprintf(optionString + length, maxOptLength - length,
+                         " -l place=scatter");
+      length += snprintf(optionString + length, maxOptLength - length,
+                         " -l select=%d:ncpus=%d", numLocales, numCoresPerLocale);
     }
     break;
   case moab:
@@ -303,7 +315,8 @@ static char** chpl_launch_create_argv(int argc, char* argv[],
     if (verbosity > 2) {
       fprintf(expectFile, "send \"aprun -q %s%d ",
               getNumLocalesStr(), 1 /* only run on one locale */);
-      fprintf(expectFile, "ls %s\\n\"\n", chpl_get_real_binary_name());
+      fprintf(expectFile, "ls %s %s\\n\"\n",
+          chpl_get_real_binary_wrapper(), chpl_get_real_binary_name());
       fprintf(expectFile, "expect {\n");
       fprintf(expectFile, "  \"failed: chdir\" {send_user "
               "\"error: %s must be launched from and/or stored on a "
@@ -331,7 +344,7 @@ static char** chpl_launch_create_argv(int argc, char* argv[],
       break;
   }
 
-  free(aprun_cmd);
+  chpl_mem_free(aprun_cmd, 0, 0);
 
   if (generate_qsub_script) {
     fprintf(qsubScript, "\n\n");
@@ -339,16 +352,24 @@ static char** chpl_launch_create_argv(int argc, char* argv[],
     fprintf(stdout, "QSUB script written to '%s'\n", qsubOptions);
     return NULL;
   } else {
-  fprintf(expectFile, "\\n\"\n");
+    fprintf(expectFile, "\\n\"\n");
     fprintf(expectFile, "interact -o -ex \"$chpl_prompt\" {return}\n");
-    fprintf(expectFile, "send \"echo CHPL_EXIT_CODE:\\$?\\n\"\n");
+    fprintf(expectFile, "send \"set retval=$?\\n\"\n");
+    fprintf(expectFile, "send \"\\[ \\$retval = 0 \\] && echo \\\"JOB SUCCEEDED (done)\\\" || echo \\\"JOB FAILED: \\$retval (done)\\\"\\n\"\n");
+    // Being a bit excessive with the expects here
+    fprintf(expectFile, "expect -ex \"(done)\" {}\n");
+    fprintf(expectFile, "expect -ex \"(done)\" {}\n");
     fprintf(expectFile, "expect {\n");
-    fprintf(expectFile, "  -ex \"CHPL_EXIT_CODE:0\" {set exitval \"0\"}\n");
-    fprintf(expectFile, "  -re \"CHPL_EXIT_CODE:.\" {set exitval \"1\"}\n");
+    fprintf(expectFile, "    -ex \"JOB SUCCEEDED\" { set exitval \"0\" }\n");
+    fprintf(expectFile, "    -re \"JOB FAILED:.\" { set exitval \"1\" }\n");
     fprintf(expectFile, "}\n");
     fprintf(expectFile, "expect -re \"\\n$chpl_prompt\" {}\n");
+
     fprintf(expectFile, "send \"exit\\n\"\n"); // exit tcsh
+
     fprintf(expectFile, "send \"exit\\n\"\n"); // exit qsub
+    fprintf(expectFile, "expect -re \"qsub:.*completed\" {}\n"); // flush buffers for good measure
+
     fprintf(expectFile, "close\n");
     if (verbosity > 1) {
       fprintf(expectFile, "send_user \"\\n\\n\"\n");
@@ -401,7 +422,7 @@ int chpl_launch(int argc, char* argv[], int32_t numLocales) {
 
 
 int chpl_launch_handle_arg(int argc, char* argv[], int argNum,
-                           int32_t lineno, c_string filename) {
+                           int32_t lineno, int32_t filename) {
   int numArgs = 0;
   if (!strcmp(argv[argNum], CHPL_WALLTIME_FLAG)) {
     walltime = argv[argNum+1];

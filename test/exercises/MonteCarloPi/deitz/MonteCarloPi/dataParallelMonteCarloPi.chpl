@@ -27,7 +27,7 @@ writeln("dataParTasksPerLocale = ", dataParTasksPerLocale);
 // accesses to this object, set parSafe to false to avoid locking
 // overhead.
 //
-var rs = new RandomStream(seed, parSafe=false);
+var rs = new NPBRandomStream(real, seed, parSafe=false);
 
 //
 // Create a domain over the number of random points to generate.
@@ -52,4 +52,4 @@ delete rs;
 //
 // Output the approximation of PI.
 //
-writeln("Approximation of PI   = ", format("#.#######", count * 4.0 / n));
+writef("Approximation of PI   = %{#.#######}\n", count * 4.0 / n);

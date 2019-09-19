@@ -41,16 +41,16 @@ class LevelVariable {
 
 
   //|\'''''''''''''''''''|\
-  //| >    destructor    | >
+  //| >  deinitializer   | >
   //|/...................|/
 
-  proc ~LevelVariable ()
+  proc deinit ()
   {
     for grid_var in grid_variables do delete grid_var;
   }
 
   // /|'''''''''''''''''''/|
-  //< |    destructor    < |
+  //< |  deinitializer   < |
   // \|...................\|
 
 
@@ -75,12 +75,12 @@ class LevelVariable {
     return grid_variables(grid);
   }
 
+  pragma "no copy return"
   proc this(
     grid: Grid, 
     D: domain(dimension, stridable=true)) 
-  ref {
-    var alias => grid_variables(grid).value(D);
-    return alias;
+  {
+    return grid_variables(grid).value(D);
   }
   // /|'''''''''''''''''''''/|
   //< |    this methods    < |
@@ -215,7 +215,7 @@ proc LevelVariable.clawOutput (
 {
 
   //==== Names of output files ====
-  var frame_string:      string = format("%04i", frame_number),
+  var frame_string:      string = "%04i".format(frame_number),
       time_filename:     string = "_output/fort.t" + frame_string,
       solution_filename: string = "_output/fort.q" + frame_string;
 

@@ -40,30 +40,20 @@ case $target in
   linux*|cray-xc|cray-xe|cygwin*)
     case $locModel-$tasks in
       numa-qthreads)
-        hwld=$( $CHPL_HOME/util/config/compileline --libraries |
-                tr ' ' '\n' |
-                grep '^[-]L.*/hwloc/install/' |
-                sed -e 's,^-L,,' -e 's,/lib$,,' )
+        ucp=$( $CHPL_HOME/util/printchplenv --make --all --internal |
+               grep HWLOC_UNIQ_CFG_PATH |
+               cut -d= -f2 )
+        hwld=$CHPL_HOME/third-party/hwloc/install/$ucp
         if [[ -n $hwld && -d $hwld/bin ]] ; then
           numNuma=$( $hwld/bin/lstopo --only numa | wc -l )
           numCores=$( $hwld/bin/lstopo --only cores | wc -l )
-          echo $numNuma > $1.good
+          echo $numCores > $1.good
           for (( i=0 ; $i < $numNuma ; i++ )) ; do
             echo $(( $numCores / $numNuma )) >> $1.good
           done
         else
           echo Could not find hwloc lstopo utility > $1.good
         fi;;
-      flat-muxed)
-        launcher=$($CHPL_HOME/util/chplenv/chpl_launcher.py)
-        if [[ $launcher =~ slurm* ]] ; then
-          numPUs=$( sinfo --exact '--format=%c' '--sort=+=#c' --noheader \
-                    --responding |
-                    head -1 )
-        else
-          numPUs=$( cnselect -L numcores | head -1 )
-        fi
-        echo $(( $numPUs * 16 )) > $1.good;;
       *)
         cores_from_proc_cpuinfo
         echo $numCores > $1.good;;

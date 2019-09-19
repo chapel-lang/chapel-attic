@@ -18,7 +18,7 @@ config const epsilon = 2.0 ** -51.0,
              threshold = 16.0;
 
 config const useRandomSeed = true,
-             seed = if useRandomSeed then SeedGenerator.currentTime else 314159265;
+             seed = if useRandomSeed then SeedGenerator.oddCurrentTime else 314159265;
 
 config const printParams = true,
              printArrays = false,
@@ -58,7 +58,7 @@ proc initVectors(Twiddles, z) {
   computeTwiddles(Twiddles);
   bitReverseShuffle(Twiddles);
 
-  fillRandom(z, seed);
+  fillRandom(z, seed, algorithm=RNG.NPB);
 
   if (printArrays) {
     writeln("After initialization, Twiddles is: ", Twiddles, "\n");
@@ -94,7 +94,7 @@ proc bitReverseShuffle(Vect: [?Dom]) {
 proc bitReverse(val: ?valType, revBits = 64) {
   param mask = 0x0102040810204080;
   const valReverse64 = bitMatMultOr(mask, bitMatMultOr(val:uint(64), mask)),
-        valReverse = bitRotLeft(valReverse64, revBits);
+        valReverse = rotl(valReverse64, revBits);
   return valReverse: valType;
 }
 
@@ -140,19 +140,23 @@ proc dfft(A: [?ADom], W) {
 }
 
 
-proc butterfly(wk1, wk2, wk3, inout A:[1..radix]) {
-  var x0 = A(1) + A(2),
-      x1 = A(1) - A(2),
-      x2 = A(3) + A(4),
-      x3rot = (A(3) - A(4))*1.0i;
+proc butterfly(wk1, wk2, wk3, inout A:[?D]) {
+  const i1 = D.low,
+        i2 = i1 + D.stride,
+        i3 = i2 + D.stride,
+        i4 = i3 + D.stride;
+  var x0 = A(i1) + A(i2),
+      x1 = A(i1) - A(i2),
+      x2 = A(i3) + A(i4),
+      x3rot = (A(i3) - A(i4))*1.0i;
 
-  A(1) = x0 + x2;
+  A(i1) = x0 + x2;
   x0 -= x2;
-  A(3) = wk2 * x0;
+  A(i3) = wk2 * x0;
   x0 = x1 + x3rot;
-  A(2) = wk1 * x0;
+  A(i2) = wk1 * x0;
   x0 = x1 - x3rot;
-  A(4) = wk3 * x0;
+  A(i4) = wk3 * x0;
 }
 
 

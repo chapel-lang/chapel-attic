@@ -18,7 +18,7 @@ proc BFS ( root : vertex_id, ParentTree, G )
   type Vertex_List = domain (index(vertex_domain) );
   var visited$ : [vertex_domain] sync int = -1;
 
-  use UtilReplicatedVar;
+  use ReplicatedVar;
   var Active_Level: [rcDomain] Level_Set (Vertex_List);
   var Next_Level: [rcDomain] Level_Set (Vertex_List);
   var Active_Remaining: [LocaleSpace] bool = true;
@@ -81,6 +81,7 @@ proc BFS ( root : vertex_id, ParentTree, G )
       }
 
 
+      delete rcLocal(Active_Level);
       rcLocal(Active_Level) = rcLocal(Next_Level);
       rcLocal(Next_Level) = new Level_Set (Vertex_List);
 
@@ -92,6 +93,10 @@ proc BFS ( root : vertex_id, ParentTree, G )
   }
 
 
+  coforall loc in Locales do on loc {
+    delete rcLocal(Active_Level);
+    delete rcLocal(Next_Level);
+  }
 }
 
 

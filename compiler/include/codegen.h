@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2014 Cray Inc.
+ * Copyright 2004-2018 Cray Inc.
  * Other additional copyright holders may be indicated within.
  * 
  * The entirety of this work is licensed under the Apache License,
@@ -22,28 +22,44 @@
 
 #include <list>
 #include <map>
+#include <stack>
 #include <string>
 #include <vector>
 
 #ifdef HAVE_LLVM
-#include "clangUtil.h"
+
+// forward declare some LLVM things.
+namespace llvm {
+  namespace legacy {
+    class FunctionPassManager;
+  }
+}
+
+#include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/MDBuilder.h"
+#include "llvm/Target/TargetMachine.h"
+
+struct ClangInfo;
+class LayeredValueTable;
 #include "llvmGlobalToWide.h"
+
 #endif
 
 #include "files.h"
 #include "genret.h"
 
+/* This class contains information helpful in generating
+ * code for nested loops. */
+struct LoopData
+{
 #ifdef HAVE_LLVM
-
-// forward declare.
-namespace clang {
-  namespace CodeGen {
-    class CodeGenModule;
-  }
-}
-class CCodeGenAction;
-
+  LoopData(llvm::MDNode *loopMetadata, bool parallel)
+    : loopMetadata(loopMetadata), parallel(parallel)
+  { }
+  llvm::MDNode* loopMetadata;
+  bool parallel; /* There is no dependency between loops */
 #endif
+};
 
 /* GenInfo is meant to be a global variable which stores
  * the code generator state - e.g. FILE* to print C to
@@ -71,50 +87,21 @@ struct GenInfo {
   int lineno;
   const char* filename;
 
-  bool parseOnly;
 #ifdef HAVE_LLVM
-  // If we're generating LLVM, the following are available
-  llvm::Module *module;
-  llvm::IRBuilder<> *builder;
+  // stores parsed C stuff for extern blocks
   LayeredValueTable *lvt;
 
-  // Clang Stuff
-  std::string clangInstallDir;
-  std::string compileline;
-  std::vector<std::string> clangCCArgs;
-  std::vector<std::string> clangLDArgs;
-  std::vector<std::string> clangOtherArgs;
-
-  clang::CodeGenOptions codegenOptions;
-  llvm::IntrusiveRefCntPtr<clang::DiagnosticOptions> diagOptions;
-  clang::TextDiagnosticPrinter* DiagClient;
-  llvm::IntrusiveRefCntPtr<clang::DiagnosticIDs> DiagID;
-  llvm::IntrusiveRefCntPtr<clang::DiagnosticsEngine> Diags;
-
-  clang::CompilerInstance *Clang;
-  // We get these out of the compiler instance
-  // before delete'ing it.
-  clang::TargetOptions clangTargetOptions;
-  clang::LangOptions clangLangOptions;
-
   // Once we get to code generation....
-  std::string moduleName;
+  llvm::Module *module;
+  llvm::IRBuilder<> *irBuilder;
+  llvm::MDBuilder *mdBuilder;
+  llvm::TargetMachine* targetMachine;
+
+  std::stack<LoopData> loopStack;
+
   llvm::LLVMContext llvmContext;
-  clang::ASTContext *Ctx;
-  LLVM_TARGET_DATA *targetData;
-  clang::CodeGen::CodeGenModule *cgBuilder;
-  CCodeGenAction *cgAction;
-
   llvm::MDNode* tbaaRootNode;
-  llvm::MDNode* tbaaFtableNode;
-  llvm::MDNode* tbaaVmtableNode;
-
-  // We stash the layout that Clang would like to use here.
-  // With fLLVMWideOpt, this will be the layout that we
-  // pass to the code generator even though we modify the
-  // version in the module (to add global pointer types)
-  // before running optimization.
-  std::string targetLayout;
+  llvm::MDNode* tbaaUnionsNode;
 
   // Information used to generate code with fLLVMWideOpt. Instead of
   // generating wide pointers with puts and gets, we generate
@@ -125,28 +112,22 @@ struct GenInfo {
   GlobalToWideInfo globalToWideInfo;
 
   // Optimizations to apply immediately after code-generating a fn
-  llvm::FunctionPassManager* FPM_postgen;
+  llvm::legacy::FunctionPassManager* FPM_postgen;
 
-  // When using a function, just use cgModule->GetAddrOfFunction,
-  // which will cause cgModule to emit it on Builder->Release.
-  //
-  //
-  // defined in passes/codegen.cpp
-  GenInfo(std::string clangInstallDirIn,
-          std::string compilelineIn,
-          std::vector<std::string> clangCCArgs,
-          std::vector<std::string> clangLDArgs,
-          std::vector<std::string> clangOtherArgs,
-          bool parseOnly);
+  ClangInfo* clangInfo;
 #endif
-  GenInfo();
 
+  GenInfo();
 };
 
 
 extern GenInfo* gGenInfo;
 extern int      gMaxVMT;
 extern int      gStmtCount;
+
+// Map from filename to an integer that will represent an unique ID for each
+// generated GET/PUT
+extern std::map<std::string, int> commIDMap;
 
 #ifdef HAVE_LLVM
 void setupClang(GenInfo* info, std::string rtmain);
@@ -157,8 +138,10 @@ bool isBuiltinExternCFunction(const char* cname);
 std::string numToString(int64_t num);
 std::string int64_to_string(int64_t i);
 std::string uint64_to_string(uint64_t i);
+std::string zlineToString(BaseAST* ast);
+void zlineToFileIfNeeded(BaseAST* ast, FILE* outfile);
+const char* idCommentTemp(BaseAST* ast);
 void genComment(const char* comment, bool push=false);
-void genIdComment(int id);
 void flushStatements(void);
 
 

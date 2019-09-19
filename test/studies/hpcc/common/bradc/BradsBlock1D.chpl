@@ -55,6 +55,12 @@ class Block1DDist {
         locDist(loc) = new LocBlock1DDist(glbIdxType, locid, this);
   }
 
+  proc deinit() {
+    for loc in targetLocs do
+      on loc do
+        delete locDist(loc);
+  }
+
   //
   // Create a new domain over this distribution with the given index
   // set (inds) and the given global and local index type (idxType,
@@ -180,6 +186,12 @@ class Block1DDom {
       [loc in dist.targetLocs] writeln(loc, " owns ", locDom(loc));
   }
 
+  proc deinit() {
+    for loc in dist.targetLocs do
+      on loc do
+        delete locDom(loc);
+  }
+
   //
   // the iterator for the domain -- currently sequential
   //
@@ -196,7 +208,7 @@ class Block1DDom {
   //
   // the print method for the domain
   //
-  proc writeThis(x:Writer) {
+  proc writeThis(x) {
     x.write(whole);
   }
 
@@ -258,7 +270,7 @@ class LocBlock1DDom {
   //
   // how to write out this locale's indices
   //
-  proc writeThis(x:Writer) {
+  proc writeThis(x) {
     x.write(myBlock);
   }
 
@@ -313,6 +325,12 @@ class Block1DArr {
         locArr(loc) = new LocBlock1DArr(glbIdxType, lclIdxType, elemType, dom.locDom(loc));
   }
 
+  proc deinit() {
+    for loc in dom.dist.targetLocs do
+      on loc do
+        delete locArr(loc);
+  }
+
   //
   // the global accessor for the array
   //
@@ -349,7 +367,7 @@ class Block1DArr {
   //
   // how to print out the whole array, sequentially
   //
-  proc writeThis(x: Writer) {
+  proc writeThis(x) {
     var first = true;
     for loc in dom.dist.targetLocs {
       // May want to do something like the following:
@@ -421,7 +439,7 @@ class LocBlock1DArr {
   //
   // prints out this locale's piece of the array
   //
-  proc writeThis(x: Writer) {
+  proc writeThis(x) {
     // May want to do something like the following:
     //      on loc {
     // but it causes deadlock -- see writeThisUsingOn.chpl

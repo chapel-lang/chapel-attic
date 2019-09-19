@@ -28,9 +28,9 @@ proc printCommDiagnostics(id, s) {
   var diagnostics = getCommDiagnostics()(id);
   writeln(s, "(Locale", id, "): gets: ", diagnostics.get);
   writeln(s, "(Locale", id, "): puts: ", diagnostics.put);
-  writeln(s, "(Locale", id, "): forks: ", diagnostics.fork);
-  writeln(s, "(Locale", id, "): fast forks: ", diagnostics.fork_fast);
-  writeln(s, "(Locale", id, "): nb forks: ", diagnostics.fork_nb);
+  writeln(s, "(Locale", id, "): executeOns: ", diagnostics.execute_on);
+  writeln(s, "(Locale", id, "): fast executeOns: ", diagnostics.execute_on_fast);
+  writeln(s, "(Locale", id, "): nb executeOns: ", diagnostics.execute_on_nb);
 }
 
 proc nextN() return (here.id+1)%numLocales;
@@ -42,7 +42,7 @@ proc getIdx(loc) {
     return loc;
   } else {
     var dims = D.dims(); // assume zero-based in all dimensions
-    var idx: rank*D._value.idxType;
+    var idx: rank*D.idxType;
     var cur = loc;
     for param i in 1..rank by -1 {
       if dims(i).high!= 0 {
@@ -131,7 +131,7 @@ const zeroT = fillIt(0);
 const oneT = fillIt(1);
 
 proc main() {
-  writeln(rank, " dimensional array of ", typeToString(myType));
+  writeln(rank, " dimensional array of ", myType:string);
 
   if doBlock {
     writeln();

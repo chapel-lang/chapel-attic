@@ -1,15 +1,14 @@
 class myC {
   var i: int;
-  proc myC() { i = -1; }
+  proc init() { i = -1; }
 }
 
 record myR {
   var c: myC;
-  proc myR() { c = new myC(); }
-  proc ~myR() { delete c; }
+  proc init() { c = new myC(); }
+  proc deinit() { delete c; }
 }
 
-pragma "auto destroy fn"
 inline proc chpl__autoDestroy(x: myR) { }
 
 proc =(ref a: myR, b: myR) {

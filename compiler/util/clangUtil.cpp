@@ -1,15 +1,15 @@
 /*
- * Copyright 2004-2014 Cray Inc.
+ * Copyright 2004-2018 Cray Inc.
  * Other additional copyright holders may be indicated within.
- * 
+ *
  * The entirety of this work is licensed under the Apache License,
  * Version 2.0 (the "License"); you may not use this file except
  * in compliance with the License.
- * 
+ *
  * You may obtain a copy of the License at
- * 
+ *
  *     http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -20,11 +20,48 @@
 #ifndef __STDC_FORMAT_MACROS
 #define __STDC_FORMAT_MACROS
 #endif
+
+#include "clangUtil.h"
+
 #include <inttypes.h>
-  
+
 #include <cctype>
 #include <cstring>
 #include <cstdio>
+#include <sstream>
+
+#ifdef HAVE_LLVM
+#include "clang/AST/GlobalDecl.h"
+#include "clang/Basic/Version.h"
+#include "clang/CodeGen/BackendUtil.h"
+#include "clang/CodeGen/CodeGenABITypes.h"
+#include "clang/CodeGen/ModuleBuilder.h"
+#include "clang/Frontend/CompilerInstance.h"
+#include "clang/Driver/Compilation.h"
+#include "clang/Driver/Driver.h"
+#include "clang/Driver/Job.h"
+#include "clang/Frontend/CodeGenOptions.h"
+#include "clang/Frontend/FrontendAction.h"
+#include "clang/Frontend/TextDiagnosticPrinter.h"
+#include "clang/Lex/MacroInfo.h"
+#include "clang/Lex/Preprocessor.h"
+
+#include "llvm/Analysis/TargetLibraryInfo.h"
+#include "llvm/Analysis/TargetTransformInfo.h"
+#include "llvm/Bitcode/BitcodeWriter.h"
+#include "llvm/Transforms/IPO/PassManagerBuilder.h"
+#include "llvm/IR/LegacyPassManager.h"
+#include "llvm/IR/Verifier.h"
+#include "llvm/MC/SubtargetFeature.h"
+#include "llvm/Support/FileSystem.h"
+#include "llvm/Support/Path.h"
+#include "llvm/Support/TargetRegistry.h"
+#include "llvm/Support/TargetSelect.h"
+#include "llvm/Support/ToolOutputFile.h"
+#include "llvm/Target/TargetMachine.h"
+#include "llvm/Transforms/IPO.h"
+
+#endif
 
 #include "astutil.h"
 #include "driver.h"
@@ -36,12 +73,14 @@
 #include "stringutil.h"
 #include "symbol.h"
 #include "type.h"
+#include "version.h"
 
 #include "codegen.h"
-#include "clangSupport.h"
 
 #include "build.h"
-#include "scopeResolve.h"
+
+#include "llvmDebug.h"
+#include "llvmVer.h"
 
 typedef Type ChapelType;
 
@@ -62,28 +101,95 @@ using namespace llvm;
 
 #define GLOBAL_PTR_SPACE 100
 #define WIDE_PTR_SPACE 101
-#define GLOBAL_PTR_SIZE 64
+#define GLOBAL_PTR_SIZE 128
 #define GLOBAL_PTR_ABI_ALIGN 64
 #define GLOBAL_PTR_PREF_ALIGN 64
 
+#define LLVM_MODULE_NAME "root"
+
 #include "llvmGlobalToWide.h"
 #include "llvmAggregateGlobalOps.h"
+#include "llvmDumpIR.h"
 
-// TODO - add functionality to clang so that we don't
-// have to have what are basically copies of
-// ModuleBuilder.cpp 
-// ( and BackendUtil.cpp but we used PassManagerBuilder::addGlobalExtension)
-//
-// This one is not normally included by clang clients
-// and not normally installed in the include directory.
+// These are headers internal to clang. Need to be able to:
+// 1. Get the LLVM type for a C typedef (say)  -- not needed after LLVM 5
+// 2. Get the GEP offset for a field in a C record by name
 #include "CodeGenModule.h"
 #include "CGRecordLayout.h"
-#include "clang/CodeGen/BackendUtil.h"
+//#include "CGDebugInfo.h"
 
 static void setupForGlobalToWide();
+static void adjustLayoutForGlobalToWide();
+static void setupModule();
 
 fileinfo    gAllExternCode;
 fileinfo    gChplCompilationConfig;
+
+// forward declare
+class CCodeGenConsumer;
+class CCodeGenAction;
+
+// This class stores information about the embedded clang compiler
+// instance.
+struct ClangInfo {
+
+  bool parseOnly;
+
+  std::string clangCC;
+  std::string clangCXX;
+  std::vector<std::string> clangCCArgs;
+  std::vector<std::string> clangOtherArgs;
+
+  clang::CodeGenOptions codegenOptions;
+  llvm::IntrusiveRefCntPtr<clang::DiagnosticOptions> diagOptions;
+  clang::TextDiagnosticPrinter* DiagClient;
+  llvm::IntrusiveRefCntPtr<clang::DiagnosticIDs> DiagID;
+  llvm::IntrusiveRefCntPtr<clang::DiagnosticsEngine> Diags;
+
+  clang::CompilerInstance *Clang;
+
+  // Once we get to code generation....
+  clang::ASTContext *Ctx;
+
+  clang::CodeGenerator *cCodeGen;
+  CCodeGenAction *cCodeGenAction;
+
+  // We stash the layout that Clang would like to use here.
+  // With fLLVMWideOpt, this will be the layout that we
+  // pass to the code generator even though we modify the
+  // version in the module (to add global pointer types)
+  // before running optimization.
+  std::string asmTargetLayoutStr;
+
+  ClangInfo(
+    std::string clangCcIn,
+    std::string clangCxxIn,
+    std::vector<std::string> clangCCArgsIn,
+    std::vector<std::string> clangOtherArgsIn,
+    bool parseOnlyIn);
+};
+
+ClangInfo::ClangInfo(
+    std::string clangCcIn,
+    std::string clangCxxIn,
+    std::vector<std::string> clangCCArgsIn,
+    std::vector<std::string> clangOtherArgsIn,
+    bool parseOnlyIn)
+       : parseOnly(parseOnlyIn),
+         clangCC(clangCcIn),
+         clangCXX(clangCxxIn),
+         clangCCArgs(clangCCArgsIn),
+         clangOtherArgs(clangOtherArgsIn),
+         codegenOptions(), diagOptions(NULL),
+         DiagClient(NULL),
+         DiagID(NULL),
+         Diags(NULL),
+         Clang(NULL),
+         Ctx(NULL),
+         cCodeGen(NULL), cCodeGenAction(NULL),
+         asmTargetLayoutStr()
+{
+}
 
 static
 VarSymbol *minMaxConstant(int nbits, bool isSigned, bool isMin)
@@ -165,74 +271,12 @@ void addMinMax(ASTContext* Ctx, const char* prefix, clang::CanQualType qt)
 static
 void setupClangContext(GenInfo* info, ASTContext* Ctx)
 {
-  std::string layout;
+  ClangInfo* clangInfo = info->clangInfo;
+  INT_ASSERT(clangInfo);
 
-  info->Ctx = Ctx;
-  if( ! info->parseOnly ) {
-    info->module->setTargetTriple(
-        info->Ctx->getTargetInfo().getTriple().getTriple());
+  clangInfo->Ctx = Ctx;
 
-    // Also setup some basic TBAA metadata nodes.
-    llvm::LLVMContext& cx = info->module->getContext();
-    // Create the TBAA root node
-    {
-      llvm::Value* Ops[1];
-      Ops[0] = llvm::MDString::get(cx, "Chapel types");
-      info->tbaaRootNode = llvm::MDNode::get(cx, Ops);
-    }
-    // Create type for ftable
-    {
-      llvm::Value* Ops[3];
-      Ops[0] = llvm::MDString::get(cx, "Chapel ftable");
-      Ops[1] = info->tbaaRootNode;
-      // and mark it as constant
-      Ops[2] = ConstantInt::get(llvm::Type::getInt64Ty(cx), 1);
-
-      info->tbaaFtableNode = llvm::MDNode::get(cx, Ops);
-    }
-    {
-      llvm::Value* Ops[3];
-      Ops[0] = llvm::MDString::get(cx, "Chapel vmtable");
-      Ops[1] = info->tbaaRootNode;
-      // and mark it as constant
-      Ops[2] = ConstantInt::get(llvm::Type::getInt64Ty(cx), 1);
-
-      info->tbaaVmtableNode = llvm::MDNode::get(cx, Ops);
-    }
-
-  }
-
-  info->targetLayout = info->Ctx->getTargetInfo().getTargetDescription();
-  layout = info->targetLayout;
-
-  if( fLLVMWideOpt && ! info->parseOnly ) {
-    char buf[200]; //needs to store up to 8 32-bit numbers in decimal
-
-    assert(GLOBAL_PTR_SIZE == GLOBAL_PTR_BITS);
-
-    // Add global pointer info to layout.
-    snprintf(buf, sizeof(buf), "-p%u:%u:%u:%u-p%u:%u:%u:%u", GLOBAL_PTR_SPACE, GLOBAL_PTR_SIZE, GLOBAL_PTR_ABI_ALIGN, GLOBAL_PTR_PREF_ALIGN, WIDE_PTR_SPACE, GLOBAL_PTR_SIZE, GLOBAL_PTR_ABI_ALIGN, GLOBAL_PTR_PREF_ALIGN);
-    layout += buf;
-    // Save the global address space we are using in info.
-    info->globalToWideInfo.globalSpace = GLOBAL_PTR_SPACE;
-    info->globalToWideInfo.wideSpace = WIDE_PTR_SPACE;
-  }
-  // Always set the module layout. This works around an apparent bug in
-  // clang or LLVM (trivial/deitz/test_array_low.chpl would print out the
-  // wrong answer  because some i64s were stored at the wrong alignment).
-  if( info->module ) info->module->setDataLayout(layout);
-
-  info->targetData =
-    new LLVM_TARGET_DATA(info->Ctx->getTargetInfo().getTargetDescription());
-  if( ! info->parseOnly ) {
-    info->cgBuilder = new CodeGen::CodeGenModule(*Ctx,
-                              info->codegenOptions,
-                              *info->module,
-                              *info->targetData, *info->Diags);
-  }
-
-
-  // Set up some  constants that depend on the Clang context.
+  // Set up some constants that depend on the Clang context.
   {
     addMinMax(Ctx, "CHAR", Ctx->CharTy);
     addMinMax(Ctx, "SCHAR", Ctx->SignedCharTy);
@@ -249,71 +293,366 @@ void setupClangContext(GenInfo* info, ASTContext* Ctx)
 }
 
 
+static const bool debugPrintMacros = false;
+
+static void handleMacroToken(const MacroInfo* inMacro,
+                             bool negate,
+                             const Token tok,
+                             VarSymbol*& varRet,
+                             TypeDecl*& cTypeRet,
+                             ValueDecl*& cValueRet);
+
+static void handleMacroTokens(const MacroInfo* inMacro,
+                              MacroInfo::tokens_iterator start,
+                              MacroInfo::tokens_iterator end,
+                              bool negate,
+                              VarSymbol*& varRet,
+                              TypeDecl*& cTypeRet,
+                              ValueDecl*& cValueRet,
+                              TypeDecl*& cCastToTypeRet);
+
+
+// Adds a mapping from id->getName() to a variable or CDecl to info->lvt
 static
-VarSymbol *handleMacro(const IdentifierInfo* id, const MacroInfo* macro)
+void handleMacro(const IdentifierInfo* id, const MacroInfo* macro)
 {
   GenInfo* info = gGenInfo;
-  Preprocessor &preproc = info->Clang->getPreprocessor();
-  VarSymbol* ret = NULL;
+  INT_ASSERT(info);
+  ClangInfo* clangInfo = info->clangInfo;
+  INT_ASSERT(clangInfo);
 
-  const bool debugPrint = false;
+  const bool debugPrint = debugPrintMacros;
 
-  if( debugPrint) printf("Adding macro %s\n", id->getName().str().c_str());
+  if( debugPrint) printf("Working on macro %s\n", id->getName().str().c_str());
 
   //Handling only simple string or integer defines
-  if(macro->getNumArgs() > 0) {
-    if( debugPrint) printf("macro function!\n");
-    return ret; // TODO -- handle macro functions.
-  }
-
-  // Check that we have a single token surrounded by any
-  // number of parens. ie 1, (1), ((1))
-  Token tok; // the main token.
-  size_t left_parens = 0;
-  size_t right_parens = 0;
-  ssize_t ntokens = macro->getNumTokens();
-  ssize_t t_idx;
-  bool negate = false;
-  if( ntokens > 0 ) {
-      MacroInfo::tokens_iterator ti = macro->tokens_end() - 1;
-      for( t_idx = ntokens - 1; t_idx >= 0; t_idx-- ) {
-        tok = *ti;
-        if(tok.getKind() == tok::r_paren) right_parens++;
-        else break;
-        --ti;
-      }
-  }
-
+#if HAVE_LLVM_VER >= 50
+  if(macro->getNumParams() > 0)
+#else
+  if(macro->getNumArgs() > 0)
+#endif
   {
-    MacroInfo::tokens_iterator ti = macro->tokens_begin();
-    for( t_idx = 0; t_idx < ntokens; t_idx++ ) {
-      tok = *ti;
-      if(tok.getKind() == tok::l_paren) left_parens++;
-      else if(tok.getKind() == tok::minus) {
-        negate = true;
-        ntokens--;
-      } else break;
-      ++ti;
+    if( debugPrint) {
+      printf("the macro takes arguments\n");
+    }
+    return; // TODO -- handle macro functions.
+  }
+
+  VarSymbol* varRet = NULL;
+  TypeDecl* cTypeRet = NULL;
+  ValueDecl* cValueRet = NULL;
+  TypeDecl* cCastToTypeRet = NULL;
+
+  handleMacroTokens(macro,
+                    macro->tokens_begin(), macro->tokens_end(),
+                    false,
+                    varRet, cTypeRet, cValueRet, cCastToTypeRet);
+
+  const char* castToTypeStr = NULL;
+  if (cCastToTypeRet) {
+    if (cTypeRet) {
+      if (debugPrint) {
+        printf("casting a type?");
+      }
+      return;
+    }
+    castToTypeStr = astr(cCastToTypeRet->getName().str().c_str());
+  }
+
+  if( debugPrint ) {
+    std::string s = id->getName();
+    const char* kind = NULL;
+    if( varRet ) kind = "var";
+    if( cTypeRet ) kind = "cdecl type";
+    if( cValueRet ) kind = "cdecl value";
+    if( kind ) printf("%s: adding an %s to the lvt\n", s.c_str(), kind);
+  }
+  if( varRet ) {
+    info->lvt->addGlobalVarSymbol(id->getName(), varRet, castToTypeStr);
+  }
+  if( cTypeRet ) {
+    info->lvt->addGlobalCDecl(id->getName(), cTypeRet);
+  }
+  if( cValueRet ) {
+    info->lvt->addGlobalCDecl(id->getName(), cValueRet, castToTypeStr);
+  }
+
+}
+
+static void removeMacroOuterParens(const MacroInfo* inMacro,
+                                   MacroInfo::tokens_iterator &start,
+                                   MacroInfo::tokens_iterator &end) {
+
+  // Remove any number of outer parens e.g. (1), ((1)) -> 1
+  int left_parens = 0;
+  int right_parens = 0;
+  for (MacroInfo::tokens_iterator cur = end - 1;
+       cur != start;
+       --cur) {
+    if(cur->getKind() == tok::r_paren) right_parens++;
+    else break;
+  }
+
+  for (MacroInfo::tokens_iterator cur = start;
+       cur != end;
+       ++cur) {
+    if(cur->getKind() == tok::l_paren) left_parens++;
+    else break;
+  }
+
+  int min_parens = (left_parens < right_parens) ? left_parens : right_parens;
+  if (min_parens > 0) {
+    start += min_parens;
+    end -= min_parens;
+  }
+}
+
+static void handleMacroTokens(const MacroInfo* inMacro,
+                              MacroInfo::tokens_iterator start,
+                              MacroInfo::tokens_iterator end,
+                              bool negate,
+                              VarSymbol*& varRet,
+                              TypeDecl*& cTypeRet,
+                              ValueDecl*& cValueRet,
+                              TypeDecl*& cCastToTypeRet)
+{
+  GenInfo* info = gGenInfo;
+  INT_ASSERT(info);
+  ClangInfo* clangInfo = info->clangInfo;
+  INT_ASSERT(clangInfo);
+
+  const bool debugPrint = debugPrintMacros;
+
+  varRet = NULL;
+  cTypeRet = NULL;
+  cValueRet = NULL;
+  cCastToTypeRet = NULL;
+
+  if (start == end) {
+    if( debugPrint) {
+      printf("the macro is empty\n");
+    }
+    return;
+  }
+
+  for (MacroInfo::tokens_iterator cur = start;
+       cur != end;
+       ++cur) {
+    Token t = *cur;
+    if (debugPrint) {
+      printf("Found token type %i\n", t.getKind());
     }
   }
-  if( left_parens == right_parens &&
-      ntokens - left_parens - right_parens == 1 ) {
-    // OK!
-  } else {
-    if( debugPrint) printf("too complicated or empty!\n");
-    return ret; // we don't handle complicated expressions like A+B
+
+  // Remove any number of outer parens e.g. (1), ((1)) -> 1
+  removeMacroOuterParens(inMacro, start, end);
+
+  // Check: are the first 3 symbols a cast expression?
+  bool isCast = false;
+  MacroInfo::tokens_iterator castStart;
+  MacroInfo::tokens_iterator castEnd;
+  MacroInfo::tokens_iterator lastCastToken;
+
+  {
+    bool inparens = false;
+    for (MacroInfo::tokens_iterator cur = start;
+         cur != end;
+         ++cur) {
+      if (!inparens && cur->getKind() == tok::l_paren) {
+        // OK, found (
+        inparens = true;
+        castStart = cur + 1;
+      } else if (inparens && cur->getKind() != tok::r_paren) {
+        // OK, found casttype
+        // (this could check for type tokens, unsigned int / type_t)
+      } else if (inparens && cur->getKind() == tok::r_paren) {
+        // OK, found )
+        castEnd = cur;
+        lastCastToken = cur;
+        isCast = true;
+        break;
+      } else {
+        // Some other pattern, stop looking for a cast.
+        break;
+      }
+    }
   }
 
+
+  // If we found a cast, pass it.
+  if (isCast) {
+    start = lastCastToken + 1;
+    removeMacroOuterParens(inMacro, start, end);
+  }
+
+  // If the first symbol is now tok::minus, consume it and set negate
+  if (start->getKind() == tok::minus) {
+    ++start;
+    negate = true;
+    removeMacroOuterParens(inMacro, start, end);
+  }
+
+  if (isCast) {
+    VarSymbol* tmpVar = NULL;
+    TypeDecl* tmpType = NULL;
+    ValueDecl* tmpVal = NULL;
+    TypeDecl* tmpCastType = NULL;
+
+    handleMacroTokens(inMacro, castStart, castEnd,
+                      false,
+                      tmpVar, tmpType, tmpVal, tmpCastType);
+
+    if (tmpCastType) {
+      if (debugPrint) {
+        printf("cast contained a cast\n");
+      }
+      return;
+    }
+    if (!tmpType) {
+      if (debugPrint) {
+        printf("the cast didn't give a C type\n");
+      }
+      return;
+    }
+
+    cCastToTypeRet = tmpType;
+  }
+
+  if (start == end)
+    return;
+
+  // At this point, the only multiple token scenario we
+  // intend to handle is things like 'unsigned int'.
+  int _unsigned = 0;
+  int _signed = 0;
+  int _long = 0;
+  int _short = 0;
+  int _int = 0;
+  int _char = 0;
+  int _float = 0;
+  int _double = 0;
+
+  while (start != end) {
+    if (start->getKind() == tok::kw_unsigned) {
+      _unsigned++;
+      _signed = 0;
+      ++start;
+    } else if (start->getKind() == tok::kw_signed) {
+      _signed++;
+      _unsigned = 0;
+      ++start;
+    } else if (start->getKind() == tok::kw_long) {
+      _long++;
+      _short = 0;
+      ++start;
+    } else if (start->getKind() == tok::kw_short) {
+      _short++;
+      _long = 0;
+      ++start;
+    } else if (start->getKind() == tok::kw_int) {
+      _int++;
+      ++start;
+    } else if (start->getKind() == tok::kw_char) {
+      _char++;
+      ++start;
+    } else if (start->getKind() == tok::kw_float) {
+      _float++;
+      ++start;
+    } else if (start->getKind() == tok::kw_double) {
+      _double++;
+      ++start;
+    } else {
+      break; // not signed / unsigned / long / short
+    }
+  }
+
+  if (_unsigned == 0 && _signed == 0 &&
+      _long == 0 && _short == 0 &&
+      _int == 0 && _char == 0 && _float == 0 && _double == 0) {
+    Token tok = *start; // the main token
+    handleMacroToken(inMacro, negate, tok, varRet, cTypeRet, cValueRet);
+  } else {
+    const char* nType = NULL;
+    if (_double > 0) nType = "c_double";
+    else if (_float > 0) nType = "c_float";
+    else if (_unsigned > 0) {
+      if (_long == 2) nType = "c_ulonglong";
+      if (_long == 1) nType = "c_ulong";
+      if (_long == 0 && _short == 0) nType = "c_uint";
+      if (_short == 1) nType = "c_ushort";
+      if (_char == 1) nType = "c_uchar";
+    } else {
+      if (_long == 2) nType = "c_longlong";
+      if (_long == 1) nType = "c_long";
+      if (_long == 0 && _short == 0) nType = "c_int";
+      if (_short == 1) nType = "c_short";
+      if (_signed > 0 && _char == 1) nType = "c_schar";
+      if (_signed == 0 && _char == 1) nType = "c_char";
+    }
+
+    if (nType) {
+      TypeDecl* tmpType = NULL;
+      ValueDecl* tmpVal = NULL;
+      info->lvt->getCDecl(nType, &tmpType, &tmpVal);
+      cTypeRet = tmpType;
+    }
+  }
+}
+
+static void handleMacroToken(const MacroInfo* inMacro,
+                             bool negate,
+                             const Token tok,
+                             VarSymbol*& varRet,
+                             TypeDecl*& cTypeRet,
+                             ValueDecl*& cValueRet)
+{
+  GenInfo* info = gGenInfo;
+  INT_ASSERT(info);
+  ClangInfo* clangInfo = info->clangInfo;
+  INT_ASSERT(clangInfo);
+
+  Preprocessor &preproc = clangInfo->Clang->getPreprocessor();
+
+  const bool debugPrint = debugPrintMacros;
 
   switch(tok.getKind()) {
     case tok::numeric_constant: {
       std::string numString;
+      int hex;
+      int isfloat;
       if( negate ) numString.append("-");
-      numString.append(tok.getLiteralData(), tok.getLength());
+
+      if (tok.getLiteralData() && tok.getLength()) {
+        numString.append(tok.getLiteralData(), tok.getLength());
+      }
 
       if( debugPrint) printf("num = %s\n", numString.c_str());
 
-      if(numString.find('.') == std::string::npos) {
+      hex = 0;
+      if( numString[0] == '0' && (numString[1] == 'x' || numString[1] == 'X'))
+      {
+        hex = 1;
+      }
+
+      isfloat = 0;
+      if(numString.find('.') != std::string::npos) {
+        isfloat = 1;
+      }
+      // also check for exponent since e.g. 1e10 is a float.
+      if( hex ) {
+        // C99 hex floats use p for exponent
+        if(numString.find('p') != std::string::npos ||
+           numString.find('P') != std::string::npos) {
+          isfloat = 1;
+        }
+      } else {
+        if(numString.find('e') != std::string::npos ||
+           numString.find('E') != std::string::npos) {
+          isfloat = 1;
+        }
+      }
+
+      if( !isfloat ) {
         IF1_int_type size = INT_SIZE_32;
 
         if(tolower(numString[numString.length() - 1]) == 'l') {
@@ -323,10 +662,10 @@ VarSymbol *handleMacro(const IdentifierInfo* id, const MacroInfo* macro)
 
         if(tolower(numString[numString.length() - 1]) == 'u') {
           numString[numString.length() - 1] = '\0';
-          ret = new_UIntSymbol(strtoul(numString.c_str(), NULL, 0), size);
+          varRet = new_UIntSymbol(strtoul(numString.c_str(), NULL, 0), size);
         }
         else {
-          ret = new_IntSymbol(strtol(numString.c_str(), NULL, 0), size);
+          varRet = new_IntSymbol(strtol(numString.c_str(), NULL, 0), size);
         }
       }
       else {
@@ -336,14 +675,14 @@ VarSymbol *handleMacro(const IdentifierInfo* id, const MacroInfo* macro)
           numString[numString.length() - 1] = '\0';
         }
 
-        ret = new_RealSymbol("real", strtod(numString.c_str(), NULL), size);
+        varRet = new_RealSymbol(numString.c_str(), size);
       }
       break;
     }
     case tok::string_literal: {
       std::string body = std::string(tok.getLiteralData(), tok.getLength());
       if( debugPrint) printf("str = %s\n", body.c_str());
-      ret = new_StringSymbol(body.c_str());
+      varRet = new_CStringSymbol(body.c_str());
       break;
     }
     case tok::identifier: {
@@ -352,22 +691,36 @@ VarSymbol *handleMacro(const IdentifierInfo* id, const MacroInfo* macro)
       if( debugPrint) {
         printf("id = %s\n", idName.c_str());
       }
-      VarSymbol* var = info->lvt->getVarSymbol(idName);
-      if( var ) {
-        // We've already got something here...
-        ret = var;
-      } else {
+
+      // Handle the case where the macro refers to something we've
+      // already parsed in C
+      varRet = info->lvt->getVarSymbol(idName);
+      if( !varRet ) {
+        info->lvt->getCDecl(idName, &cTypeRet, &cValueRet);
+      }
+      if( !varRet && !cTypeRet && !cValueRet ) {
         // Check to see if it's another macro.
         MacroInfo* otherMacro = preproc.getMacroInfo(tokId);
-        if( otherMacro && otherMacro != macro ) {
-          ret = handleMacro(tokId, otherMacro);
-        } else {
-          // It must be referring to a variable.
-          // FUTURE TODO - create an extern VarSymbol for
-          //   Chapel to that variable..
-          // The simple code below doesn't quite manage.
-          //ret = new VarSymbol(astr(idName.c_str()), dtUnknown);
-          //ret->addFlag(FLAG_EXTERN);
+        if( otherMacro && otherMacro != inMacro ) {
+          // Handle the other macro to add it to the LVT under the new name
+          // The recursive call will add it to the LVT
+          if( debugPrint) printf("other macro\n");
+          handleMacro(tokId, otherMacro);
+          // Get whatever was added in the recursive call
+          // so that we can add it under the new name.
+          varRet = info->lvt->getVarSymbol(idName);
+          info->lvt->getCDecl(idName, &cTypeRet, &cValueRet);
+        }
+      }
+      if( debugPrint ) {
+        if( varRet ) printf("found var %s\n", varRet->cname);
+        if( cTypeRet ) {
+          std::string s = cTypeRet->getName();
+          printf("found cdecl type %s\n", s.c_str());
+        }
+        if( cValueRet ) {
+          std::string s = cValueRet->getName();
+          printf("found cdecl value %s\n", s.c_str());
         }
       }
       break;
@@ -376,18 +729,15 @@ VarSymbol *handleMacro(const IdentifierInfo* id, const MacroInfo* macro)
       break;
   }
 
-  if( ret ) {
-    info->lvt->addGlobalVarSymbol(id->getName(), ret);
-  }
-  return ret;
 }
-
-
 
 
 static
 void readMacrosClang(void) {
   GenInfo* info = gGenInfo;
+  INT_ASSERT(info);
+  ClangInfo* clangInfo = info->clangInfo;
+  INT_ASSERT(clangInfo);
   LayeredValueTable *lvt = info->lvt;
 
   SET_LINENO(rootModule);
@@ -409,12 +759,12 @@ void readMacrosClang(void) {
   addMinMax("UINT64", 64, false);
 
   //printf("Running ReadMacrosAction\n");
-  Preprocessor &preproc = info->Clang->getPreprocessor();
+  Preprocessor &preproc = clangInfo->Clang->getPreprocessor();
   // Identify macro-functions and macro-values.
   // Later, if we see a use of a macro-function, we can
   //  compile it to a static/inline function with args types based an use
   // how will we know the return type?
-  //   expr->getType() stmt->getRetValue()->getType.... 
+  //   expr->getType() stmt->getRetValue()->getType....
   //     ... add function wrapping macro with wrong type
   //         parse/analyze squelching errors; get the macro expression type;
   //         correct the type and recompile to LLVM
@@ -425,263 +775,566 @@ void readMacrosClang(void) {
       i != preproc.macro_end();
       i++) {
 
-#if HAVE_LLVM_VER >= 33
-    handleMacro(i->first, i->second->getMacroInfo());
-#else
-    handleMacro(i->first, i->second);
-#endif
+    handleMacro(i->first, i->second.getLatest()->getMacroInfo());
   }
 };
 
+// This ASTConsumer helps us to:
+// 1: parse code only in certain configurations
+// 2: Convert C code to LLVM IR in others
+// 3: keep the code generator open until we finish generating Chapel code,
+//    since we might need to code generate called functions.
+// 4: get LLVM values for code generated C things (e.g. types, function ptrs)
 class CCodeGenConsumer : public ASTConsumer {
   private:
     GenInfo* info;
+    clang::DiagnosticsEngine* Diags;
+    clang::CodeGenerator* Builder;
+    bool parseOnly;
+    ASTContext* savedCtx;
+
   public:
-    CCodeGenConsumer() : ASTConsumer(), info(gGenInfo) {
-      //info->module = new llvm::Module(info->moduleName, info->llvmContext);
+    CCodeGenConsumer()
+      : ASTConsumer(),
+        info(gGenInfo),
+        Diags(info->clangInfo->Diags.get()),
+        Builder(NULL),
+        parseOnly(info->clangInfo->parseOnly),
+        savedCtx(NULL)
+    {
+
+      if (!parseOnly) {
+        Builder = CreateLLVMCodeGen(
+          *Diags,
+          LLVM_MODULE_NAME,
+          info->clangInfo->Clang->getHeaderSearchOpts(),
+          info->clangInfo->Clang->getPreprocessorOpts(),
+          info->clangInfo->codegenOptions,
+          info->llvmContext);
+
+        INT_ASSERT(Builder);
+        INT_ASSERT(!info->module);
+        info->module = Builder->GetModule();
+        info->clangInfo->cCodeGen = Builder;
+
+        // compute target triple, data layout
+        setupModule();
+      }
     }
 
-    virtual ~CCodeGenConsumer() { }
+    ~CCodeGenConsumer() { }
 
-    // mostly taken from ModuleBuilder.cpp
-     virtual void Initialize(ASTContext &Context) {
-       // This does setTargetTriple, setDataLayout, initialize targetData
-       // and cgBuilder.
-       setupClangContext(info, &Context);
-     }
+    // Start ASTVisitor Overrides
+    void Initialize(ASTContext &Context) override {
 
-     virtual void HandleCXXStaticMemberVarInstantiation(VarDecl *VD) {
-       // Custom to Chapel
-       if( info->parseOnly ) return;
-       // End custom to Chapel
-       info->cgBuilder->HandleCXXStaticMemberVarInstantiation(VD);
-     }
+      setupClangContext(info, &Context);
 
-     virtual bool HandleTopLevelDecl(DeclGroupRef DG) {
-       // Make sure to emit all elements of a Decl.
-       for (DeclGroupRef::iterator I = DG.begin(), E = DG.end(); I != E; ++I) {
-         // Custom to Chapel
-         if(TypedefDecl *td = dyn_cast<TypedefDecl>(*I)) {
-           const clang::Type *ctype= td->getUnderlyingType().getTypePtrOrNull();
-           //printf("Adding typedef %s\n", td->getNameAsString().c_str());
-           if(ctype != NULL) {
-             info->lvt->addGlobalCDecl(td);
-           }
-         } else if(FunctionDecl *fd = dyn_cast<FunctionDecl>(*I)) {
-           info->lvt->addGlobalCDecl(fd);
-         } else if(VarDecl *vd = dyn_cast<VarDecl>(*I)) {
-           info->lvt->addGlobalCDecl(vd);
-         } else if(clang::RecordDecl *rd = dyn_cast<RecordDecl>(*I)) {
-           //Allow structs without typedefs
-           info->lvt->addGlobalCDecl(rd); 
-         }
-         if( info->parseOnly ) continue;
-         // End custom to Chapel
+      if (parseOnly) return;
 
-         info->cgBuilder->EmitTopLevelDecl(*I);
-       }
+      // Call Initialize on the code generator
+      // Note: this can call setDataLayout on the module!
+      Builder->Initialize(Context);
 
-       return true;
-     }
+      // Adjust the data layout again since it might have been overwritten.
+      adjustLayoutForGlobalToWide();
+    }
 
-     /// HandleTagDeclDefinition - This callback is invoked each time a TagDecl
-     /// to (e.g. struct, union, enum, class) is completed. This allows the
-     /// client hack on the type, which can occur at any point in the file
-     /// (because these can be defined in declspecs).
-     virtual void HandleTagDeclDefinition(TagDecl *D) {
-       // Custom to Chapel - make a note of C globals
-       if(EnumDecl *ed = dyn_cast<EnumDecl>(D)) {
-          // Add the enum type
-          info->lvt->addGlobalCDecl(ed);
-          // Add the enum values
-          for(EnumDecl::enumerator_iterator e = ed->enumerator_begin();
-              e != ed->enumerator_end();
-              e++) {
-            info->lvt->addGlobalCDecl(*e); // & goes away with newer clang
+    // HandleTopLevelDecl - Handle the specified top-level declaration.
+    // This is called by the parser to process every top-level Decl*.
+    //
+    // \returns true to continue parsing, or false to abort parsing.
+    bool HandleTopLevelDecl(DeclGroupRef DG) override {
+
+      if (Diags->hasErrorOccurred()) return true;
+
+      for (DeclGroupRef::iterator I = DG.begin(), E = DG.end(); I != E; ++I) {
+        if(TypedefDecl *td = dyn_cast<TypedefDecl>(*I)) {
+          const clang::Type *ctype= td->getUnderlyingType().getTypePtrOrNull();
+          if(ctype != NULL) {
+            info->lvt->addGlobalCDecl(td);
           }
-       } else if(RecordDecl *rd = dyn_cast<RecordDecl>(D)) {
-          const clang::Type *ctype = rd->getTypeForDecl();
-
-          if(ctype != NULL && rd->getDefinition() != NULL) {
+        } else if(FunctionDecl *fd = dyn_cast<FunctionDecl>(*I)) {
+          info->lvt->addGlobalCDecl(fd);
+        } else if(VarDecl *vd = dyn_cast<VarDecl>(*I)) {
+          info->lvt->addGlobalCDecl(vd);
+        } else if(clang::RecordDecl *rd = dyn_cast<RecordDecl>(*I)) {
+          if( rd->getName().size() > 0 ) {
+            // Handle forward declaration for structs
             info->lvt->addGlobalCDecl(rd);
           }
-       }
-       if( info->parseOnly ) return;
-       // End Custom to Chapel
+        }
+      }
 
-       info->cgBuilder->UpdateCompletedType(D);
+      if (parseOnly) return true;
 
-       // In C++, we may have member functions that need to be emitted at this 
-       // point.
-       if (info->Ctx->getLangOpts().CPlusPlus && !D->isDependentContext()) {
-         for (DeclContext::decl_iterator M = D->decls_begin(),
-                                      MEnd = D->decls_end();
-              M != MEnd; ++M)
-           if (CXXMethodDecl *Method = dyn_cast<CXXMethodDecl>(*M))
-             if (Method->doesThisDeclarationHaveABody() &&
-                 (Method->hasAttr<UsedAttr>() ||
-                  Method->hasAttr<ConstructorAttr>()))
-               info->cgBuilder->EmitTopLevelDecl(Method);
-       }
+      return Builder->HandleTopLevelDecl(DG);
+    }
 
+   // \brief This callback is invoked each time an inline (method or friend)
+   // function definition in a class is completed.
+    void HandleInlineFunctionDefinition(FunctionDecl *D) override {
+      if (Diags->hasErrorOccurred()) return;
+      if (parseOnly) return;
+      Builder->HandleInlineFunctionDefinition(D);
+    }
 
+   void HandleInterestingDecl(DeclGroupRef D) override {
+     if (Diags->hasErrorOccurred()) return;
+     if (parseOnly) return;
+     Builder->HandleInterestingDecl(D);
+   }
+
+   void HandleTranslationUnit(ASTContext &Context) override {
+     // Don't call Builder->HandleTranslationUnit yet, so that we
+     // can keep it open to codegen more later.
+     savedCtx = &Context;
+     INT_ASSERT(savedCtx == info->clangInfo->Ctx);
+   }
+
+   void HandleTagDeclDefinition(TagDecl *D) override {
+      if (Diags->hasErrorOccurred()) return;
+
+      // make a note of C globals
+      if(EnumDecl *ed = dyn_cast<EnumDecl>(D)) {
+         // Add the enum type
+         info->lvt->addGlobalCDecl(ed);
+         // Add the enum values
+         for(EnumDecl::enumerator_iterator e = ed->enumerator_begin();
+             e != ed->enumerator_end();
+             e++) {
+           info->lvt->addGlobalCDecl(*e); // & goes away with newer clang
+         }
+      } else if(RecordDecl *rd = dyn_cast<RecordDecl>(D)) {
+         const clang::Type *ctype = rd->getTypeForDecl();
+
+         if(ctype != NULL && rd->getDefinition() != NULL) {
+           info->lvt->addGlobalCDecl(rd);
+         }
+      }
+      if (parseOnly) return;
+      Builder->HandleTagDeclDefinition(D);
+    }
+
+    void HandleTagDeclRequiredDefinition(const TagDecl *D) override {
+      if (Diags->hasErrorOccurred()) return;
+      if (parseOnly) return;
+      Builder->HandleTagDeclRequiredDefinition(D);
+    }
+
+    void HandleCXXImplicitFunctionInstantiation(FunctionDecl *D) override {
+      if (Diags->hasErrorOccurred()) return;
+      if (parseOnly) return;
+      Builder->HandleCXXImplicitFunctionInstantiation(D);
+    }
+
+    void HandleTopLevelDeclInObjCContainer(DeclGroupRef D) override {
+      if (Diags->hasErrorOccurred()) return;
+      if (parseOnly) return;
+      Builder->HandleTopLevelDeclInObjCContainer(D);
+    }
+
+    void HandleImplicitImportDecl(ImportDecl *D) override {
+      if (Diags->hasErrorOccurred()) return;
+      if (parseOnly) return;
+      Builder->HandleImplicitImportDecl(D);
+    }
+
+    void CompleteTentativeDefinition(VarDecl *D) override {
+      if (Diags->hasErrorOccurred()) return;
+      if (parseOnly) return;
+      Builder->CompleteTentativeDefinition(D);
+    }
+
+    void AssignInheritanceModel(CXXRecordDecl *RD) override {
+      if (Diags->hasErrorOccurred()) return;
+      if (parseOnly) return;
+      Builder->AssignInheritanceModel(RD);
+    }
+
+    void HandleCXXStaticMemberVarInstantiation(VarDecl *VD) override {
+      if (Diags->hasErrorOccurred()) return;
+      if (parseOnly) return;
+       Builder->HandleCXXStaticMemberVarInstantiation(VD);
+    }
+
+    void HandleVTable(CXXRecordDecl *RD) override {
+       if (Diags->hasErrorOccurred()) return;
+       if (parseOnly) return;
+       Builder->HandleVTable(RD);
      }
 
-     virtual void HandleTranslationUnit(ASTContext &Ctx) {
-       if (info->Diags->hasErrorOccurred()) {
-         return;
-       }
+    ASTMutationListener *GetASTMutationListener() override {
+      if (Builder) return Builder->GetASTMutationListener();
+      return nullptr;
+    }
 
-       /* custom to Chapel -
-          we don't release the builder now, because
-          we want to add a bunch of uses of functions
-          that may not have been codegened yet.
-       if (info->cgBuilder)
-         cgBuilder->Release();
-       */
-     }
+    ASTDeserializationListener *GetASTDeserializationListener() override {
+      if (Builder) return Builder->GetASTDeserializationListener();
+      return nullptr;
+    }
 
-     virtual void CompleteTentativeDefinition(VarDecl *D) {
-       if (info->Diags->hasErrorOccurred())
-         return;
+    void PrintStats() override {
+      if (Builder) Builder->PrintStats();
+    }
 
-       // Custom to Chapel
-       if( info->parseOnly ) return;
-       // End Custom to Chapel
-       
-       info->cgBuilder->EmitTentativeDefinition(D);
-     }
+    bool shouldSkipFunctionBody(Decl *D) override {
+      if (Builder) return Builder->shouldSkipFunctionBody(D);
+      return true;
+    }
 
-     virtual void HandleVTable(CXXRecordDecl *RD, bool DefinitionRequired) {
-       if (info->Diags->hasErrorOccurred())
-         return;
+    // End ASTVisitor overrides
 
-       // Custom to Chapel
-       if( info->parseOnly ) return;
-       // End Custom to Chapel
+    const Decl *GetDeclForMangledName(llvm::StringRef MangledName) {
+      return Builder->GetDeclForMangledName(MangledName);
+    }
 
-       info->cgBuilder->EmitVTable(RD, DefinitionRequired);
-     }
+    llvm::Constant *GetAddrOfGlobal(GlobalDecl decl) {
+      return Builder->GetAddrOfGlobal(decl, false);
+    }
 };
+
 
 class CCodeGenAction : public ASTFrontendAction {
  public:
   CCodeGenAction() { }
  protected:
-  virtual ASTConsumer *CreateASTConsumer(CompilerInstance &CI,
-                                                 StringRef InFile);
+  std::unique_ptr<ASTConsumer>
+  CreateASTConsumer(CompilerInstance &CI, StringRef InFile);
 };
 
-ASTConsumer *
-CCodeGenAction::CreateASTConsumer(CompilerInstance &CI,
-                                  StringRef InFile) {
-  return new CCodeGenConsumer();
+std::unique_ptr<ASTConsumer>
+CCodeGenAction::CreateASTConsumer(CompilerInstance &CI, StringRef InFile) {
+  CCodeGenConsumer* c = new CCodeGenConsumer();
+  return std::unique_ptr<ASTConsumer>(c);
 };
 
-static void cleanupClang(GenInfo* info)
-{
-  if( info->cgBuilder ) {
-    info->cgBuilder->Release();
-    delete info->cgBuilder;
-    info->cgBuilder = NULL;
+static void finishClang(ClangInfo* clangInfo){
+  if( clangInfo->cCodeGen ) {
+    // This should call Builder->Release()
+    clangInfo->cCodeGen->HandleTranslationUnit(*clangInfo->Ctx);
   }
-  delete info->targetData;
-  info->targetData = NULL;
-  delete info->Clang;
-  info->Clang = NULL;
-  delete info->cgAction;
-  info->cgAction = NULL;
-  info->Diags.reset();
-  info->DiagID.reset();
+  clangInfo->Diags.reset();
+  clangInfo->DiagID.reset();
+}
+
+static void deleteClang(ClangInfo* clangInfo){
+  if( clangInfo->cCodeGen ) {
+    delete clangInfo->cCodeGen;
+    clangInfo->cCodeGen = NULL;
+  }
+  delete clangInfo->Clang;
+  clangInfo->Clang = NULL;
+  delete clangInfo->cCodeGenAction;
+  clangInfo->cCodeGenAction = NULL;
+}
+
+static void cleanupClang(ClangInfo* clangInfo)
+{
+  finishClang(clangInfo);
+  deleteClang(clangInfo);
 }
 
 void setupClang(GenInfo* info, std::string mainFile)
 {
-  std::string clangexe = info->clangInstallDir + "/bin/clang";
+  ClangInfo* clangInfo = info->clangInfo;
+  INT_ASSERT(clangInfo);
+
+  std::string clangexe = clangInfo->clangCC;
   std::vector<const char*> clangArgs;
-  for( size_t i = 0; i < info->clangCCArgs.size(); ++i ) {
-    clangArgs.push_back(info->clangCCArgs[i].c_str());
+
+  clangArgs.push_back("<chapel clang driver invocation>");
+
+  for( size_t i = 0; i < clangInfo->clangCCArgs.size(); ++i ) {
+    clangArgs.push_back(clangInfo->clangCCArgs[i].c_str());
   }
-  for( size_t i = 0; i < info->clangLDArgs.size(); ++i ) {
-    clangArgs.push_back(info->clangLDArgs[i].c_str());
-  }
-  for( size_t i = 0; i < info->clangOtherArgs.size(); ++i ) {
-    clangArgs.push_back(info->clangOtherArgs[i].c_str());
+  for( size_t i = 0; i < clangInfo->clangOtherArgs.size(); ++i ) {
+    clangArgs.push_back(clangInfo->clangOtherArgs[i].c_str());
   }
 
-  if (llvmCodegen) {
-    clangArgs.push_back("-emit-llvm");
-  }
-
-  //clangArgs.push_back("-c");
+  clangArgs.push_back("-c");
   clangArgs.push_back(mainFile.c_str()); // chpl - always compile rt file
 
-  info->diagOptions = new DiagnosticOptions();
-  info->DiagClient= new TextDiagnosticPrinter(errs(),&*info->diagOptions);
-  info->DiagID = new DiagnosticIDs();
-#if HAVE_LLVM_VER >= 32
-  info->Diags = new DiagnosticsEngine(
-      info->DiagID, &*info->diagOptions, info->DiagClient);
-#else
-  info->Diags = new DiagnosticsEngine(info->DiagID, info->DiagClient);
-#endif
+  if (!llvmCodegen)
+    clangArgs.push_back("-fsyntax-only");
 
-  CompilerInvocation* CI =
-    createInvocationFromCommandLine(clangArgs, info->Diags);
-
-  // Get the codegen options from the clang command line.
-  info->codegenOptions = CI->getCodeGenOpts();
-
-  // if --fast is given, we should be at least at -O3.
-  if(fFastFlag && info->codegenOptions.OptimizationLevel < 3) {
-    info->codegenOptions.OptimizationLevel = 3;
+  if( printSystemCommands ) {
+    for( size_t i = 0; i < clangArgs.size(); i++ ) {
+      printf("%s ", clangArgs[i]);
+    }
+    printf("\n");
   }
 
-
-  {
-    // Make sure we include clang's internal header dir
-    sys::Path P(clangexe);
-    if (!P.isEmpty()) {
-      P.eraseComponent();  // Remove /clang from foo/bin/clang
-      P.eraseComponent();  // Remove /bin   from foo/bin
-
-      // Get foo/lib/clang/<version>/
-      P.appendComponent("lib");
-      P.appendComponent("clang");
-      P.appendComponent(CLANG_VERSION_STRING);
-    }
-    CI->getHeaderSearchOpts().ResourceDir = P.str();
-    sys::Path P2(P);
-    P.appendComponent("include");
-#if HAVE_LLVM_VER >= 33
-    CI->getHeaderSearchOpts().AddPath(
-        P.str(), frontend::System,false, false);
-#else
-    CI->getHeaderSearchOpts().AddPath(
-        P.str(), frontend::System,false, false, false, true, false);
-#endif
+  // Initialize LLVM targets so that the clang commands can know if the
+  // target CPU supports vectorization, avx, etc, etc
+  // Also important for generating assembly from this program.
+  if (llvmCodegen) {
+    llvm::InitializeAllTargets();
+    llvm::InitializeAllTargetMCs();
+    llvm::InitializeAllAsmPrinters();
+    llvm::InitializeAllAsmParsers();
   }
 
   // Create a compiler instance to handle the actual work.
-  info->Clang = new CompilerInstance();
-  info->Clang->setInvocation(CI);
+  CompilerInstance* Clang = new CompilerInstance();
+  Clang->createDiagnostics();
 
-  // Save the TargetOptions and LangOptions since these
-  // are used during machine code generation.
-  info->clangTargetOptions = info->Clang->getTargetOpts();
-  info->clangLangOptions = info->Clang->getLangOpts();
+  clangInfo->diagOptions = new DiagnosticOptions();
+  clangInfo->DiagClient= new TextDiagnosticPrinter(errs(),&*clangInfo->diagOptions);
+  clangInfo->DiagID = new DiagnosticIDs();
+  DiagnosticsEngine* Diags = NULL;
+  Diags = new DiagnosticsEngine(
+      clangInfo->DiagID, &*clangInfo->diagOptions, clangInfo->DiagClient);
+  clangInfo->Diags = Diags;
+  clangInfo->Clang = Clang;
+
+  clang::driver::Driver TheDriver(clangexe, llvm::sys::getDefaultTargetTriple(), *Diags);
+
+  //   SetInstallDir(argv, TheDriver);
+
+  std::unique_ptr<clang::driver::Compilation> C(TheDriver.BuildCompilation(clangArgs));
+
+  INT_ASSERT(C->getJobs().size() == 1);
+
+  clang::driver::Command& j = *C->getJobs().begin();
+  if( printSystemCommands ) {
+    printf("<internal clang cc> ");
+    for ( auto a : j.getArguments() ) {
+      printf("%s ", a);
+    }
+    printf("\n");
+  }
+
+  // Should this run
+  // TheDriver.BuildCompilation
+  // get a Compilation?
+  //CompilerInvocation* CI =
+  //  createInvocationFromCommandLine(clangArgs, clangInfo->Diags);
+  bool success = CompilerInvocation::CreateFromArgs(
+            Clang->getInvocation(),
+           // &clangArgs.front(), &clangArgs.back(),
+            &j.getArguments().front(), (&j.getArguments().back())+1,
+            *Diags);
+  CompilerInvocation* CI = &Clang->getInvocation();
+
+  INT_ASSERT(success);
+
+  // Get the codegen options from the clang command line.
+  clangInfo->codegenOptions = CI->getCodeGenOpts();
+
+  // if --fast is given, we should be at least at -O3.
+  if(fFastFlag && clangInfo->codegenOptions.OptimizationLevel < 3) {
+    clangInfo->codegenOptions.OptimizationLevel = 3;
+  }
+
+  {
+    // Make sure we include clang's internal header dir
+    SmallString<128> P;
+    SmallString<128> P2; // avoids a valgrind overlapping memcpy
+
+    P = clangexe;
+    // Remove /clang from foo/bin/clang
+    P2 = sys::path::parent_path(P);
+    // Remove /bin   from foo/bin
+    P = sys::path::parent_path(P2);
+
+    if( ! P.equals("") ) {
+      // Get foo/lib/clang/<version>/
+      sys::path::append(P, "lib");
+      sys::path::append(P, "clang");
+      sys::path::append(P, CLANG_VERSION_STRING);
+    }
+    CI->getHeaderSearchOpts().ResourceDir = P.str();
+    sys::path::append(P, "include");
+    CI->getHeaderSearchOpts().AddPath(
+        P.str(), frontend::System,false, false);
+  }
 
   // Create the compilers actual diagnostics engine.
-  // Create the compilers actual diagnostics engine.
-#if HAVE_LLVM_VER >= 33
-  info->Clang->createDiagnostics();
-#else
-  info->Clang->createDiagnostics(int(clangArgs.size()),&clangArgs[0]);
-#endif
-  if (!info->Clang->hasDiagnostics())
+  clangInfo->Clang->createDiagnostics();
+  if (!clangInfo->Clang->hasDiagnostics())
     INT_FATAL("Bad diagnostics from clang");
+
+  // Set llvm options
+  {
+    std::vector<std::string> vec;
+
+    // Start with any -mllvm options from the Clang invocation
+    auto clangMLLVM = CI->getFrontendOpts().LLVMArgs;
+    for (auto & arg : clangMLLVM) {
+      vec.push_back(arg);
+    }
+
+    // Then add any from --mllvm passed to Chapel
+    if (llvmFlags != "") {
+      //split llvmFlags by spaces
+      std::stringstream argsStream(llvmFlags);
+      std::string arg;
+      while(argsStream >> arg)
+        vec.push_back(arg);
+    }
+
+    std::vector<const char*> Args;
+    Args.push_back("chpl-llvm-opts");
+    for (auto & i : vec) {
+      Args.push_back(i.c_str());
+    }
+    Args.push_back(NULL);
+
+    if (printSystemCommands) {
+      printf("# parsing llvm command line options: ");
+      for (auto arg : Args) {
+        if (arg != NULL)
+          printf(" %s", arg);
+      }
+      printf("\n");
+    }
+
+    llvm::cl::ParseCommandLineOptions(Args.size()-1, &Args[0]);
+  }
 }
 
+static void setupModule()
+{
+  GenInfo* info = gGenInfo;
+  INT_ASSERT(info);
+  ClangInfo* clangInfo = info->clangInfo;
+  INT_ASSERT(clangInfo);
+
+  if (clangInfo->parseOnly) return;
+
+  INT_ASSERT(info->module);
+
+  clangInfo->asmTargetLayoutStr =
+    clangInfo->Clang->getTarget().getDataLayout().getStringRepresentation();
+
+  // Set the target triple.
+  const llvm::Triple &Triple =
+    clangInfo->Clang->getTarget().getTriple();
+  info->module->setTargetTriple(Triple.getTriple());
+
+  // Always set the module layout. This works around an apparent bug in
+  // clang or LLVM (trivial/deitz/test_array_low.chpl would print out the
+  // wrong answer  because some i64s were stored at the wrong alignment).
+  info->module->setDataLayout(clangInfo->asmTargetLayoutStr);
+
+  adjustLayoutForGlobalToWide();
+
+  // Set the TargetMachine
+  std::string Err;
+  const llvm::Target* Target = TargetRegistry::lookupTarget(Triple.str(), Err);
+  if (!Target)
+    USR_FATAL("Could not find LLVM target for %s: %s",
+              Triple.str().c_str(), Err.c_str());
+
+
+  const clang::TargetOptions & ClangOpts = clangInfo->Clang->getTargetOpts();
+
+  std::string cpu = ClangOpts.CPU;
+  std::vector<std::string> clangFeatures = ClangOpts.Features;
+  std::string featuresString;
+  if (!clangFeatures.empty()) {
+    llvm::SubtargetFeatures features;
+    for (const std::string &feature : clangFeatures)
+      features.AddFeature(feature);
+    featuresString = features.getString();
+  }
+
+  if (printSystemCommands) {
+    printf("# target features %s\n", featuresString.c_str());
+  }
+
+  // Set up the TargetOptions
+  llvm::TargetOptions targetOptions;
+  targetOptions.ThreadModel = llvm::ThreadModel::POSIX;
+
+  if (ffloatOpt) {
+    // see also FastMathFlags FM.setAllowReassoc etc
+    targetOptions.UnsafeFPMath = 1;
+    targetOptions.AllowFPOpFusion = llvm::FPOpFusion::Fast;
+    targetOptions.NoNaNsFPMath = 1;
+    targetOptions.NoInfsFPMath = 1;
+    //targetOptions.NoSignedZerosFPMath = 1;
+    // we could also consider:
+    // NoTrappingFPMath, HonorSignDependentRoundingFPMathOption
+  }
+
+  if (!fFastFlag)
+    targetOptions.EnableFastISel = 1;
+  else {
+    // things to consider:
+    // EnableIPRA  -- InterProcedural Register Allocation (IPRA).
+    // GuaranteedTailCallOpt -- guarantee tail call opt (may change fn ABI)
+  }
+
+  llvm::Reloc::Model relocModel = llvm::Reloc::Model::Static;
+  // TODO: we may need to use Reloc::PIC_ once we start
+  // interpreting, etc.
+
+  // Choose the code model
+#if HAVE_LLVM_VER >= 60
+  llvm::Optional<CodeModel::Model> codeModel = None;
+#else
+  llvm::CodeModel::Model codeModel = llvm::CodeModel::Default;
+#endif
+
+  llvm::CodeGenOpt::Level optLevel =
+    fFastFlag ? llvm::CodeGenOpt::Aggressive : llvm::CodeGenOpt::None;
+
+  // Create the target machine.
+  info->targetMachine = Target->createTargetMachine(Triple.str(),
+                                                    cpu,
+                                                    featuresString,
+                                                    targetOptions,
+                                                    relocModel,
+                                                    codeModel,
+                                                    optLevel);
+
+
+
+  // TODO: set a module flag with the Chapel ABI version
+  //   m->addModuleFlag(llvm::Module::Error, "Chapel Version", unsigned);
+
+  // Also setup some basic TBAA metadata nodes.
+  info->mdBuilder = new llvm::MDBuilder(info->module->getContext());
+  // Create the TBAA root node and unions node.
+  info->tbaaRootNode = info->mdBuilder->createTBAARoot("Chapel types");
+  info->tbaaUnionsNode =
+    info->mdBuilder->createTBAAScalarTypeNode("all unions", info->tbaaRootNode);
+  // Initialize TBAA metadata for special C pointers.
+  dtCVoidPtr->symbol->llvmTbaaTypeDescriptor =
+    info->mdBuilder->createTBAAScalarTypeNode("C void ptr",
+                                              info->tbaaUnionsNode);
+  dtCVoidPtr->symbol->llvmTbaaAccessTag =
+    info->mdBuilder->createTBAAStructTagNode(
+      dtCVoidPtr->symbol->llvmTbaaTypeDescriptor,
+      dtCVoidPtr->symbol->llvmTbaaTypeDescriptor,
+      /*Offset=*/0);
+  dtCVoidPtr->symbol->llvmConstTbaaAccessTag =
+    info->mdBuilder->createTBAAStructTagNode(
+      dtCVoidPtr->symbol->llvmTbaaTypeDescriptor,
+      dtCVoidPtr->symbol->llvmTbaaTypeDescriptor,
+      /*Offset=*/0,
+      /*IsConstant=*/true);
+  dtStringC->symbol->llvmTbaaTypeDescriptor =
+    dtCVoidPtr->symbol->llvmTbaaTypeDescriptor;
+  dtStringC->symbol->llvmTbaaAccessTag = dtCVoidPtr->symbol->llvmTbaaAccessTag;
+  dtStringC->symbol->llvmConstTbaaAccessTag =
+    dtCVoidPtr->symbol->llvmConstTbaaAccessTag;
+  dtCFnPtr->symbol->llvmTbaaTypeDescriptor =
+    info->mdBuilder->createTBAAScalarTypeNode(
+      "C fn ptr", dtCVoidPtr->symbol->llvmTbaaTypeDescriptor);
+  dtCFnPtr->symbol->llvmTbaaAccessTag =
+    info->mdBuilder->createTBAAStructTagNode(
+      dtCFnPtr->symbol->llvmTbaaTypeDescriptor,
+      dtCFnPtr->symbol->llvmTbaaTypeDescriptor,
+      /*Offset=*/0);
+  dtCFnPtr->symbol->llvmConstTbaaAccessTag =
+    info->mdBuilder->createTBAAStructTagNode(
+      dtCFnPtr->symbol->llvmTbaaTypeDescriptor,
+      dtCFnPtr->symbol->llvmTbaaTypeDescriptor,
+      /*Offset=*/0,
+      /*IsConstant=*/true);
+}
 
 void finishCodegenLLVM() {
   GenInfo* info = gGenInfo;
@@ -697,45 +1350,110 @@ void finishCodegenLLVM() {
   info->FPM_postgen = NULL;
 
   // Now finish any Clang code generation.
-  cleanupClang(info);
+  finishClang(info->clangInfo);
+
+  if(debug_info)debug_info->finalize();
 
   // Verify the LLVM module.
   if( developer ) {
-    if(verifyModule(*info->module,PrintMessageAction)){
+    bool problems;
+    problems = verifyModule(*info->module, &errs());
+    //problems = false;
+    if(problems) {
       INT_FATAL("LLVM module verification failed");
     }
   }
+}
+
+static
+void configurePMBuilder(PassManagerBuilder &PMBuilder, int optLevel=-1) {
+  ClangInfo* clangInfo = gGenInfo->clangInfo;
+  INT_ASSERT(clangInfo);
+  clang::CodeGenOptions &opts = clangInfo->codegenOptions;
+
+  if (optLevel < 0)
+    optLevel = opts.OptimizationLevel;
+
+  if( fFastFlag ) {
+    // TODO -- remove this assert
+    INT_ASSERT(opts.OptimizationLevel >= 2);
+  }
+
+  if (optLevel >= 1)
+    PMBuilder.Inliner = createFunctionInliningPass(optLevel,
+                                                   opts.OptimizeSize
+#if HAVE_LLVM_VER >= 50
+                                                   ,/*DisableInlineHotCallsite*/
+                                                   false
+#endif
+                                                  );
+
+  PMBuilder.OptLevel = optLevel;
+  PMBuilder.SizeLevel = opts.OptimizeSize;
+#if HAVE_LLVM_VER < 50
+  PMBuilder.BBVectorize = opts.VectorizeBB;
+#endif
+  PMBuilder.SLPVectorize = opts.VectorizeSLP;
+  PMBuilder.LoopVectorize = opts.VectorizeLoop;
+
+  PMBuilder.DisableUnrollLoops = !opts.UnrollLoops;
+  PMBuilder.MergeFunctions = opts.MergeFunctions;
+  PMBuilder.PrepareForThinLTO = opts.EmitSummaryIndex;
+  PMBuilder.PrepareForLTO = opts.PrepareForLTO;
+  PMBuilder.RerollLoops = opts.RerollLoops;
+
+  // TODO: we might need to call TargetMachine's addEarlyAsPossiblePasses
 }
 
 void prepareCodegenLLVM()
 {
   GenInfo *info = gGenInfo;
 
-  FunctionPassManager *fpm = new FunctionPassManager(info->module);
+  llvm::legacy::FunctionPassManager *fpm = new llvm::legacy::FunctionPassManager(info->module);
 
   PassManagerBuilder PMBuilder;
 
   // Set up the optimizer pipeline.
-  // Start with registering info about how the
-  // target lays out data structures.
-  fpm->add(new DataLayout(info->module));
 
-  if( fFastFlag ) {
-    PMBuilder.OptLevel = 2;
-    PMBuilder.populateFunctionPassManager(*fpm);
-  }
+  // Add the TransformInfo pass
+  fpm->add(createTargetTransformInfoWrapperPass(
+           info->targetMachine->getTargetIRAnalysis()));
+
+  // Add the TargetLibraryInfo pass
+  Triple TargetTriple(info->module->getTargetTriple());
+  llvm::TargetLibraryInfoImpl TLII(TargetTriple);
+  fpm->add(new TargetLibraryInfoWrapperPass(TLII));
+
+  configurePMBuilder(PMBuilder);
+  PMBuilder.populateFunctionPassManager(*fpm);
 
   info->FPM_postgen = fpm;
 
   info->FPM_postgen->doInitialization();
+
+  if(ffloatOpt == 1)
+  {
+    // see also targetOptions.UnsafeFPMath etc
+    llvm::FastMathFlags FM;
+    FM.setNoNaNs();
+    FM.setNoInfs();
+    FM.setNoSignedZeros();
+    FM.setAllowReciprocal();
+#if HAVE_LLVM_VER < 60
+    FM.setUnsafeAlgebra();
+#else
+    FM.setAllowContract(true);
+    FM.setApproxFunc();
+    FM.setAllowReassoc();
+#endif
+    info->irBuilder->setFastMathFlags(FM);
+  }
+
+  checkAdjustedDataLayout();
 }
 
-#if HAVE_LLVM_VER >= 33
 static void handleErrorLLVM(void* user_data, const std::string& reason,
                             bool gen_crash_diag)
-#else
-static void handleErrorLLVM(void* user_data, const std::string& reason)
-#endif
 {
   INT_FATAL("llvm fatal error: %s", reason.c_str());
 }
@@ -753,14 +1471,17 @@ typedef module_set_t::iterator module_set_iterator_t;
 module_set_t gModulesWithExternBlocks;
 
 bool lookupInExternBlock(ModuleSymbol* module, const char* name,
-                         clang::NamedDecl** cDecl,
-                         ChapelType** chplType)
+                         clang::TypeDecl** cTypeOut,
+                         clang::ValueDecl** cValueOut,
+                         const char** cCastedToTypeOut,
+                         ChapelType** chplTypeOut)
 {
   if( ! module->extern_info ) return false;
-  *cDecl = module->extern_info->gen_info->lvt->getCDecl(name);
+  module->extern_info->gen_info->lvt->getCDecl(name, cTypeOut, cValueOut,
+                                               cCastedToTypeOut);
   VarSymbol* var = module->extern_info->gen_info->lvt->getVarSymbol(name);
-  if( var ) *chplType = var->typeInfo();
-  return ( (*chplType) || (*cDecl) );
+  if( var ) *chplTypeOut = var->typeInfo();
+  return ( (*cTypeOut) || (*cValueOut) || (*chplTypeOut) );
 }
 bool alreadyConvertedExtern(ModuleSymbol* module, const char* name)
 {
@@ -775,39 +1496,111 @@ bool setAlreadyConvertedExtern(ModuleSymbol* module, const char* name)
 void runClang(const char* just_parse_filename) {
   static bool is_installed_fatal_error_handler = false;
 
-  /* TODO -- note that clang/examples/clang-interpreter/main.cpp 
-             includes an example for getting the executable path,
-             so that we could automatically set CHPL_HOME. */
-  std::string home(CHPL_HOME);
-  std::string compileline = home + "/util/config/compileline";
-  if( debugCCode ) compileline += " DEBUG=1";
-  if( optimizeCCode ) compileline += " OPTIMIZE=1";
-  std::string readargsfrom = compileline +
-                              " --llvm-install-dir --includes-and-defines";
+  const char* clang_warn[] = {"-Wall", "-Werror", "-Wpointer-arith",
+                              "-Wwrite-strings", "-Wno-strict-aliasing",
+                              "-Wmissing-declarations", "-Wmissing-prototypes",
+                              "-Wstrict-prototypes",
+                              "-Wmissing-format-attribute",
+                              // clang can't tell which functions we use
+                              "-Wno-unused-function",
+                              NULL};
+  const char* clang_debug = "-g";
+  const char* clang_opt = "-O3";
+  const char* clang_fast_float = "-ffast-math";
+  const char* clang_ieee_float = "-fno-fast-math";
+
   std::vector<std::string> args;
   std::vector<std::string> clangCCArgs;
-  std::vector<std::string> clangLDArgs;
   std::vector<std::string> clangOtherArgs;
-  std::string clangInstallDir;
 
-  // Add cflags,etc that used to be put into the Makefile
-  // (see codegen_makefile in files.cpp)
-  if (ccwarnings) {
-    // Could add warning arguments here. to clangCCArgs
-  }
+  // find the path to clang and clang++
+  std::string llvm_install, clangCC, clangCXX;
 
-  if (debugCCode) {
-    clangCCArgs.push_back("-g");
-  }
-
-  if (optimizeCCode) {
-    clangCCArgs.push_back("-O3");
-  }
-
-  if (fieeefloat) {
-    // believe clang is always ieee float
+  if (0 == strcmp(CHPL_LLVM, "system")) {
+    clangCC = get_clang_cc();
+    clangCXX = get_clang_cxx();
+  } else if (0 == strcmp(CHPL_LLVM, "llvm")) {
+    llvm_install += CHPL_THIRD_PARTY;
+    llvm_install += "/llvm/install/";
+    llvm_install += CHPL_HOST_PLATFORM;
+    llvm_install += "-";
+    llvm_install += CHPL_HOST_COMPILER;
+    llvm_install += "/bin/";
+    clangCC = llvm_install + "clang";
+    clangCXX = llvm_install + "clang++";
   } else {
-    clangCCArgs.push_back("-ffast-math");
+    USR_FATAL("Unsupported CHPL_LLVM setting %s", CHPL_LLVM);
+  }
+
+  // read clang-sysroot-arguments
+  std::string sysroot_arguments(CHPL_THIRD_PARTY);
+  sysroot_arguments += "/llvm/install/";
+  sysroot_arguments += CHPL_HOST_PLATFORM;
+  sysroot_arguments += "-";
+  sysroot_arguments += CHPL_HOST_COMPILER;
+  sysroot_arguments += "/configured-clang-sysroot-arguments";
+
+  // read arguments from configured-clang-sysroot-arguments
+  readArgsFromFile(sysroot_arguments, args);
+  // read arguments that we captured at compile time
+  readArgsFromString(get_clang_sysroot_args(), args);
+
+  std::string runtime_includes(CHPL_RUNTIME_LIB);
+  runtime_includes += "/";
+  runtime_includes += CHPL_RUNTIME_SUBDIR;
+  runtime_includes += "/list-includes-and-defines";
+
+  readArgsFromFile(runtime_includes, args);
+  // Substitute $CHPL_HOME $CHPL_RUNTIME_LIB etc
+  expandInstallationPaths(args);
+
+  if (compilingWithPrgEnv()) {
+    std::string gather_prgenv(CHPL_HOME);
+    gather_prgenv += "/util/config/gather-cray-prgenv-arguments.bash compile";
+    readArgsFromCommand(gather_prgenv, args);
+  }
+
+  if (ccwarnings) {
+    for (int i = 0; clang_warn[i]; i++) {
+      args.push_back(clang_warn[i]);
+    }
+  }
+
+  if (debugCCode)
+    args.push_back(clang_debug);
+
+  if (optimizeCCode)
+    args.push_back(clang_opt);
+
+  if (specializeCCode &&
+      CHPL_TARGET_BACKEND_ARCH != NULL &&
+      CHPL_TARGET_BACKEND_ARCH[0] != '\0' &&
+      0 != strcmp(CHPL_TARGET_BACKEND_ARCH, "none")) {
+    std::string march = "-march=";
+    const char *backend_arch = CHPL_TARGET_BACKEND_ARCH;
+    if (strncmp(backend_arch, "arm-", 4) == 0) {
+      backend_arch += 4;
+      march = "-mcpu=";
+    }
+    march += backend_arch;
+    if (strcmp(backend_arch, "thunderx2") == 0) {
+      march += "t99";
+    }
+    args.push_back(march);
+  }
+
+  if (ffloatOpt > 0)
+    args.push_back(clang_fast_float);
+
+  if (ffloatOpt < 0)
+    args.push_back(clang_ieee_float);
+
+  // Gather information from readargsfrom into clangArgs.
+
+  // Note that these CC arguments will be saved in info->clangCCArgs
+  // and will be used when compiling C files as well.
+  for( size_t i = 0; i < args.size(); ++i ) {
+    clangCCArgs.push_back(args[i]);
   }
 
   forv_Vec(const char*, dirName, incDirs) {
@@ -815,20 +1608,17 @@ void runClang(const char* just_parse_filename) {
   }
   clangCCArgs.push_back(std::string("-I") + getIntermediateDirName());
 
-  clangCCArgs.push_back(ccflags);
+  //split ccflags by spaces
+  std::stringstream ccArgsStream(ccflags);
+  std::string ccArg;
+  while(ccArgsStream >> ccArg)
+      clangCCArgs.push_back(ccArg);
 
   clangCCArgs.push_back("-pthread");
 
   // libFlag and ldflags are handled during linking later.
 
   clangCCArgs.push_back("-DCHPL_GEN_CODE");
-
-  // Gather information from readargsfrom into clangArgs.
-  readArgsFromCommand(readargsfrom.c_str(), args);
-  clangInstallDir = args[0];
-  for( size_t i = 1; i < args.size(); ++i ) {
-    clangOtherArgs.push_back(args[i]);
-  }
 
   // Always include sys_basic because it might change the
   // behaviour of macros!
@@ -848,6 +1638,11 @@ void runClang(const char* just_parse_filename) {
         }
       }
     }
+
+    // Include header containing libc wrappers
+    clangOtherArgs.push_back("-include");
+    clangOtherArgs.push_back("llvm/chapel_libc_wrapper.h");
+
     // Include extern C blocks
     if( externC && gAllExternCode.filename ) {
       clangOtherArgs.push_back("-include");
@@ -873,9 +1668,24 @@ void runClang(const char* just_parse_filename) {
   // Initialize gGenInfo
   // Toggle LLVM code generation in our clang run;
   // turn it off if we just wanted to parse some C.
-  gGenInfo = new GenInfo(clangInstallDir,
-                         compileline, clangCCArgs, clangLDArgs, clangOtherArgs,
-                         just_parse_filename != NULL);
+  gGenInfo = new GenInfo();
+
+  bool parseOnly = (just_parse_filename != NULL);
+
+  gGenInfo->lvt = new LayeredValueTable();
+
+
+  ClangInfo* clangInfo = NULL;
+  clangInfo = new ClangInfo(clangCC, clangCXX,
+                            clangCCArgs, clangOtherArgs,
+                            parseOnly);
+
+  gGenInfo->clangInfo = clangInfo;
+
+  std::string home(CHPL_HOME);
+  std::string rtmain = home + "/runtime/etc/rtmain.c";
+
+  setupClang(gGenInfo, rtmain);
 
   if( llvmCodegen || externC )
   {
@@ -891,8 +1701,10 @@ void runClang(const char* just_parse_filename) {
     // Now initialize a code generator...
     // this will enable us to ask for addresses of static (inline) functions
     // and cause them to be emitted eventually.
-    info->cgAction = new CCodeGenAction();
-    if (!info->Clang->ExecuteAction(*info->cgAction)) {
+    // CCodeGenAction is defined above. It traverses the C AST
+    // and does the code generation.
+    clangInfo->cCodeGenAction = new CCodeGenAction();
+    if (!clangInfo->Clang->ExecuteAction(*clangInfo->cCodeGenAction)) {
       if (just_parse_filename) {
         USR_FATAL("error running clang on extern block");
       } else {
@@ -900,10 +1712,16 @@ void runClang(const char* just_parse_filename) {
       }
     }
 
-    if( ! info->parseOnly ) {
+    if( ! parseOnly ) {
+      // LLVM module should have been created by CCodeGenConsumer
+      INT_ASSERT(gGenInfo->module);
+
+      // Create a new IRBuilder
+      gGenInfo->irBuilder = new llvm::IRBuilder<>(gGenInfo->module->getContext());
+
       // This seems to be needed, even though it is strange.
-      // (otherwise we segfault in info->builder->CreateGlobalString)
-      
+      // (otherwise we segfault in info->irBuilder->CreateGlobalString)
+
       // Some IRBuilder methods, codegenning a string,
       // need a basic block in order to get to the module
       // so we create a dummy function to code generate into
@@ -915,14 +1733,14 @@ void runClang(const char* just_parse_filename) {
                          "chplDummyFunction", info->module);
       llvm::BasicBlock *block =
         llvm::BasicBlock::Create(info->module->getContext(), "entry", F);
-      info->builder->SetInsertPoint(block);
+      info->irBuilder->SetInsertPoint(block);
     }
     // read macros. May call IRBuilder methods to codegen a string,
     // so needs to happen after we set the insert point.
     readMacrosClang();
 
-    if( ! info->parseOnly ) {
-      info->builder->CreateRetVoid();
+    if( ! parseOnly ) {
+      info->irBuilder->CreateRetVoid();
     }
   }
 }
@@ -997,7 +1815,8 @@ void cleanupExternC(void) {
        ++it ) {
     ModuleSymbol* module = *it;
     INT_ASSERT(module->extern_info);
-    cleanupClang(module->extern_info->gen_info);
+    cleanupClang(module->extern_info->gen_info->clangInfo);
+    delete module->extern_info->gen_info->clangInfo;
     delete module->extern_info->gen_info;
     delete module->extern_info;
     // Remove all ExternBlockStmts from this module.
@@ -1008,7 +1827,7 @@ void cleanupExternC(void) {
   }
 }
 
-Function* getFunctionLLVM(const char* name)
+llvm::Function* getFunctionLLVM(const char* name)
 {
   GenInfo* info = gGenInfo;
   Function* fn = info->module->getFunction(name);
@@ -1038,7 +1857,13 @@ llvm::Type* getTypeLLVM(const char* name)
 llvm::Type* codegenCType(const TypeDecl* td)
 {
   GenInfo* info = gGenInfo;
-  CodeGen::CodeGenTypes & cdt = info->cgBuilder->getTypes();
+  INT_ASSERT(info);
+  ClangInfo* clangInfo = info->clangInfo;
+  INT_ASSERT(clangInfo);
+  clang::CodeGenerator* cCodeGen = clangInfo->cCodeGen;
+  INT_ASSERT(cCodeGen);
+
+  //CodeGen::CodeGenTypes & cdt = info->cgBuilder->getTypes();
   QualType qType;
 
   // handle TypedefDecl
@@ -1061,13 +1886,23 @@ llvm::Type* codegenCType(const TypeDecl* td)
   } else {
     INT_FATAL("Unknown clang type declaration");
   }
-  return cdt.ConvertTypeForMem(qType);
+#if HAVE_LLVM_VER >= 50
+  return clang::CodeGen::convertTypeForMemory(cCodeGen->CGM(), qType);
+#else
+  return cCodeGen->CGM().getTypes().ConvertTypeForMem(qType);
+#endif
 }
 
 // should support FunctionDecl,VarDecl,EnumConstantDecl
 GenRet codegenCValue(const ValueDecl *vd)
 {
   GenInfo* info = gGenInfo;
+  INT_ASSERT(info);
+  ClangInfo* clangInfo = info->clangInfo;
+  INT_ASSERT(clangInfo);
+  clang::CodeGenerator* cCodeGen = clangInfo->cCodeGen;
+  INT_ASSERT(cCodeGen);
+
   GenRet ret;
 
   if( info->cfile ) {
@@ -1077,19 +1912,20 @@ GenRet codegenCValue(const ValueDecl *vd)
 
   if(const FunctionDecl *fd = dyn_cast<FunctionDecl>(vd)) {
     // It's a function decl.
-    ret.val = info->cgBuilder->GetAddrOfFunction(fd);
+    ret.val = cCodeGen->GetAddrOfGlobal(GlobalDecl(fd), false);
     ret.isLVPtr = GEN_VAL;
   } else if(const VarDecl *vard = dyn_cast<VarDecl>(vd)) {
     // It's a (global) variable decl
-    ret.val = info->cgBuilder->GetAddrOfGlobalVar(vard);
+    ret.val = cCodeGen->GetAddrOfGlobal(GlobalDecl(vard), false);
     ret.isLVPtr = GEN_PTR;
   } else if(const EnumConstantDecl *ed = dyn_cast<EnumConstantDecl>(vd)) {
     // It's a constant enum value
     APInt v = ed->getInitVal();
 
     ret.isUnsigned = ! ed->getType()->hasSignedIntegerRepresentation();
-    CodeGen::CodeGenTypes & cdt = info->cgBuilder->getTypes();
-    llvm::Type* type = cdt.ConvertTypeForMem(ed->getType());
+
+    // TODO: should be in clang::CodeGenerator API
+    llvm::Type* type = cCodeGen->CGM().getTypes().ConvertTypeForMem(ed->getType());
     ret.val = ConstantInt::get(type, v);
     ret.isLVPtr = GEN_VAL;
   } else {
@@ -1146,15 +1982,48 @@ void LayeredValueTable::addGlobalType(StringRef name, llvm::Type *type) {
 }
 
 void LayeredValueTable::addGlobalCDecl(NamedDecl* cdecl) {
-  Storage store;
-  store.u.cdecl = cdecl;
-  (layers.back())[cdecl->getName()] = store;
+  addGlobalCDecl(cdecl->getName(), cdecl);
+
+  // Also file structs under 'struct struct_name'
+  if(isa<RecordDecl>(cdecl)) {
+    std::string sname = "struct ";
+    sname += cdecl->getName();
+    addGlobalCDecl(sname, cdecl);
+  }
 }
 
-void LayeredValueTable::addGlobalVarSymbol(llvm::StringRef name, VarSymbol* var)
+void LayeredValueTable::addGlobalCDecl(StringRef name, NamedDecl* cdecl, const char* castToType) {
+
+  if(RecordDecl *rd = dyn_cast<RecordDecl>(cdecl)) {
+    // For record decls, always use the completed definition
+    // if it is available.
+    // E.g., we might visit decls in this order:
+    //   struct stat { ... }
+    //   struct stat;
+
+    RecordDecl* completed = rd->getDefinition();
+    if (completed) {
+      // Use the completed version below.
+      cdecl = completed;
+    }
+  }
+
+  // Add to an existing Storage record, so that it can store
+  // both a type and a value (e.g. struct stat and function stat).
+  Storage & store = (layers.back())[name];
+  if (isa<TypeDecl>(cdecl)) store.u.cTypeDecl = cast<TypeDecl>(cdecl);
+  if (isa<ValueDecl>(cdecl)) {
+    store.u.cValueDecl = cast<ValueDecl>(cdecl);
+    store.u.castChplVarTo = castToType;
+  }
+}
+
+
+void LayeredValueTable::addGlobalVarSymbol(llvm::StringRef name, VarSymbol* var, const char* castToType)
 {
   Storage store;
   store.u.chplVar = var;
+  store.u.castChplVarTo = castToType;
   (layers.back())[name] = store;
 }
 
@@ -1171,28 +2040,39 @@ void LayeredValueTable::addBlock(StringRef name, llvm::BasicBlock *block) {
 
 GenRet LayeredValueTable::getValue(StringRef name) {
   if(Storage *store = get(name)) {
-    if( store->u.value && isa<Value>(store->u.value) ) {
+    if( store->u.value ) {
+      INT_ASSERT(isa<Value>(store->u.value));
       GenRet ret;
       ret.val = store->u.value;
       ret.isLVPtr = store->isLVPtr;
       ret.isUnsigned = store->isUnsigned;
       return ret;
     }
-    if( store->u.cdecl && isa<NamedDecl>(store->u.cdecl) ) {
-      // we have a clang named decl.
-      // maybe TypedefDecl,EnumDecl,RecordDecl,FunctionDecl,
-      // VarDecl,EnumConstantDecl
-      if( isa<ValueDecl>(store->u.cdecl) ) {
-        ValueDecl* vd = cast<ValueDecl>(store->u.cdecl);
+    if( store->u.cValueDecl ) {
+      INT_ASSERT(isa<ValueDecl>(store->u.cValueDecl));
+      // we have a clang value decl.
+      // maybe FunctionDecl,VarDecl,EnumConstantDecl
 
-        // Convert it to an LLVM value
-        // should support FunctionDecl,VarDecl,EnumConstantDecl
-        return codegenCValue(vd);
-      }
+      // Convert it to an LLVM value
+      // should support FunctionDecl,VarDecl,EnumConstantDecl
+      GenRet ret = codegenCValue(store->u.cValueDecl);
+      store->u.value = ret.val;
+      store->isLVPtr = ret.isLVPtr;
+      store->isUnsigned = ret.isUnsigned;
+      return ret;
     }
     if( store->u.chplVar && isVarSymbol(store->u.chplVar) ) {
       VarSymbol* var = store->u.chplVar;
       GenRet ret = var; // code generate it!
+
+      if (store->u.castChplVarTo) {
+        ret = codegenCast(store->u.castChplVarTo, ret);
+      }
+
+      store->u.value = ret.val;
+      store->isLVPtr = ret.isLVPtr;
+      store->isUnsigned = ret.isUnsigned;
+
       return ret;
     }
   }
@@ -1210,33 +2090,54 @@ llvm::BasicBlock *LayeredValueTable::getBlock(StringRef name) {
 
 llvm::Type *LayeredValueTable::getType(StringRef name) {
   if(Storage *store = get(name)) {
-    if( store->u.type && isa<llvm::Type>(store->u.type) )
+    if( store->u.type ) {
+      INT_ASSERT(isa<llvm::Type>(store->u.type));
       return store->u.type;
-    if( store->u.cdecl && isa<NamedDecl>(store->u.cdecl) ) {
-      // we have a clang named decl.
-      // maybe TypedefDecl,EnumDecl,RecordDecl,FunctionDecl,
-      // VarDecl,EnumConstantDecl
-      if( isa<TypeDecl>(store->u.cdecl) ) {
-        TypeDecl* td = cast<TypeDecl>(store->u.cdecl);
-        // Convert it to an LLVM type.
-        // should support TypedefDecl,EnumDecl,RecordDecl
-        return codegenCType(td);
-      }
+    }
+    if( store->u.cTypeDecl ) {
+      INT_ASSERT(isa<TypeDecl>(store->u.cTypeDecl));
+      // we have a clang type decl.
+      // maybe TypedefDecl,EnumDecl,RecordDecl
+
+      // Convert it to an LLVM type.
+      store->u.type = codegenCType(store->u.cTypeDecl);
+      return store->u.type;
     }
   }
   return NULL;
 }
 
-NamedDecl* LayeredValueTable::getCDecl(StringRef name) {
+// Returns a type or a name decl for a given name
+// Note that C can have a function and a type sharing the same name
+// (e.g. stat/struct stat).
+// Sets the output arguments to NULL if a type/value was not found.
+// Either output argument can be NULL.
+void LayeredValueTable::getCDecl(StringRef name, TypeDecl** cTypeOut,
+    ValueDecl** cValueOut, const char** cCastedToTypeOut) {
+
+  if (cValueOut) *cValueOut = NULL;
+  if (cTypeOut) *cTypeOut = NULL;
+  if (cCastedToTypeOut) *cCastedToTypeOut = NULL;
+
   if(Storage *store = get(name)) {
-    if( store->u.cdecl && isa<NamedDecl>(store->u.cdecl) ) {
-      // we have a clang named decl.
-      // maybe TypedefDecl,EnumDecl,RecordDecl,FunctionDecl,
-      // VarDecl,EnumConstantDecl
-      return store->u.cdecl;
+    if( store->u.cValueDecl ) {
+      INT_ASSERT(isa<ValueDecl>(store->u.cValueDecl));
+      // we have a clang value decl.
+      // maybe FunctionDecl,VarDecl,EnumConstantDecl
+
+      if (cValueOut) *cValueOut = store->u.cValueDecl;
+    }
+    if( store->u.cTypeDecl ) {
+      INT_ASSERT(isa<TypeDecl>(store->u.cTypeDecl));
+      // we have a clang type decl.
+      // maybe TypedefDecl,EnumDecl,RecordDecl
+
+      if (cTypeOut) *cTypeOut = store->u.cTypeDecl;
+    }
+    if (store->u.castChplVarTo) {
+      if (cCastedToTypeOut) *cCastedToTypeOut = store->u.castChplVarTo;
     }
   }
-  return NULL;
 }
 
 VarSymbol* LayeredValueTable::getVarSymbol(StringRef name) {
@@ -1295,8 +2196,16 @@ void LayeredValueTable::swap(LayeredValueTable* other)
 int getCRecordMemberGEP(const char* typeName, const char* fieldName)
 {
   GenInfo* info = gGenInfo;
-  NamedDecl* d = info->lvt->getCDecl(typeName);
+  INT_ASSERT(info);
+  ClangInfo* clangInfo = info->clangInfo;
+  INT_ASSERT(clangInfo);
+  clang::CodeGenerator* cCodeGen = clangInfo->cCodeGen;
+  INT_ASSERT(cCodeGen);
+
+  TypeDecl* d = NULL;
   int ret;
+
+  info->lvt->getCDecl(typeName, &d, NULL);
   INT_ASSERT(d);
   if( isa<TypedefDecl>(d) ) {
     TypedefDecl* td = cast<TypedefDecl>(d);
@@ -1321,7 +2230,8 @@ int getCRecordMemberGEP(const char* typeName, const char* fieldName)
     }
   }
   INT_ASSERT(field);
-  ret=info->cgBuilder->getTypes().getCGRecordLayout(rec).getLLVMFieldNo(field);
+  // TODO: should be in clang::CodeGenerator API
+  ret = cCodeGen->CGM().getTypes().getCGRecordLayout(rec).getLLVMFieldNo(field);
   return ret;
 }
 
@@ -1332,7 +2242,8 @@ bool isBuiltinExternCFunction(const char* cname)
 }
 
 static
-void addAggregateGlobalOps(const PassManagerBuilder &Builder, PassManagerBase &PM) {
+void addAggregateGlobalOps(const PassManagerBuilder &Builder,
+    llvm::legacy::PassManagerBase &PM) {
   GenInfo* info = gGenInfo;
   if( fLLVMWideOpt ) {
     PM.add(createAggregateGlobalOpsOptPass(info->globalToWideInfo.globalSpace));
@@ -1340,12 +2251,61 @@ void addAggregateGlobalOps(const PassManagerBuilder &Builder, PassManagerBase &P
 }
 
 static
-void addGlobalToWide(const PassManagerBuilder &Builder, PassManagerBase &PM) {
+void addGlobalToWide(const PassManagerBuilder &Builder,
+    llvm::legacy::PassManagerBase &PM) {
   GenInfo* info = gGenInfo;
   if( fLLVMWideOpt ) {
-    PM.add(createGlobalToWide(&info->globalToWideInfo, info->targetLayout));
+    PM.add(createGlobalToWide(&info->globalToWideInfo, info->clangInfo->asmTargetLayoutStr));
   }
 }
+
+static
+bool getIrDumpExtensionPoint(llvmStageNum_t s,
+    PassManagerBuilder::ExtensionPointTy & dumpIrPoint)
+{
+  switch (s) {
+    case llvmStageNum::EarlyAsPossible:
+      dumpIrPoint = PassManagerBuilder::EP_EarlyAsPossible;
+      return true;
+    case llvmStageNum::ModuleOptimizerEarly:
+      dumpIrPoint = PassManagerBuilder::EP_ModuleOptimizerEarly;
+      return true;
+    case llvmStageNum::LoopOptimizerEnd:
+      dumpIrPoint = PassManagerBuilder::EP_LoopOptimizerEnd;
+      return true;
+    case llvmStageNum::ScalarOptimizerLate:
+      dumpIrPoint = PassManagerBuilder::EP_ScalarOptimizerLate;
+      return true;
+    case llvmStageNum::OptimizerLast:
+      dumpIrPoint = PassManagerBuilder::EP_OptimizerLast;
+      return true;
+    case llvmStageNum::VectorizerStart:
+      dumpIrPoint = PassManagerBuilder::EP_VectorizerStart;
+      return true;
+    case llvmStageNum::EnabledOnOptLevel0:
+      dumpIrPoint = PassManagerBuilder::EP_EnabledOnOptLevel0;
+      return true;
+    case llvmStageNum::Peephole:
+      dumpIrPoint = PassManagerBuilder::EP_Peephole;
+      return true;
+    case llvmStageNum::NOPRINT:
+    case llvmStageNum::NONE:
+    case llvmStageNum::BASIC:
+    case llvmStageNum::FULL:
+    case llvmStageNum::EVERY:
+    case llvmStageNum::LAST:
+      return false;
+  }
+
+  return false;
+}
+
+static
+void addDumpIrPass(const PassManagerBuilder &Builder,
+    llvm::legacy::PassManagerBase &PM) {
+  PM.add(createDumpIrPass(llvmPrintIrStageNum));
+}
+
 
 // If we're using the LLVM wide optimizations, we have to add
 // some functions to call put/get into the Chapel runtime layers
@@ -1362,14 +2322,6 @@ void setupForGlobalToWide(void) {
   info->nodeIdType = ginfo->lvt->getType("c_nodeid_t");
   assert(info->nodeIdType);
 
-  info->addrFn = getFunctionLLVM("chpl_wide_ptr_get_address");
-  INT_ASSERT(info->addrFn);
-  info->locFn = getFunctionLLVM("chpl_wide_ptr_read_localeID");
-  INT_ASSERT(info->locFn);
-  info->nodeFn = getFunctionLLVM("chpl_wide_ptr_get_node");
-  INT_ASSERT(info->nodeFn);
-  info->makeFn = getFunctionLLVM("chpl_return_wide_ptr_loc_ptr");
-  INT_ASSERT(info->makeFn);
   info->getFn = getFunctionLLVM("chpl_gen_comm_get_ctl");
   INT_ASSERT(info->getFn);
   info->putFn = getFunctionLLVM("chpl_gen_comm_put_ctl");
@@ -1393,96 +2345,318 @@ void setupForGlobalToWide(void) {
   llvm::Type* retType = llvm::Type::getInt8PtrTy(ginfo->module->getContext());
   llvm::Type* argType = llvm::Type::getInt64Ty(ginfo->module->getContext());
   llvm::Value* fval = ginfo->module->getOrInsertFunction(
-                          dummy, retType, argType, NULL);
+                          dummy, retType, argType
+#if HAVE_LLVM_VER < 50
+                          , NULL
+#endif
+                          );
   llvm::Function* fn = llvm::dyn_cast<llvm::Function>(fval);
 
   // Mark the function as external so that it will not be removed
   fn->setLinkage(llvm::GlobalValue::ExternalLinkage);
 
-  llvm::BasicBlock* block = 
+  llvm::BasicBlock* block =
      llvm::BasicBlock::Create(ginfo->module->getContext(), "entry", fn);
-  ginfo->builder->SetInsertPoint(block);
+  ginfo->irBuilder->SetInsertPoint(block);
 
-  llvm::Constant* fns[] = {info->addrFn, info->locFn, info->nodeFn,
-                           info->makeFn, info->getFn, info->putFn,
+  llvm::Constant* fns[] = {info->getFn, info->putFn,
                            info->getPutFn, info->memsetFn, NULL};
 
   llvm::Value* ret = llvm::Constant::getNullValue(retType);
   llvm::Function::arg_iterator args = fn->arg_begin();
-  llvm::Value* arg = args++;
+  llvm::Argument& llArg = *args;
+  llvm::Value* arg = &llArg;
+  ++args;
 
   for( int i = 0; fns[i]; i++ ) {
     llvm::Constant* f = fns[i];
-    llvm::Value* ptr = ginfo->builder->CreatePointerCast(f, retType); 
+    llvm::Value* ptr = ginfo->irBuilder->CreatePointerCast(f, retType);
     llvm::Value* id = llvm::ConstantInt::get(argType, i);
-    llvm::Value* eq = ginfo->builder->CreateICmpEQ(arg, id);
-    ret = ginfo->builder->CreateSelect(eq, ptr, ret);
+    llvm::Value* eq = ginfo->irBuilder->CreateICmpEQ(arg, id);
+    ret = ginfo->irBuilder->CreateSelect(eq, ptr, ret);
   }
-  ginfo->builder->CreateRet(ret);
+  ginfo->irBuilder->CreateRet(ret);
 
-  llvm::verifyFunction(*fn);
+  llvm::verifyFunction(*fn, &errs());
 
   info->preservingFn = fn;
+}
+static
+void adjustLayoutForGlobalToWide()
+{
+  if( ! fLLVMWideOpt ) return;
+
+  GenInfo* info = gGenInfo;
+  INT_ASSERT(info);
+  ClangInfo* clangInfo = info->clangInfo;
+  INT_ASSERT(clangInfo);
+
+  if (clangInfo->parseOnly) return;
+
+  std::string layout = clangInfo->asmTargetLayoutStr;
+
+  INT_ASSERT(layout != "");
+
+  char buf[200]; //needs to store up to 8 32-bit numbers in decimal
+
+  // Add global pointer info to layout.
+  snprintf(buf, sizeof(buf), "-p%u:%u:%u:%u-p%u:%u:%u:%u"
+      /*"-ni:%u:%u"*/ /* non-integral pointers */,
+      GLOBAL_PTR_SPACE,
+      GLOBAL_PTR_SIZE, GLOBAL_PTR_ABI_ALIGN, GLOBAL_PTR_PREF_ALIGN,
+      WIDE_PTR_SPACE, GLOBAL_PTR_SIZE, GLOBAL_PTR_ABI_ALIGN,
+      GLOBAL_PTR_PREF_ALIGN /*, GLOBAL_PTR_SPACE, WIDE_PTR_SPACE*/);
+  layout += buf;
+  // Save the global address space we are using in info.
+  info->globalToWideInfo.globalSpace = GLOBAL_PTR_SPACE;
+  info->globalToWideInfo.wideSpace = WIDE_PTR_SPACE;
+  info->globalToWideInfo.globalPtrBits = GLOBAL_PTR_SIZE;
+
+  // Always set the module layout. This works around an apparent bug in
+  // clang or LLVM (trivial/deitz/test_array_low.chpl would print out the
+  // wrong answer  because some i64s were stored at the wrong alignment).
+  info->module->setDataLayout(layout);
+
+  checkAdjustedDataLayout();
+}
+
+void checkAdjustedDataLayout() {
+
+  if( ! fLLVMWideOpt ) return;
+
+  GenInfo* info = gGenInfo;
+  INT_ASSERT(info);
+  ClangInfo* clangInfo = info->clangInfo;
+  INT_ASSERT(clangInfo);
+
+  if (clangInfo->parseOnly) return;
+
+  // Check that the data layout setting worked
+  const llvm::DataLayout& dl = info->module->getDataLayout();
+  llvm::Type* testTy = llvm::Type::getInt8PtrTy(info->module->getContext(),
+                                                GLOBAL_PTR_SPACE);
+  INT_ASSERT(dl.getTypeSizeInBits(testTy) == GLOBAL_PTR_SIZE);
 }
 
 
 void makeBinaryLLVM(void) {
-  GenInfo* info = gGenInfo;
 
-  std::string moduleFilename = genIntermediateFilename("chpl__module.bc");
+  GenInfo* info = gGenInfo;
+  INT_ASSERT(info);
+  ClangInfo* clangInfo = info->clangInfo;
+  INT_ASSERT(clangInfo);
+
+  std::string moduleFilename = genIntermediateFilename("chpl__module.o");
   std::string preOptFilename = genIntermediateFilename("chpl__module-nopt.bc");
+  std::string opt1Filename = genIntermediateFilename("chpl__module-opt1.bc");
+  std::string opt2Filename = genIntermediateFilename("chpl__module-opt2.bc");
 
   if( saveCDir[0] != '\0' ) {
+    std::error_code tmpErr;
     // Save the generated LLVM before optimization.
-    std::string errorInfo;
-    OwningPtr<tool_output_file> output (
-        new tool_output_file(preOptFilename.c_str(),
-                             errorInfo,
-                             raw_fd_ostream::F_Binary));
-    WriteBitcodeToFile(info->module, output->os());
-    output->keep();
-    output->os().flush();
+    TOOL_OUTPUT_FILE output (preOptFilename.c_str(),
+                             tmpErr, sys::fs::F_None);
+    if (tmpErr)
+      USR_FATAL("Could not open output file %s", preOptFilename.c_str());
+    WriteBitcodeToFile(info->module, output.os());
+    output.keep();
+    output.os().flush();
   }
 
-  std::string errorInfo;
-  OwningPtr<tool_output_file> output (
-      new tool_output_file(moduleFilename.c_str(),
-                           errorInfo,
-                           raw_fd_ostream::F_Binary));
- 
+  // Open the output file
+  std::error_code error;
+  llvm::sys::fs::OpenFlags flags = llvm::sys::fs::F_None;
+
+  llvm::raw_fd_ostream outputOfile(moduleFilename, error, flags);
+  if (error || outputOfile.has_error())
+    USR_FATAL("Could not open output file %s", moduleFilename.c_str());
+
   static bool addedGlobalExts = false;
   if( ! addedGlobalExts ) {
-    // Add the Global to Wide optimization if necessary.
-    PassManagerBuilder::addGlobalExtension(PassManagerBuilder::EP_ScalarOptimizerLate, addAggregateGlobalOps);
-    PassManagerBuilder::addGlobalExtension(PassManagerBuilder::EP_ScalarOptimizerLate, addGlobalToWide);
-    PassManagerBuilder::addGlobalExtension(PassManagerBuilder::EP_EnabledOnOptLevel0, addGlobalToWide);
+    // Add IR dumping pass if necessary
+    // point is initialized to a dummy value; it is set
+    // in getIrDumpExtensionPoint.
+    PassManagerBuilder::ExtensionPointTy point =
+                  PassManagerBuilder::EP_EarlyAsPossible;
+
+    if (getIrDumpExtensionPoint(llvmPrintIrStageNum, point)) {
+      printf("Adding IR dump extension at %i for %s\n", point, llvmPrintIrCName);
+      PassManagerBuilder::addGlobalExtension(point, addDumpIrPass);
+    }
+
+    if (llvmPrintIrStageNum == llvmStageNum::EVERY) {
+      printf("Adding IR dump extensions for all phases\n");
+      for (int i = 0; i < llvmStageNum::LAST; i++) {
+        llvmStageNum::llvmStageNum_t stage = (llvmStageNum::llvmStageNum_t) i;
+        if (getIrDumpExtensionPoint(stage, point))
+          PassManagerBuilder::addGlobalExtension(
+              point,
+              [stage] (const PassManagerBuilder &Builder,
+                       llvm::legacy::PassManagerBase &PM) -> void {
+                PM.add(createDumpIrPass(stage));
+              });
+      }
+
+      // Put the print-stage-num back
+      llvmPrintIrStageNum = llvmStageNum::EVERY;
+    }
+
     addedGlobalExts = true;
   }
 
-  EmitBackendOutput(*info->Diags, info->codegenOptions,
-                    info->clangTargetOptions, info->clangLangOptions,
-                    info->module, Backend_EmitBC, &output->os());
-  output->keep();
-  output->os().flush();
+  // Create PassManager and run optimizations
+  PassManagerBuilder PMBuilder;
 
+  configurePMBuilder(PMBuilder);
+
+  // Note, these global extensions currently only apply
+  // to the module-level optimization (not the "basic" function
+  // optimization we do immediately after generating LLVM IR).
+
+  // Add the Global to Wide optimization if necessary.
+  if (fLLVMWideOpt) {
+    PMBuilder.addExtension(PassManagerBuilder::EP_OptimizerLast, addAggregateGlobalOps);
+    PMBuilder.addExtension(PassManagerBuilder::EP_OptimizerLast, addGlobalToWide);
+    PMBuilder.addExtension(PassManagerBuilder::EP_EnabledOnOptLevel0, addGlobalToWide);
+  }
+
+  // Setup for and run LLVM optimization passes
+  {
+    adjustLayoutForGlobalToWide();
+
+    llvm::legacy::PassManager mpm;
+    llvm::legacy::PassManager mpm2;
+
+    // Add the TransformInfo pass
+    mpm.add(createTargetTransformInfoWrapperPass(
+            info->targetMachine->getTargetIRAnalysis()));
+    mpm2.add(createTargetTransformInfoWrapperPass(
+             info->targetMachine->getTargetIRAnalysis()));
+
+    // Add the TargetLibraryInfo pass
+    Triple TargetTriple(info->module->getTargetTriple());
+    llvm::TargetLibraryInfoImpl TLII(TargetTriple);
+    mpm.add(new TargetLibraryInfoWrapperPass(TLII));
+    mpm2.add(new TargetLibraryInfoWrapperPass(TLII));
+
+    PMBuilder.populateModulePassManager(mpm);
+
+    // Run the optimizations now!
+    mpm.run(*info->module);
+
+    if( saveCDir[0] != '\0' ) {
+      // Save the generated LLVM after first chunk of optimization
+      std::error_code tmpErr;
+      TOOL_OUTPUT_FILE output1 (opt1Filename.c_str(),
+                               tmpErr, sys::fs::F_None);
+      if (tmpErr)
+        USR_FATAL("Could not open output file %s", opt1Filename.c_str());
+      WriteBitcodeToFile(info->module, output1.os());
+      output1.keep();
+      output1.os().flush();
+    }
+
+
+    if (fLLVMWideOpt) {
+      // the GlobalToWide pass creates calls to inline functions, among
+      // other things, that will need to be optimized. So run an additional
+      // battery of optimizations now.
+
+      PassManagerBuilder PMBuilder2;
+
+      configurePMBuilder(PMBuilder2, /* opt level */ 1);
+      // Should we disable vectorization since we did that?
+      // Or run select few cleanup passes?
+      // Inlining is definitely important here..
+
+      PMBuilder2.populateModulePassManager(mpm2);
+
+      // Reset the data layout.
+      info->module->setDataLayout(clangInfo->asmTargetLayoutStr);
+
+      // Run the optimizations now!
+      mpm2.run(*info->module);
+
+      if( saveCDir[0] != '\0' ) {
+        // Save the generated LLVM after second chunk of optimization
+        std::error_code tmpErr;
+        TOOL_OUTPUT_FILE output2 (opt2Filename.c_str(),
+                                 tmpErr, sys::fs::F_None);
+        if (tmpErr)
+          USR_FATAL("Could not open output file %s", opt2Filename.c_str());
+        WriteBitcodeToFile(info->module, output2.os());
+        output2.keep();
+        output2.os().flush();
+      }
+    }
+  }
+
+  // Handle --llvm-print-ir-stage=full
+#ifdef HAVE_LLVM
+  if((llvmStageNum::FULL == llvmPrintIrStageNum ||
+      llvmStageNum::EVERY == llvmPrintIrStageNum) && llvmPrintIrCName != NULL)
+      printLlvmIr(getFunctionLLVM(llvmPrintIrCName), llvmStageNum::FULL);
+#endif
+
+  // Emit the .o file for linking with clang
+  // Setup and run LLVM passes to emit a .o file to outputOfile
+  {
+    llvm::legacy::PassManager emitPM;
+
+    emitPM.add(createTargetTransformInfoWrapperPass(
+               info->targetMachine->getTargetIRAnalysis()));
+
+    llvm::TargetMachine::CodeGenFileType FileType =
+      llvm::TargetMachine::CGFT_ObjectFile;
+    bool disableVerify = ! developer;
+    info->targetMachine->addPassesToEmitFile(emitPM, outputOfile,
+                                             FileType,
+                                             disableVerify);
+
+    // Run the passes to emit the .o file now!
+    emitPM.run(*info->module);
+    outputOfile.close();
+  }
+
+  //finishClang is before the call to the debug finalize
+  deleteClang(clangInfo);
 
   std::string options = "";
 
-  std::string home(CHPL_HOME);
-  std::string compileline = info->compileline;
-  compileline += " --llvm-install-dir --main.o --libraries";
-  std::vector<std::string> args;
-  readArgsFromCommand(compileline.c_str(), args);
+  // TODO: fixme
 
-  std::string clangInstall = args[0];
-  std::string maino = args[1];
+  std::string maino(CHPL_RUNTIME_LIB);
+  maino += "/";
+  maino += CHPL_RUNTIME_SUBDIR;
+  maino += "/main.o";
+
+  std::string runtime_libs(CHPL_RUNTIME_LIB);
+  runtime_libs += "/";
+  runtime_libs += CHPL_RUNTIME_SUBDIR;
+  runtime_libs += "/list-libraries";
+
+  std::vector<std::string> clangLDArgs;
+  readArgsFromFile(runtime_libs, clangLDArgs);
+  // Substitute $CHPL_HOME $CHPL_RUNTIME_LIB etc
+  expandInstallationPaths(clangLDArgs);
+
+  if (compilingWithPrgEnv()) {
+    std::string gather_prgenv(CHPL_HOME);
+    gather_prgenv += "/util/config/gather-cray-prgenv-arguments.bash link";
+    readArgsFromCommand(gather_prgenv, clangLDArgs);
+  }
+
+
+  std::string clangCC = clangInfo->clangCC;
+  std::string clangCXX = clangInfo->clangCXX;
+
   std::vector<std::string> dotOFiles;
 
   // Gather C flags for compiling C files.
   std::string cargs;
-  for( size_t i = 0; i < info->clangCCArgs.size(); ++i ) {
+  for( size_t i = 0; i < clangInfo->clangCCArgs.size(); ++i ) {
     cargs += " ";
-    cargs += info->clangCCArgs[i];
+    cargs += clangInfo->clangCCArgs[i];
   }
 
   // Compile any C files.
@@ -1491,8 +2665,8 @@ void makeBinaryLLVM(void) {
     const char* inputFilename = gChplCompilationConfig.pathname;
     const char* objFilename = objectFileForCFile(inputFilename);
 
-    mysystem(astr(clangInstall.c_str(),
-                  "/bin/clang -c -o ",
+    mysystem(astr(clangCC.c_str(),
+                  " -c -o ",
                   objFilename,
                   " ",
                   inputFilename,
@@ -1506,8 +2680,8 @@ void makeBinaryLLVM(void) {
   while (const char* inputFilename = nthFilename(filenum++)) {
     if (isCSource(inputFilename)) {
       const char* objFilename = objectFileForCFile(inputFilename);
-      mysystem(astr(clangInstall.c_str(),
-                    "/bin/clang -c -o ", objFilename,
+      mysystem(astr(clangCC.c_str(),
+                    " -c -o ", objFilename,
                     " ", inputFilename, cargs.c_str()),
                "Compile C File");
       dotOFiles.push_back(objFilename);
@@ -1516,32 +2690,71 @@ void makeBinaryLLVM(void) {
     }
   }
 
+  // Note: we used to start 'options' with 'cargs' so that
+  // we'd communicate -O3 -march=native e.g. to the "linker".
+  // That was only important when we were emitting a .bc file
+  // and currently we emit a .o.
+  // If we decide to put it back, we might also need to
+  // pass -Qunused-arguments or -Wno-error=unused-command-line-argument
+  // to avoid unused argument errors for optimization flags.
+
+  std::vector<std::string> sysroot_args;
+  std::string sysroot_arguments(CHPL_THIRD_PARTY);
+  sysroot_arguments += "/llvm/install/";
+  sysroot_arguments += CHPL_HOST_PLATFORM;
+  sysroot_arguments += "-";
+  sysroot_arguments += CHPL_HOST_COMPILER;
+  sysroot_arguments += "/configured-clang-sysroot-arguments";
+
+  readArgsFromFile(sysroot_arguments, sysroot_args);
+
+  // add arguments from configured-clang-sysroot-arguments
+  for (auto &s : sysroot_args) {
+    options += " ";
+    options += s;
+  }
+  // add arguments that we captured at compile time
+  options += " ";
+  options += get_clang_sysroot_args();
+
   if(debugCCode) {
     options += " -g";
   }
 
+  // We used to supply link args here *and* later on
+  // in the link line. I think the later position is sufficient.
+  /*
+  for( size_t i = 0; i < clangLDArgs.size(); ++i ) {
+    options += " ";
+    options += clangLDArgs[i].c_str();
+  }*/
+
+  // note: currently ldflags are not stored into clangLDArgs.
+  // If they were, these lines would need to be removed.
   options += " ";
   options += ldflags;
 
-  options += " -pthread";
+  // We may need to add the -pthread flag here for the link step
+  // if we start doing link-time optimization.  For now, leave it
+  // out because its unnecessary inclusion causes a warning message
+  // on Macs.
 
   // Now, if we're doing a multilocale build, we have to make a launcher.
   // For this reason, we create a makefile. codegen_makefile
   // also gives us the name of the temporary place to save
   // the generated program.
   fileinfo mainfile;
-  mainfile.filename = "chpl__module.bc";
+  mainfile.filename = "chpl__module.o";
   mainfile.pathname = moduleFilename.c_str();
   const char* tmpbinname = NULL;
 
   codegen_makefile(&mainfile, &tmpbinname, true);
   INT_ASSERT(tmpbinname);
 
-  // Run linker... we always use clang++ since some relevant libraries
-  //  (like tcmalloc, GASNet, etc) are actually written with C++
-  //  and need C++ support. With the C backend, this switcheroo is
-  //  accomplished in the Makefiles somewhere....
-  std::string command = clangInstall + "/bin/clang++ " + options + " " +
+  // Run the linker. We always use clang++ because some third-party
+  // libraries are written in C++. With the C backend, this switcheroo
+  // is accomplished in the Makefiles somewhere
+  std::string command = clangCXX + " " + options + " " +
                         moduleFilename + " " + maino +
                         " -o " + tmpbinname;
   for( size_t i = 0; i < dotOFiles.size(); i++ ) {
@@ -1549,10 +2762,9 @@ void makeBinaryLLVM(void) {
     command += dotOFiles[i];
   }
 
-  // 0 is llvm install dir, 1 is main.o
-  for(size_t i = 2; i < args.size(); ++i) {
+  for(size_t i = 0; i < clangLDArgs.size(); ++i) {
     command += " ";
-    command += args[i];
+    command += clangLDArgs[i];
   }
 
   // Put user-requested libraries at the end of the compile line,
@@ -1563,15 +2775,90 @@ void makeBinaryLLVM(void) {
     command += libFlag[i];
   }
 
+  if( printSystemCommands ) {
+    printf("%s\n", command.c_str());
+    fflush(stdout); fflush(stderr);
+  }
   mysystem(command.c_str(), "Make Binary - Linking");
 
-  // Now run the makefile to move from tmpbinname to the proper program
-  // name and to build a launcher (if necessary).
-  const char* makeflags = printSystemCommands ? "-f " : "-s -f ";
-  const char* makecmd = astr(astr(CHPL_MAKE, " "),
-                             makeflags,
-                             getIntermediateDirName(), "/Makefile");
-  mysystem(makecmd, "Make Binary - Building Launcher and Copying");
+  // If we're not using a launcher, copy the program here
+  if (0 == strcmp(CHPL_LAUNCHER, "none")) {
+
+    std::error_code err;
+
+    // rm -f hello
+    if( printSystemCommands )
+      printf("rm -f %s\n", executableFilename);
+
+    err = llvm::sys::fs::remove(executableFilename);
+    if (err) {
+      USR_FATAL("removing file %s failed: %s\n",
+                executableFilename,
+                err.message().c_str());
+    }
+
+    // mv tmp/hello.tmp hello
+    if( printSystemCommands )
+      printf("mv %s %s\n", tmpbinname, executableFilename);
+
+    err = llvm::sys::fs::rename(tmpbinname, executableFilename);
+    if (err) {
+      // But that might fail if /tmp is on a different filesystem.
+
+      std::string mv("mv ");
+      mv += tmpbinname;
+      mv += " ";
+      mv += executableFilename;
+
+      mysystem(mv.c_str(), mv.c_str());
+
+      /* For future LLVM,
+      err = llvm::sys::fs::copy_file(tmpbinname, executableFilename);
+      if (err) {
+        USR_FATAL("copying file %s to %s failed: %s\n",
+                  tmpbinname,
+                  executableFilename,
+                  err.message().c_str());
+      }
+
+      // and then set permissions, like mv
+      auto maybePerms = llvm::sys::fs::getPermissions(tmpbinname);
+      if (maybePerms.getError()) {
+        USR_FATAL("reading permissions on %s failed: %s\n",
+                  tmpbinname,
+                  err.message().c_str());
+      }
+      err = llvm::sys::fs::setPermissions(executableFilename, *maybePerms);
+      if (err) {
+        USR_FATAL("setting permissions on %s failed: %s\n",
+                  executableFilename,
+                  err.message().c_str());
+      }
+
+      // and then remove the file, so it's like mv
+      err = llvm::sys::fs::remove(tmpbinname);
+      if (err) {
+        USR_FATAL("removing file %s failed: %s\n",
+                  tmpbinname,
+                  err.message().c_str());
+      }*/
+    }
+
+  } else {
+    // Now run the makefile to move from tmpbinname to the proper program
+    // name and to build a launcher (if necessary).
+    const char* makeflags = printSystemCommands ? "-f " : "-s -f ";
+    const char* makecmd = astr(astr(CHPL_MAKE, " "),
+                               makeflags,
+                               getIntermediateDirName(), "/Makefile");
+
+    if( printSystemCommands ) {
+      printf("%s\n", makecmd);
+      fflush(stdout); fflush(stderr);
+    }
+
+    mysystem(makecmd, "Make Binary - Building Launcher and Copying");
+  }
 }
 
 #endif

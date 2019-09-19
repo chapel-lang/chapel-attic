@@ -12,6 +12,7 @@ statement:
   expression-statement
   assignment-statement
   swap-statement
+  io-statement
   conditional-statement
   select-statement
   while-do-statement
@@ -22,7 +23,7 @@ statement:
   continue-statement
   param-for-statement
   use-statement
-  type-select-statement
+  defer-statement
   empty-statement
   return-statement
   yield-statement
@@ -102,7 +103,7 @@ expression-statement:
   member-access-expression ;
   call-expression ;
   constructor-call-expression ;
-  let-expression ; 
+  let-expression ;
 \end{syntax}
 
 \section{Assignment Statements}
@@ -239,6 +240,49 @@ a = t;
 \end{chapel}
 \end{example}
 
+\section{The I/O Statement}
+\label{The_IO_Statement}
+\index{IO!statement}
+\index{statements!IO}
+\index{IO!operator}
+\index{operators!IO}
+
+The I/O operator indicates writing to the left-hand-side the value in the
+right-hand-side; or reading from the left-hand-side and storing the result
+in the variable on the right-hand-side. This operator can be chained with
+other I/O operator calls.
+
+The I/O operator can be overloaded for different types using operator
+overloading~(\rsec{Function_Overloading}).
+\begin{syntax}
+io-statement:
+  io-expression io-operator expression
+
+io-expression:
+  expression
+  io-expression io-operator expression
+
+io-operator:
+  <`(*$\sim$*)'>
+\end{syntax}
+
+See the module documentation on I/O for details on how to use the
+I/O statement.
+
+\begin{example}
+In the example below,
+\begin{chapel}
+var w = opentmp().writer(); // a channel
+var a: real;
+var b: int;
+
+w <(*$\sim$*)> a <(*$\sim$*)> b;
+\end{chapel}
+the I/O operator is left-associative and indicates writing \chpl{a}
+and then \chpl{b} to \chpl{w} in this case.
+\end{example}
+
+
 \section{The Conditional Statement}
 \label{The_Conditional_Statement}
 \index{statements!conditional}
@@ -313,12 +357,15 @@ A,other
 \end{chapeloutput}
 \end{chapelexample}
 
+\pagebreak
 \section{The Select Statement}
 \label{The_Select_Statement}
 \index{select@\chpl{select}}
 \index{when@\chpl{when}}
+\index{otherwise@\chpl{otherwise}}
 \index{statements!select@\chpl{select}}
 \index{statements!when@\chpl{when}}
+\index{statements!otherwise@\chpl{otherwise}}
 
 The select statement is a multi-way variant of the conditional
 statement.  The syntax is given by:
@@ -334,14 +381,16 @@ when-statement:
   `when' expression-list `do' statement
   `when' expression-list block-statement
   `otherwise' statement
+  `otherwise' `do' statement
 
 expression-list:
   expression
   expression , expression-list
 \end{syntax}
 The expression that follows the keyword \chpl{select}, the select
-expression, is compared with the list of expressions following the
-keyword \chpl{when}, the case expressions, using the equality
+expression, is evaluated once and its value is then compared
+with the list of case expressions following each
+\chpl{when} keyword. These values are compared using the equality
 operator \chpl{==}.  If the expressions cannot be compared with the
 equality operator, a compile-time error is generated.  The first case
 expression that contains an expression where that comparison
@@ -352,7 +401,7 @@ will be selected and control transferred to it.  There may be at most
 one \chpl{otherwise} statement and its location within the select
 statement does not matter.
 
-Each statement embedded in the {\em when-statement} has its own scope
+Each statement embedded in the {\em when-statement} or the {\em otherwise-statement} has its own scope
 whether or not an explicit block surrounds it.
 
 \section{The While Do and Do While Loops}
@@ -377,6 +426,7 @@ In both variants, the expression evaluates to a value of type \chpl{bool}
 which determines when the loop terminates and control continues with
 the statement following the loop.
 
+\pagebreak
 The while-do loop is executed as follows:
 \begin{enumerate}
 \item The expression is evaluated.
@@ -429,13 +479,14 @@ Scope of while loop:
 \end{chapelprintoutput}
 \end{chapelexample}
 
+\pagebreak
 Chapel do-while loops differ from those found in most other languages in
 one important regard.  If the body of a do-while statement is a block
 statement and new variables are defined within that block statement,
 then the scope of those variables extends to cover the loop's
 termination expression.
 \begin{chapelexample}{do-while.chpl}
-The following example demonstrates that the scope of the variable t 
+The following example demonstrates that the scope of the variable t
 includes the loop termination expression.
 \begin{chapel}
 var i = 0;
@@ -492,7 +543,7 @@ The \sntx{index-var-declaration} is optional and may be omitted if the
 indices do not need to be referenced in the loop.
 
 If the iteratable-expression begins with the keyword \chpl{zip} followed
-by a parenthesized expression-list, the listed expressions must support 
+by a parenthesized expression-list, the listed expressions must support
 zipper iteration.
 
 \subsection{Zipper Iteration}
@@ -534,18 +585,19 @@ Parameter for loops are unrolled by the compiler so that the index
 variable is a parameter rather than a variable.  The syntax for a
 parameter for loop statement is given by:
 \begin{syntax}
-param-iteratable-expression:
-  range-literal
-  range-literal `by' integer-literal
-
 param-for-statement:
   `for' `param' identifier `in' param-iteratable-expression `do' statement
   `for' `param' identifier `in' param-iteratable-expression block-statement
+
+param-iteratable-expression:
+  range-literal
+  range-literal `by' integer-literal
 \end{syntax}
 Parameter for loops are restricted to iteration over range literals
 with an optional by expression where the bounds and stride must be
 parameters.  The loop is then unrolled for each iteration.
 
+\pagebreak
 \section{The Break, Continue and Label Statements}
 \label{Label_Break_Continue}
 \index{statements!jumps}
@@ -584,7 +636,7 @@ label-statement:
   `label' identifier statement
 \end{syntax}
 
-Break-statements cannot be used to exit parallel loops.  
+Break-statements cannot be used to exit parallel loops.
 
 \begin{rationale}
 Breaks are not permitted in parallel loops because the execution order
@@ -619,51 +671,68 @@ label outer for i in 1..n {
 \index{use@\chpl{use}}
 \index{statements!use@\chpl{use}}
 \index{modules!using}
+\index{types!enumerated!using}
 
-The use statement makes the symbols defined by a module available
-within the scope containing the use statement without requiring them
-to be prefixed by the module's name.  The syntax of the use statement
-is given by:
+The use statement provides access to the constants in an enumerated type or
+the public symbols of a module within the scope in which it appears without
+the need to provide a full qualified path.
+
+The syntax of the use statement is given by:
 
 \begin{syntax}
 use-statement:
-  `use' module-name-list ;
+  `use' module-or-enum-name-list ;
 
-module-name-list:
-  module-name
-  module-name , module-name-list
+module-or-enum-name-list:
+  module-or-enum-name limitation-clause[OPT]
+  module-or-enum-name , module-or-enum-name-list
 
-module-name:
+module-or-enum-name:
   identifier
-  module-name . module-name
+  identifier . module-or-enum-name
+
+limitation-clause:
+  `except' exclude-list
+  `only' rename-list[OPT]
+
+exclude-list:
+  identifier-list
+  $ * $
+
+rename-list:
+  rename-base
+  rename-base , rename-list
+
+rename-base:
+  identifier `as' identifier
+  identifier
 \end{syntax}
-The use statement makes symbols in each listed module's scope available
-from the scope where the use statement occurs.
 
-Symbols made available by a use statement are at an outer scope from those
-defined directly in the scope where the use statement occurs, but at a
-nearer scope than symbols defined in the scope containing the scope where
-the use statement occurs.
+For example, the program
+\begin{chapelexample}{use1.chpl}
+\begin{chapel}
+module M1 {
+  proc foo() {
+    writeln("In M1's foo.");
+  }
+}
 
-If used modules themselves use other modules, symbols are scoped according
-the depth of use statements followed to find them. It is an error for two
-variables, types, or modules to be defined at the same depth.
+module M2 {
+  proc main() {
+    writeln("In M2's main.");
+    M1.foo();
+  }
+}
+\end{chapel}
+prints out
+\begin{chapelprintoutput}{}
+In M2's main.
+In M1's foo.
+\end{chapelprintoutput}
+\end{chapelexample}
 
-\begin{openissue}
-There is an expectation that this statement will be extended to allow
-the programmer to restrict which symbols are 'used' as well as to
-rename symbols that are 'used.'
-\end{openissue}
-
-\begin{chapelexample}{use.chpl}
-  The following example illustrates how the use statement makes
-  symbols declared in \chpl{M1}'s scope (like procedure
-  \chpl{foo()}) visible within the scope of \chpl{M2}'s \chpl{main}
-  function.  Without the \chpl{use} statement, the procedure call to
-  \chpl{foo} could not be resolved since \chpl{M2} would not have
-  access to symbols in \chpl{M1}.
-
-  When executed, the program
+This program is equivalent to:
+\begin{chapelexample}{use2.chpl}
 \begin{chapel}
 module M1 {
   proc foo() {
@@ -680,109 +749,209 @@ module M2 {
   }
 }
 \end{chapel}
-prints out
+
+which also prints out
 \begin{chapelprintoutput}{}
 In M2's main.
 In M1's foo.
 \end{chapelprintoutput}
 \end{chapelexample}
 
-\section{The Type Select Statement}
-\label{The_Type_Select_Statement}
-\index{statements!type select}
-\index{type select statements}
+The names that are imported by a use statement are inserted in to a
+new scope that immediately encloses the scope within which the
+statement appears.  This implies that the position of the use
+statement within a scope has no effect on its behavior.  If a scope
+includes multiple use statements then the imported names are inserted
+in to a common enclosing scope.
 
-A type select statement has two uses.  It can be used to determine the
-type of a union, as discussed
-in~\rsec{The_Type_Select_Statement_and_Unions}.  In its more general
-form, it can be used to determine the types of one or more values
-using the same mechanisms used to disambiguate function definitions.
-It syntax is given by:
+An error is signaled if multiple enumeration constants or public module-level
+symbols would be inserted into this enclosing scope with the same name, and
+that name is referenced by other statements in the same scope as the use.
+
+
+Use statements are transitive by default: if a module A uses a module
+B, and module B contains a use of a module or enumerated type C, then
+C's public symbols may also be visible within A.  The exception to
+this occurs when B has public symbols that shadow symbols with the
+same name in C.
+
+This notion of transitivity extends to the case in which a scope
+imports symbols from multiple modules or constants from multiple
+enumeration types.  For example if a module A uses modules B1, B2, B3
+and modules B1, B2, B3 use modules C1, C2, C3 respectively, then all
+of the public symbols in B1, B2, B3 have the potential to shadow the
+public symbols of C1, C2, and C3.  However an error is signaled if
+C1, C2, C3 have public module level definitions of the same symbol.
+
+% We would like to provide a way to specify that a use should not be
+% transitive
+
+An optional \sntx{limitation-clause} may be provided to limit the symbols made
+available by the use statement.  If an \chpl{except} list is provided, then all
+the visible but unlisted symbols in the module or enumerated type will be made
+available without prefix.  If an \chpl{only} list is provided, then just the
+listed visible symbols in the module or enumerated type will be made available
+without prefix.  All visible symbols not provided via these limited use
+statements are still accessible with the module or enumerated type name prefix.
+It is an error to provide a name in a \sntx{limitation-clause} that does not
+exist or is not visible in the respective module or enumerated type.  If an
+\chpl{only} list is left empty or \chpl{except} is followed by $*$ then no
+symbols are made available to the scope without prefix.
+
+Within an \chpl{only} list, a visible symbol from that module may optionally be
+given a new name using the \chpl{as} keyword.  This new name will be usable from
+the scope of the use in place of the old name unless the old name is
+additionally specified in the \chpl{only} list.  If a use which renames a symbol
+is present at module scope, uses of that module will also be able to reference
+that symbol using the new name instead of the old name.  Renaming does not
+affect accesses to that symbol via the source module's or enumerated type's
+prefix, nor does it affect uses of that module or enumerated type from other
+contexts.  It is an error to attempt to rename a symbol that does not exist or
+is not visible in the respective module or enumerated type, or to rename a
+symbol to a name that is already present in the same \chpl{only} list.  It is,
+however, perfectly acceptable to rename a symbol to a name present in the
+respective module or enumerated type which was not specified via
+that \chpl{only} list.
+
+If a use statement mentions multiple modules or enumerated types or a mix of
+these symbols, only the last module or enumerated type can have a
+\sntx{limitation-clause}.  Limitation clauses are applied transitively as well
+- in the first example, if module A's use of module B contains an \chpl{except}
+or \chpl{only} list, that list will also limit which of C's symbols are visible
+to A.
+
+For more information on enumerated types, please see~\rsec{Enumerated_Types}.
+For use statement rules which are only applicable to modules, please
+see~\rsec{Using_Modules}.  For more information on modules in general, please
+see~\rsec{Modules}.
+
+
+\section{The Defer Statement}
+\label{The_Defer_Statement}
+\index{statements!defer}
+
+A \chpl{defer} statement declares a clean-up action to be run when
+exiting a block.
+\chpl{defer} is useful because the clean-up action will be run no
+matter how the block is exited.
+
+The syntax is:
+
 \begin{syntax}
-type-select-statement:
-  `type' `select' expression-list { type-when-statements }
-
-type-when-statements:
-  type-when-statement
-  type-when-statement type-when-statements
-
-type-when-statement:
-  `when' type-list `do' statement
-  `when' type-list block-statement
-  `otherwise' statement
-
-expression-list:
-  expression
-  expression , expression-list
-
-type-list:
-  type-specifier
-  type-specifier , type-list
+defer-statement:
+  `defer' statement
 \end{syntax}
 
-Let the expressions following the keyword \chpl{select} be called the 
-\emph{select expressions}.  The number of select expressions must be equal to the
-number of types following each of the \chpl{when} keywords.  Like the
-select statement, one of the statements associated with a \chpl{when}
-will be executed.  In this case, that statement is chosen by the
-function resolution mechanism.  The select expressions are the actual
-arguments, the types following the \chpl{when} keywords are the types
-of the formal arguments for different anonymous functions.  The
-function that would be selected by function resolution determines the
-statement that is executed.  If none of the functions are chosen, the
-the statement associated with the keyword \chpl{otherwise}, if it
-exists, will be selected.
+At a given place where control flow exits a block, the in-scope
+\chpl{defer} statements and the local variables will be handled in
+reverse declaration order. Handling a \chpl{defer} statement consists of
+executing the contained clean-up action. Handling a local variable
+consists of running its deinitializer if it is of record type.
 
-As with function resolution, this can result in an ambiguous
-situation.  Unlike with function resolution, in the event of an
-ambiguity, the first statement in the list of when statements is
-chosen.
+When an iterator contains a \chpl{defer} statement at the top level, the
+associated clean-up action will be executed when the loop running the
+iterator exits. \chpl{defer} actions inside a loop body are executed
+when that iteration completes.
 
-\begin{chapelexample}{typeselect.chpl}
-The following example shows how the type select statement can be used to perform
-a different action based on the static type of the operand.
+The following program demonstrates a simple use of \chpl{defer}
+to create an action to be executed when returning from a function:
 
-The program
+\begin{chapelexample}{defer1.chpl}
 \begin{chapel}
-var x = 32, y = 15.5; 
-var z: int(8);
-var coord = (0.0,0.0);
-var yes: bool;
-
-writetype(x);
-writetype(y);
-writetype(z);
-writetype(coord);
-writetype(yes);
-writetype("no");
-writetype(here);
-
-proc writetype(x) {
-  type select x {
-    when int do writeln("Integer type");
-    when uint do writeln("Unsigned integer type");
-    when real do writeln("Real type");
-    when complex do writeln("Complex type");
-    when string do writeln("String type");
-    when bool do writeln("Boolean type");
-    when imag do writeln("Imag type");
-    when locale do writeln("Locale type");
-    when void do writeln("Void type");
-    otherwise writeln("Non-primitive type");
-  }
+class Integer {
+  var x:int;
 }
+proc deferInFunction() {
+  var c = new Integer(1);
+  writeln("created ", c);
+  defer {
+    writeln("defer action: deleting ", c);
+    delete c;
+  }
+  // ... (function body, possibly including return statements)
+  // The defer action is executed no matter how this function returns.
+}
+deferInFunction();
 \end{chapel}
 produces the output
 \begin{chapelprintoutput}{}
-Integer type
-Real type
-Integer type
-Non-primitive type
-Boolean type
-String type
-Locale type
+created {x = 1}
+defer action: deleting {x = 1}
 \end{chapelprintoutput}
 \end{chapelexample}
+
+
+The following example uses a nested block to demonstrate that \chpl{defer}
+is handled when exiting the block in which it is contained:
+
+
+\begin{chapelexample}{defer2.chpl}
+\begin{chapel}
+class Integer {
+  var x:int;
+}
+proc deferInNestedBlock() {
+  var i = 1;
+  writeln("before inner block");
+  {
+    var c = new Integer(i);
+    writeln("created ", c);
+    defer {
+      writeln("defer action: deleting ", c);
+      delete c;
+    }
+    writeln("in inner block");
+    // note, defer action is executed no matter how this block is exited
+  }
+  writeln("after inner block");
+}
+deferInNestedBlock();
+\end{chapel}
+produces the output
+\begin{chapelprintoutput}{}
+before inner block
+created {x = 1}
+in inner block
+defer action: deleting {x = 1}
+after inner block
+\end{chapelprintoutput}
+\end{chapelexample}
+
+Lastly, this example shows that when \chpl{defer} is used in a loop, the
+action will be executed for every loop iteration, whether or not loop
+body is exited early.
+
+\begin{chapelexample}{defer3.chpl}
+\begin{chapel}
+class Integer {
+  var x:int;
+}
+proc deferInLoop() {
+  for i in 1..10 {
+    var c = new Integer(i);
+    writeln("created ", c);
+    defer {
+      writeln("defer action: deleting ", c);
+      delete c;
+    }
+    writeln(c);
+    if i == 2 then
+      break;
+  }
+}
+deferInLoop();
+\end{chapel}
+produces the output
+\begin{chapelprintoutput}{}
+created {x = 1}
+{x = 1}
+defer action: deleting {x = 1}
+created {x = 2}
+{x = 2}
+defer action: deleting {x = 2}
+\end{chapelprintoutput}
+\end{chapelexample}
+
 
 \section{The Empty Statement}
 \label{The_Empty_Statement}

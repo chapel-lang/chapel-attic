@@ -5,8 +5,7 @@
 // and probably BlockCyclic arrays/domains.
 //
 use BlockDist, PrivateDist;
-
-extern proc system(s: c_string): int;
+use Time;
 
 record taskPrivateData {
   var tid$: sync chpl_taskID_t = chpl_nullTaskID;
@@ -14,8 +13,8 @@ record taskPrivateData {
   var y: [0..#numLocales] real;
 
   // need our version of writeThis so we can print the sync field
-  proc writeThis(x: Writer) {
-    x.write("(", tid$.readXX(), ": ", x, "  ", y, ")");
+  proc writeThis(f) {
+    f.write("(", tid$.readXX(), ": ", x, "  ", y, ")");
   }
 };
 
@@ -60,8 +59,8 @@ forall d in D {
 
   lp.temps[slot].x += slot+1;
 
-  // make a system call to skew timing a bit
-  if d%7==0 then system("sleep 1");
+  // skew timing a bit
+  if d%7==0 then sleep(1);
 
   lp.temps[slot].y[here.id] += 1;
 
@@ -88,3 +87,5 @@ for l in 0..#numLocales {
   if y != nPerLocale then
     halt("localePrivate[",l,"].temps[].y value is incorrect! (y=",y,")");
 }
+
+forall l in localePrivate do delete l;

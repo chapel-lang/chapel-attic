@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2014 Cray Inc.
+ * Copyright 2004-2018 Cray Inc.
  * Other additional copyright holders may be indicated within.
  * 
  * The entirety of this work is licensed under the Apache License,
@@ -23,9 +23,11 @@
 //
 #include "chplrt.h"
 #include "chpl-comm.h"
+#include "chpl-env.h"
 #include "chpl-mem.h"
 #include "chpl-mem-consistency.h"
 
+#include <pthread.h>
 #include <stdint.h>
 #include <string.h>
 #include <unistd.h>
@@ -50,66 +52,54 @@ void chpl_getCommDiagnosticsHere(chpl_commDiagnostics *cd);
 
 void chpl_gen_startCommDiagnostics(void) {
   // Make sure that there are no pending communication operations.
-  chpl_rmem_consist_release(__LINE__, __FILE__);
+  chpl_rmem_consist_release(0, 0);
   // And then start the comm diagnostics as usual.
   chpl_startCommDiagnostics();
 }
 
 void chpl_gen_stopCommDiagnostics(void) {
   // Make sure that there are no pending communication operations.
-  chpl_rmem_consist_release(__LINE__, __FILE__);
+  chpl_rmem_consist_release(0, 0);
   // And then stop the comm diagnostics as usual.
   chpl_stopCommDiagnostics();
 }
 
 void chpl_gen_startCommDiagnosticsHere(void) {
   // Make sure that there are no pending communication operations.
-  chpl_rmem_consist_release(__LINE__, __FILE__);
+  chpl_rmem_consist_release(0, 0);
   // And then start the comm diagnostics as usual.
   chpl_startCommDiagnosticsHere();
 }
 
 void chpl_gen_stopCommDiagnosticsHere(void) {
   // Make sure that there are no pending communication operations.
-  chpl_rmem_consist_release(__LINE__, __FILE__);
+  chpl_rmem_consist_release(0, 0);
   // And then stop the comm diagnostics as usual.
   chpl_stopCommDiagnosticsHere();
 }
 
 
+static int maxHeapSize_set;
+static pthread_once_t maxHeapSize_once = PTHREAD_ONCE_INIT;
+static size_t maxHeapSize;
+
+static
+void set_maxHeapSize(void)
+{
+  maxHeapSize = chpl_env_rt_get_size("MAX_HEAP_SIZE", 0);
+}
+
 size_t chpl_comm_getenvMaxHeapSize(void)
 {
-  char*  p;
-  static int    env_checked = 0;
-  static size_t size = 0;
-
-  if (env_checked)
-    return size;
-
-  if ((p = getenv("CHPL_RT_MAX_HEAP_SIZE")) != NULL) {
-    //
-    // The user specified a maximum size, so start with that.
-    //
-    int  num_scanned;
-    char units;
-
-    if ((num_scanned = sscanf(p, "%zi%c", &size, &units)) != 1) {
-      if (num_scanned == 2 && strchr("kKmMgG", units) != NULL) {
-        switch (units) {
-        case 'k' : case 'K': size <<= 10; break;
-        case 'm' : case 'M': size <<= 20; break;
-        case 'g' : case 'G': size <<= 30; break;
-        }
-      }
-      else {
-        chpl_warning("Cannot parse CHPL_RT_MAX_HEAP_SIZE environment "
-                     "variable; assuming 1g", 0, NULL);
-        size = ((size_t) 1) << 30;
-      }
-    }
+  if (!maxHeapSize_set
+      && pthread_once(&maxHeapSize_once, set_maxHeapSize) != 0) {
+    chpl_internal_error("pthread_once(&maxHeapSize_once) failed");
   }
 
-  env_checked = 1;
+  return maxHeapSize;
+}
 
-  return size;
+
+void* chpl_get_global_serialize_table(int64_t idx) {
+  return chpl_global_serialize_table[idx];
 }

@@ -1,24 +1,35 @@
 #!/usr/bin/env perl
 
+use Cwd 'abs_path';
+
 #
 # Set standard CHPL_* environment variables, if they are not already set.
 #
-my $env = `$ENV{CHPL_HOME}/util/printchplenv --sh`;
+my $env = `$ENV{CHPL_HOME}/util/printchplenv --all --internal --simple --no-tidy`;
 my @lines = split(/\n/, $env);
 for my $line (@lines) {
   $line =~ s/export\s+//;
   my ($key,$value) = split(/=/, $line, 2);
   next if $key eq "CHPL_HOME";
-  # Now remove the single quotes in the value.
-  if( $value =~ /^'.+'$/ ) {
-    $value =~ s/^'//;
-    $value =~ s/'$//;
-  }
   $ENV{$key} = $value;
 }
 
 $envfile = $ARGV[0];
 
+#
+# If the envfile is executable, just execute it
+#
+if (-x "$envfile") {
+  $envfile = abs_path($envfile);
+  $execskiptest = `$envfile`;
+  print "$execskiptest";
+# exit with the return code that the envfile gave us
+  exit($?>>8);
+}
+
+#
+# otherwise, process using special skipif language
+#
 open ENVFILE, "$envfile" or die "can't open $envfile $!";
 my @envlist = <ENVFILE>;
 close (ENVFILE);

@@ -1,4 +1,4 @@
-# Copyright 2004-2014 Cray Inc.
+# Copyright 2004-2018 Cray Inc.
 # Other additional copyright holders may be indicated within.
 # 
 # The entirety of this work is licensed under the Apache License,
@@ -16,40 +16,58 @@
 # limitations under the License.
 
 ifneq ($(MAKE_LAUNCHER), 1)
-include $(GASNET_INC_MAKEFILE)
+# Gasnet setup makefile defines CHPL_GASNET_CFLAGS
+include $(GASNET_SETUP_MAKEFILE)
 
 #
-# Because we build GASNet using PrgEnv/gnu for the cray-prgenv-cray
-# compiler, we need to drop the flags it used to avoid conflicts.
-# Otherwise, we'd like to inherit the GASNet flags
-#
-ifneq ($(CHPL_MAKE_TARGET_COMPILER),cray-prgenv-cray)
-CHPL_GASNET_CFLAGS = $(GASNET_CPPFLAGS) $(GASNET_MISC_CFLAGS) $(MANUAL_CFLAGS)
-OPT_CFLAGS += $(GASNET_OPT_CFLAGS)
-# squash inlining warnings for compilers that provide a flag to do so 
-ifneq (, $(filter $(CHPL_MAKE_TARGET_COMPILER),cray-prgenv-gnu gnu \
-                    cray-prgenv-intel intel clang))
-OPT_CFLAGS += -Wno-inline
-endif
-CHPL_GASNET_LFLAGS = $(GASNET_LFLAGS)
-else
-CHPL_GASNET_CFLAGS =
-CHPL_GASNET_LFLAGS =
-endif
-
-#
-# On the XT/XE, we often build GASNet using a different compiler than the
+# On the XE/XC, we often build GASNet using a different compiler than the
 # one the end user will use, so we override GASNet's CC and LD (which
 # contain a full path) to simply be the default cc as specified by the
 # current PrgEnv.
 #
-ifneq (, $(filter $(CHPL_MAKE_TARGET_PLATFORM),cray-xt cray-xe cray-xc cray-xk))
-CC = cc $(CHPL_GASNET_CFLAGS)
-LD = cc $(CHPL_GASNET_LFLAGS)
+ifneq (, $(filter $(CHPL_MAKE_TARGET_PLATFORM),cray-xe cray-xc cray-xk))
+# On Crays, don't set CC -- it'll be set in our Makefiles and GASNet tends
+# to hard-code them to a point that our modules aren't portable across
+# systems or PE versions.  Set LD to the C++ compiler, as we would in
+# Makefile.comm-none.
+#
+LD = $(CXX)
 else
-CC = $(GASNET_CC) $(CHPL_GASNET_CFLAGS)
-LD = $(GASNET_LD) $(CHPL_GASNET_LFLAGS)
+ifneq ($(CHPL_MAKE_HOST_PLATFORM),$(CHPL_MAKE_TARGET_PLATFORM))
+#
+# Just don't set CC -- it'll be set by our compiler/Makefile....
+# set LD to CXX as we do in Makefile.comm-none
+#
+LD = $(CXX)
+else
+#
+# Use GASNet's choice of C compiler
+#
+CC = $(GASNET_CC)
+#
+# For the linker, we tend to want a C++ linker, in order to support
+# linking in components developed in C++ like re2 or user C++ code.
+# However, GASNet doesn't provide any guarantees that their linker
+# will be a C++ compiler.  Based on conversation with the GASNet
+# team, we should expect it either to be GASNET_CC, GASNET_CXX, or
+# MPI_CC.  The following conditional handles these cases, switching
+# to the C++ choice in the first and third cases.
+#
+ifeq ($(GASNET_LD),$(GASNET_CXX))
+LD = $(GASNET_LD)   # GASNet chose C++ linker so stick with it
+else ifeq ($(GASNET_LD),$(GASNET_CC))
+LD = $(GASNET_CXX)  # GASNet chose C, so switch to C++
+else ifeq ($(GASNET_LD_REQUIRES_MPI),1)
+LD = mpicxx         # GASNet chose mpicc, so we'll choose mpicxx
+else
+LD = $(CXX)
+$(warning GASNET_LD unexpectedly set to '$(GASNET_LD)'.  Please file a Chapel bug against this.)
 endif
+endif
+endif
+
+CHPL_MAKE_BASE_CFLAGS += $(CHPL_GASNET_CFLAGS)
+CHPL_MAKE_THIRD_PARTY_LINK_ARGS += $(CHPL_GASNET_LDFLAGS)
 
 LIBS += $(GASNET_LIBS)
 endif

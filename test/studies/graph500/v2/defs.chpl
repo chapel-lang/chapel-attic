@@ -117,7 +117,10 @@ module Graph500_defs
 //      proc   n_Neighbors (v : vertex_id )
 //      {return Vertices(v).neighbor_count;}
 
-      proc Graph (my_vertices, Histogram){
+      proc init (my_vertices, Histogram){
+        this.my_vertices = my_vertices;
+        this.Histogram = Histogram;
+        this.initDone();
          forall i in my_vertices {
             Vertices[i].nd = {1..Histogram[i]};
          }

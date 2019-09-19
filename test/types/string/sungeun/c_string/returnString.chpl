@@ -2,16 +2,18 @@ use checkType;
 
 proc rcs() {
   var s:c_string = "hi";
-  s += s;
-  return s;
+  var ss = s:string + s:string;
+  var cs = ss.c_str();
+  return cs;
 }
 
 checkType(c_string, rcs().type);
 
 proc rcss():string {
   var s:c_string = "hi";
-  s += s;
-  return s;
+  var ss = s:string + s:string;
+  var cs = ss.c_str();
+  return cs;
 }
 
 checkType(rcss().type);
@@ -28,7 +30,7 @@ proc rs(t: bool) {
   if t then
     return "blah";
   else
-    return toString("blah");
+    return "blah":string;
 }
 
 checkType(rs(true).type);

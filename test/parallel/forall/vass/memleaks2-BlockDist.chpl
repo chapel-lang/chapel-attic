@@ -11,10 +11,10 @@ proc main() {
   var myvar = initval;
   const m1 = memoryUsed();
 
-  // leaks vary without this 'serial'
-  serial do
+  {
     forall da in DARRAY do
       da = myvar;
+  }
 
   const m2 = memoryUsed();
 

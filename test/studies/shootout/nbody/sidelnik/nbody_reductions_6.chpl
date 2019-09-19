@@ -1,13 +1,13 @@
 /* nbody_rangesub + explicit reductions
  *
- * The Great Computer Language Shootout
- * http://shootout.alioth.debian.org/
+ * The Computer Language Benchmarks Game
+ * http://benchmarksgame.alioth.debian.org
  *
  * contributed by Albert Sidelnik
  *
 */
 
-config var n = 10000;
+config var n = 1000;
 param PI = 3.141592653589793;
 const solar_mass = (4 * PI * PI);
 param days_per_year = 365.24;
@@ -96,11 +96,11 @@ proc main() {
   bodies(4) = new Planet(p4,v4, 5.15138902046611451e-05 * solar_mass);
   
   offset_momentum(bodies);
-  writeln(format("#.#########", energy(bodies)));
+  writef("%{#.#########}\n", energy(bodies));
   for 1..n {
     advance(bodies, 0.01);
   }
-  writeln(format("#.#########", energy(bodies)));
+  writef("%{#.#########}\n", energy(bodies));
   
   for body in bodies do delete body;
 }

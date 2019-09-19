@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2014 Cray Inc.
+ * Copyright 2004-2018 Cray Inc.
  * Other additional copyright holders may be indicated within.
  * 
  * The entirety of this work is licensed under the Apache License,
@@ -20,22 +20,28 @@
 #ifndef _SYS_H_
 #define _SYS_H_
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
 #include "sys_basic.h"
 #include "qio_error.h"
 
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#ifndef __CYGWIN__
 #include <netinet/tcp.h>
+#endif
 #include <netdb.h>
 #include <unistd.h>
 #include <stdio.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+// This function just returns errno (needed for LLVM compiles)
+static inline int chpl_macro_int_errno(void) { return errno; }
 
 #ifndef LUSTRE_SUPER_MAGIC
 // Magic value to be found in the statfs man page
@@ -85,7 +91,7 @@ typedef struct addrinfo* sys_addrinfo_ptr_t;
 //  struct addrinfo addr_info;
 //} sys_addrinfo_t;
 
-/* Wrap system calls to return error seperately,
+/* Wrap system calls to return error separately,
  * to run them in a pthread, and to use a fixed-length sys_sockaddr
  * to simplify programming.
  *

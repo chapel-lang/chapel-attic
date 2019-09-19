@@ -1,7 +1,7 @@
 use DimensionalDist2D;
 use ReplicatedDim;
 use BlockCycDim;
-use Memory, Time, Random, UtilMath;
+use Memory, Time, Random;
 
 
 /////////// configuration ///////////
@@ -88,7 +88,7 @@ var replA: [replAD] elemType,
 /////////// for the reference implementation ///////////
 
 config const useRandomSeed = true,
-             seed = if useRandomSeed then SeedGenerator.currentTime else 31415;
+             seed = if useRandomSeed then SeedGenerator.oddCurrentTime else 31415;
 config const verify = false;
 // can be too much memory
 //var Abref: [MatVectSpace] elemType;
@@ -124,13 +124,13 @@ proc schurComplement(blk) {
   //showCurrTime("AbSlices");
 
   forall (ab, ra) in zip(AbSlice1, replA) do
-    local
+    local do
       ra = ab;
 
   replicateA(blk);
 
   forall (ab, rb) in zip(AbSlice2, replB) do
-    local
+    local do
       rb = ab;
 
   replicateB(blk);

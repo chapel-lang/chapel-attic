@@ -84,22 +84,29 @@ class LocTree {
     proc this(node: Node) ref {
         oneAtATime$;
         if !nodes.member(node) {
-            if setter {
-              nodes += node;
-            } else {
-              // This is a getter so it shouldn't be modifying what
-              // we return, should be safe to return the zero vector.
-              // FIXME: Zeroes should really be a const, but can't
-              //        return const from a var fcn.
-              oneAtATime$ = true;
-              return zeroes;
-            }
+            nodes += node;
         }
        
-        var c => coeffs[node]; 
+        ref c = coeffs[node];
         oneAtATime$ = true;
         return c;
     }
+    proc this(node: Node) const ref {
+        oneAtATime$;
+        if !nodes.member(node) {
+          // This is a getter so it shouldn't be modifying what
+          // we return, should be safe to return the zero vector.
+          // FIXME: Zeroes should really be a const, but can't
+          //        return const from a var fcn.
+          oneAtATime$ = true;
+          return zeroes;
+        }
+       
+        ref c = coeffs[node];
+        oneAtATime$ = true;
+        return c;
+    }
+ 
   
     /** Access an element in the associative domain.  If it doesn't exist,
         return None.
@@ -171,18 +178,19 @@ class FTree {
     const coeffDom: domain(1);
     const tree    : [LocaleSpace] LocTree;
 
-    proc FTree(order: int) {
+    proc init(order: int) {
         if order == 0 then
             halt("FTree must be initialized with an order > 0");
 
         this.order = order;
         this.coeffDom = {0..order-1};
+        this.initDone();
 
         coforall loc in Locales do
             on loc do tree[loc.id] = new LocTree(coeffDom);
     }
 
-    proc ~FTree() {
+    proc deinit() {
         coforall loc in Locales do
             on loc do delete tree[loc.id];
     }

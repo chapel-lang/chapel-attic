@@ -60,7 +60,7 @@ class Function {
     var   r0    : [dcDom] real;
     var   rp    : [dcDom] real;
 
-    proc ~Function() {
+    proc deinit() {
         delete sumC;
         delete diffC;
     }
@@ -172,8 +172,8 @@ class Function {
     proc refine(curNode: 2*int) {
         // project f(x) at next level
         var sc : [0..2*k-1] real;
-        var s0 : [0..k-1] => sc[0..k-1];
-        var s1 : [0..k-1] => sc[k..2*k-1];
+        ref s0 = sc[0..k-1];
+        ref s1 = sc[k..2*k-1];
 
         const child = sumC.get_children(curNode);
         s0 = project(child(1));
@@ -547,7 +547,8 @@ class Function {
     inline proc truncate(x) {
       const eps = 1e-8;
       if abs(x) < eps then return 0.0;
-      else return x;
+      if abs(x) > 1.0/eps then return trunc(x/10) * 10;
+      return x;
     }
     
     /** Mostly for debugging, print summary of coefficients,
@@ -564,8 +565,8 @@ class Function {
                 ncoeffs += 1;
             }
             if ncoeffs != 0 then
-                writeln("   level ", format("##", n), "   #boxes=",
-                        format("####", ncoeffs), "  norm=", format("%0.2e", truncate(sqrt(sum))));
+	        writef("   level %{##}   #boxes=%{####}  norm=%0.2er\n",
+		       n, ncoeffs, truncate(sqrt(sum)));
         }
 
         writeln("difference coefficients:");
@@ -576,8 +577,8 @@ class Function {
                 ncoeffs += 1;
             }
             if ncoeffs != 0 then
-                writeln("   level ", format("##", n), "   #boxes=",
-                        format("####", ncoeffs), "  norm=", format("%0.2e", truncate(sqrt(sum))));
+	        writef("   level %{##}   #boxes=%{####}  norm=%0.2er\n",
+		       n, ncoeffs, truncate(sqrt(sum)));
         }
 
         writeln("-----------------------------------------------------\n");
@@ -590,12 +591,9 @@ class Function {
     proc evalNPT(npt) {
         for i in 0..npt {
             var (fval, Fval) = (f(i/npt:real), this(i/npt:real));
-            //writeln(" -- ", format("%0.2f", i/npt:real), ":  F_numeric()=", format("% 0.5e", Fval),
-            //        "  f_analytic()=", format("% 0.5e", fval), " err=", format("% 0.5e", Fval-fval),
-            //        if abs(Fval-fval) > thresh then "  > thresh" else "");
-            writeln(" -- ", format("%0.2f", i/npt:real), ":  F_numeric()=", format("% 0.8f", truncate(Fval)),
-                    "  f_analytic()=", format("% 0.8f", truncate(fval)),
-                    if abs(Fval-fval) > thresh then " err > thresh" else "");
+            writef(" -- %.2dr:  F_numeric()=% .8dr  f_analytic()=% .8dr%s\n",
+		   i/npt:real, truncate(Fval), truncate(fval), 
+		   if abs(Fval-fval) > thresh then " err > thresh" else "");
         }
     }
 }

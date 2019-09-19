@@ -11,10 +11,10 @@ config const epsilon = 0.0000001,
 //
 const pi = 3.14159265358979323846;
 
-writeln("Epsilon             = ", format("#.#################", epsilon));
+writef("Epsilon             = %{#.#################}\n", epsilon);
 writeln("Random number seed  = ", seed);
 
-var rs = new RandomStream(seed, parSafe=false);
+var rs = new NPBRandomStream(real, seed, parSafe=false);
 
 //
 // keep track of the number of points we generate before converging
@@ -25,7 +25,7 @@ do {
   count += (rs.getNext()**2 + rs.getNext()**2) <= 1.0;
 } while abs((count * 4.0 / n) - pi) > epsilon;
 
-writeln("Approximation of pi = ", format("#.###############", count * 4.0 / n));
+writef("Approximation of pi = %{#.###############}\n", count * 4.0 / n);
 writeln("Number of points    = ", count);
 
 delete rs;

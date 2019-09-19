@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2014 Cray Inc.
+ * Copyright 2004-2018 Cray Inc.
  * Other additional copyright holders may be indicated within.
  *
  * The entirety of this work is licensed under the Apache License,
@@ -43,6 +43,8 @@ public:
   //
   static  void     view(const char* passName, int passNum);
 
+                   AstDump(FILE* fp);
+                  ~AstDump();
 
   //
   // These functions are the "implementation" interface for the
@@ -66,8 +68,12 @@ public:
 
   virtual void     visitUsymExpr    (UnresolvedSymExpr* node);
 
+  virtual void     visitUseStmt     (UseStmt*           node);
+
   virtual bool     enterBlockStmt   (BlockStmt*         node);
   virtual void     exitBlockStmt    (BlockStmt*         node);
+
+  virtual void     visitForallIntents(ForallIntents*  clause);
 
   virtual bool     enterWhileDoStmt (WhileDoStmt*       node);
   virtual void     exitWhileDoStmt  (WhileDoStmt*       node);
@@ -90,9 +96,20 @@ public:
 
   virtual bool     enterGotoStmt    (GotoStmt*          node);
 
+  virtual bool     enterForwardingStmt (ForwardingStmt*     node);
+  virtual void     exitForwardingStmt  (ForwardingStmt*     node);
+
+  virtual bool     enterDeferStmt   (DeferStmt*         node);
+  virtual void     exitDeferStmt    (DeferStmt*         node);
+
+  virtual bool     enterTryStmt     (TryStmt*           node);
+  virtual void     exitTryStmt      (TryStmt*           node);
+
+  virtual bool     enterCatchStmt   (CatchStmt*         node);
+  virtual void     exitCatchStmt    (CatchStmt*         node);
+
 private:
                    AstDump();
-                  ~AstDump();
 
   bool             open(const ModuleSymbol* module, const char* passName, int passNum);
   bool             close();
@@ -116,6 +133,7 @@ private:
   FILE*            mFP;             // The FILE* to the log file if the file is open
   int              mIndent;         // The indentation level.  Increments for each BlockStmt
   bool             mNeedSpace;      // Control inter-token spaces
+  bool             mDontCloseFP;    // true if mFP is owned by the user
 };
 
 #endif

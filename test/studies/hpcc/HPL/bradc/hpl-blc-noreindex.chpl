@@ -41,7 +41,7 @@ config const epsilon = 2.0e-15;
 // specify the fixed seed explicitly
 //
 config const useRandomSeed = true,
-             seed = if useRandomSeed then SeedGenerator.currentTime else 31415;
+             seed = if useRandomSeed then SeedGenerator.oddCurrentTime else 31415;
 
 //
 // Configuration constants to control what's printed -- benchmark
@@ -224,8 +224,8 @@ proc schurComplement(Ab: [?AbD] elemType, AD: domain, BD: domain, Rest: domain) 
 // calculate C = C - A * B.
 //
 proc dgemmNativeInds(A: [] elemType,
-                    B: [] elemType,
-                    C: [] elemType) {
+                     B: [] elemType,
+                     C: [] elemType) {
   for (iA, iC) in zip(A.domain.dim(1), C.domain.dim(1)) do
     for (jA, iB) in zip(A.domain.dim(2), B.domain.dim(1)) do
       for (jB, jC) in zip(B.domain.dim(2), C.domain.dim(2)) do
@@ -331,7 +331,7 @@ proc backwardSub(n: indexType,
 
   // TODO: Really want a partial reduction here
   for i in bd by -1 do
-    x[i] = (Ab[n+1,i] - (+ reduce [j in i+1..bd.high] (Ab[i,j] * x[j]))) 
+    x[i] = (Ab[i,n+1] - (+ reduce [j in i+1..bd.high] (Ab[i,j] * x[j]))) 
             / Ab[i,i];
 
   return x;
@@ -405,7 +405,7 @@ proc gaxpyMinus(A: [],
 
   // TODO: really want a partial reduction here
   forall i in 1..n do
-    res[i] = (+ reduce [j in xD] (A[i,j] * x[j])) - y[n+1, i];
+    res[i] = (+ reduce [j in xD] (A[i,j] * x[j])) - y[i,n+1];
 
   return res;
 }

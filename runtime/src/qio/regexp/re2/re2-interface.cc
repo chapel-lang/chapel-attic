@@ -1,3 +1,21 @@
+/*
+ * Copyright 2004-2018 Cray Inc.
+ * Other additional copyright holders may be indicated within.
+ *
+ * The entirety of this work is licensed under the Apache License,
+ * Version 2.0 (the "License"); you may not use this file except
+ * in compliance with the License.
+ *
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 
 // Make sure that we get the RE2 extensions for Chapel
 #ifndef CHPL_RE2
@@ -5,23 +23,19 @@
 #endif
 
 #include <limits>
-#include <algorithm>
 #include <pthread.h>
 
-extern "C" {
   #include <stdlib.h>
   #include <stdio.h>
-#ifndef SIMPLE_TEST
+#ifndef CHPL_RT_UNIT_TEST
   #include "stdchplrt.h"
 #endif
   #include "qio_regexp.h"
-  #include "qbuffer.h" // qio_strdup, refcount functions, VOID_PTR_DIFF
+  #include "qbuffer.h" // qio_strdup, refcount functions, qio_ptr_diff, etc
   #include "qio.h" // for channel operations
   #undef printf
-}
 
 #include "re2/re2.h"
-//#include "re2/regexp.h"
 
 using namespace re2;
 
@@ -285,7 +299,7 @@ qio_bool qio_regexp_match(qio_regexp_t* regexp, const char* text, int64_t text_l
     } else {
       intptr_t diff = 0;
       if( ! spPtr[i].empty() ) {
-        diff = VOID_PTR_DIFF(spPtr[i].data(), textp.data());
+        diff = qio_ptr_diff((void*) spPtr[i].data(), (void*) textp.data());
         assert( diff >= 0 && diff <= endpos );
       }
       submatch[i].offset = diff;
@@ -445,12 +459,12 @@ qioerr qio_regexp_channel_match(const qio_regexp_t* regexp, const int threadsafe
 
   // We never call end_peek_cached. (should be OK since we do unlock)
  
-  if( VOID_PTR_DIFF(bufend, bufstart) > maxlen ) {
-    bufend = VOID_PTR_ADD(bufstart, maxlen);
+  if( qio_ptr_diff(bufend, bufstart) > maxlen ) {
+    bufend = qio_ptr_add(bufstart, maxlen);
   }
 
   // Construct the StringPiece for the buffer.
-  buffer.set((const char*) bufstart, VOID_PTR_DIFF(bufend, bufstart));
+  buffer.set((const char*) bufstart, qio_ptr_diff(bufend, bufstart));
   // and the qio_channel_string_piece
   text.set_channel_info(&ci, start_offset, end);
 

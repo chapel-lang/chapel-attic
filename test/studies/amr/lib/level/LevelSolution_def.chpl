@@ -17,30 +17,30 @@ class LevelSolution {
 
 
   //|\''''''''''''''''''''|\
-  //| >    constructor    | >
+  //| >    initializer    | >
   //|/....................|/
-  proc LevelSolution(level: Level) {
+  proc init(level: Level) {
     this.level  = level;
     old_data     = new LevelVariable(level = level);
     current_data = new LevelVariable(level = level);
   }
   // /|''''''''''''''''''''/|
-  //< |    constructor    < |
+  //< |    initializer    < |
   // \|....................\|
 
 
 
   //|\'''''''''''''''''''|\
-  //| >    destructor    | >
+  //| >  deinitializer   | >
   //|/...................|/
   
-  proc ~LevelSolution
+  proc deinit()
   {
     delete old_data;
     delete current_data;
   }
   // /|'''''''''''''''''''/|
-  //< |    destructor    < |
+  //< |  deinitializer   < |
   // \|...................\|
 
 }

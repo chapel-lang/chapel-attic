@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2014 Cray Inc.
+ * Copyright 2004-2018 Cray Inc.
  * Other additional copyright holders may be indicated within.
  * 
  * The entirety of this work is licensed under the Apache License,
@@ -21,6 +21,7 @@
 #include <string.h>
 #include <assert.h>
 #include "chpl-bitops.h"
+#include "chpl-align.h"
 
 // ----------  SUPPORT FUNCTIONS 
 typedef int64_t cache_seqn_t;
@@ -56,33 +57,6 @@ static inline void saturating_add(saturating_count_t *x, unsigned int num) {
   *x = v;
 }
 */
-// If we have a mask representing 2^n - 1,
-// round an offset down to a multiple of 2^n.
-static inline
-uintptr_t round_down_to_mask(uintptr_t p, uintptr_t mask)
-{
- return p - (p & mask);
-}
-static inline
-unsigned char* round_down_to_mask_ptr(unsigned char* p, uintptr_t mask)
-{
-  return (unsigned char*) round_down_to_mask((uintptr_t)p, mask);
-}
-
-// If we have a mask representing 2^n - 1,
-// round an offset up to a multiple of 2^n.
-static inline
-uintptr_t round_up_to_mask(uintptr_t p, uintptr_t mask)
-{
-  uintptr_t offset = p & mask;
-  return (offset==0)?(p):(p + (mask+1) - offset);
-}
-static inline
-unsigned char* round_up_to_mask_ptr(unsigned char* p, uintptr_t mask)
-{
-  return (unsigned char*) round_up_to_mask((uintptr_t)p, mask);
-}
-
 
 // Single linked list/stack
 #define SINGLE_POP_HEAD(tree, NAME) { \
@@ -293,7 +267,7 @@ void set_valids_for_skip_len(uint64_t* valid, uintptr_t skip, uintptr_t len, int
       // entirely after the region -- nothing valid
     } else if( skip <= offset && offset + 64 <= skip+len ) {
       // entirely within the region -- totally valid
-      valid[i] = (uintptr_t) -1;
+      valid[i] = (uint64_t) -1;
     } else {
       use_start = skip - offset;
       if( use_start < 0 ) use_start = 0;

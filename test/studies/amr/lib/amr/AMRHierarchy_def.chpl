@@ -61,9 +61,9 @@ class AMRHierarchy {
 
 
   //|\''''''''''''''''''''|\
-  //| >    constructor    | >
+  //| >    initializer    | >
   //|/....................|/
-  proc AMRHierarchy (
+  proc init (
     x_low:             dimension*real,
     x_high:            dimension*real,
     n_coarsest_cells:  dimension*int,
@@ -79,10 +79,11 @@ class AMRHierarchy {
     this.x_high            = x_high;
     this.n_coarsest_cells  = n_coarsest_cells;
     this.n_ghost_cells     = n_ghost_cells;
-    this.max_n_levels      = max_n_levels;
     this.ref_ratio         = ref_ratio;
-    this.target_efficiency = target_efficiency;
+    this.max_n_levels      = max_n_levels;
     this.flagger           = flagger;
+    this.target_efficiency = target_efficiency;
+    this.initDone();
 
 
     //---- Create the base level ----
@@ -148,7 +149,24 @@ class AMRHierarchy {
 
   }
   // /|''''''''''''''''''''/|
-  //< |    constructor    < |
+  //< |    initializer    < |
+  // \|....................\|
+
+  //|\''''''''''''''''''''|\
+  //| >   deinitializer   | >
+  //|/....................|/
+
+  proc deinit() {
+    for lvl in levels do if lvl then delete lvl;
+    for reg in invalid_regions do if reg then delete reg;
+    for cgr in cf_ghost_regions do if cgr then delete cgr;
+    for pb in physical_boundaries do if pb then delete pb;
+    for lvl in level_solutions do if lvl then delete lvl;
+    for cgs in cf_ghost_solutions do if cgs then delete cgs;
+  }
+
+  // /|''''''''''''''''''''/|
+  //< |   deinitializer   < |
   // \|....................\|
 
 
@@ -433,7 +451,7 @@ proc AMRHierarchy.buildRefinedLevel ( i_refining: int )
     
   }
 
-    
+  delete coarse_exterior;
   delete cluster_domains;
 
   //<=== Ensure proper nesting <===
@@ -552,11 +570,12 @@ class PhysicalBoundary
 
 
   //|\''''''''''''''''''''|\
-  //| >    constructor    | >
+  //| >    initializer    | >
   //|/....................|/
   
-  proc PhysicalBoundary ( level: Level ) 
+  proc init ( level: Level ) 
   {
+    this.initDone();
     for grid in level.grids {
 
       var boundary_multidomain = new MultiDomain(dimension,stridable=true);
@@ -573,21 +592,21 @@ class PhysicalBoundary
 
   }
   // /|''''''''''''''''''''/|
-  //< |    constructor    < |
+  //< |    initializer    < |
   // \|....................\|
 
 
 
   //|\'''''''''''''''''''|\
-  //| >    destructor    | >
+  //| >  deinitializer   | >
   //|/...................|/
   
-  proc ~PhysicalBoundary () 
+  proc deinit () 
   {
     for multidomain in multidomains do delete multidomain;
   }
   // /|'''''''''''''''''''/|
-  //< |    destructor    < |
+  //< |  deinitializer   < |
   // \|...................\|
 
 
@@ -634,16 +653,16 @@ class Flagger {
 
 
 //|\"""""""""""""""""""""""""""""""""""""""""""""|\
-//| >    AMRHierarchy constructor, file-based    | >
+//| >    AMRHierarchy initializer, file-based    | >
 //|/_____________________________________________|/
 //
 //-----------------------------------------------------------------
-// Alternate constructor in which all numerical parameters for the
+// Alternate initializer in which all numerical parameters for the
 // hierarchy are provided using an input file.  This allows those
 // parameters to be changed without recompiling the code.
 //-----------------------------------------------------------------
 
-proc AMRHierarchy.AMRHierarchy (
+proc AMRHierarchy.init (
   file_name:  string,
   flagger:    Flagger,
   inputIC:    func(dimension*real,real))
@@ -676,22 +695,21 @@ proc AMRHierarchy.AMRHierarchy (
   parameter_file.readln( target_efficiency );
   parameter_file.close();
 
-  
-
   //==== Create and return hierarchy ====
-  return new AMRHierarchy(x_low,
-                          x_high,
-			  n_coarsest_cells,
-			  n_ghost_cells,
-			  max_n_levels,
-			  ref_ratio,
-			  target_efficiency,
-			  flagger,
-			  inputIC);
+  this.init(
+            x_low,
+            x_high,
+            n_coarsest_cells,
+            n_ghost_cells,
+            max_n_levels,
+            ref_ratio,
+            target_efficiency,
+            flagger,
+            inputIC);
 
 }
 // /|"""""""""""""""""""""""""""""""""""""""""""""/|
-//< |    AMRHierarchy constructor, file-based    < |
+//< |    AMRHierarchy initializer, file-based    < |
 // \|_____________________________________________\|
 
 
@@ -903,7 +921,7 @@ proc AMRHierarchy.clawOutput(frame_number: int)
 
   //---- Names of output files ----
   
-  var frame_string:       string = format("%04i", frame_number);
+  var frame_string:       string = "%04i".format(frame_number);
   var time_file_name:     string = "_output/fort.t" + frame_string;
   var solution_file_name: string = "_output/fort.q" + frame_string;
 
@@ -1032,5 +1050,6 @@ proc main {
 				     elevatedSquare);
   
   hierarchy.clawOutput(0);
-  
+
+  delete hierarchy;
 }

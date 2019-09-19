@@ -53,10 +53,10 @@ class Cyclic1DDist {
 
   //
   // an array of local distribution class descriptors -- set up in
-  // initialize() below
+  // initializer below
   //
   // TODO: would like this to be const and initialize in-place,
-  // removing the initialize method; would want to be able to use
+  // removing the initializer; would want to be able to use
   // an on-clause at the expression list to make this work.
   // Otherwise, would have to move the allocation into a function
   // just to get it at the statement level.
@@ -77,10 +77,13 @@ class Cyclic1DDist {
   // WORKAROUND: Initialize in the constructor instead
   //
 
-  proc Cyclic1DDist(type glbIdxType = int(64),
-                  targetLocales: [?targetLocalesDomain] locale) {
+  proc init(type glbIdxType = int(64),
+            targetLocales: [?targetLocalesDomain] locale) {
     targetLocDom = targetLocalesDomain;
     targetLocs = targetLocales;
+
+    this.initDone();
+
     //
     // WANT TO DO:
     /*
@@ -101,12 +104,18 @@ class Cyclic1DDist {
       on targetLocs(locid) do
         locDist(locid) = new LocCyclic1DDist(glbIdxType, locid, this);
   }
+
+  proc deinit() {
+    for locid in targetLocDom do
+      on targetLocs(locid) do
+        delete locDist(locid);
+  }
   //
   // END WORKAROUND
   //
 
 
-  proc writeThis(x:Writer) {
+  proc writeThis(x) {
     x.writeln("Cyclic1DPar");
     x.writeln("---------------");
     x.writeln("across locales: ", targetLocs);
@@ -183,22 +192,25 @@ class LocCyclic1DDist {
   // Compute what chunk of index(1) is owned by the current locale
   // Arguments:
   //
-  proc LocCyclic1DDist(type glbIdxType, 
-                     _locid: int, // the locale index from the target domain
-                     dist: Cyclic1DDist(glbIdxType) // reference to glob dist
+  proc init(type glbIdxType, 
+            _locid: int, // the locale index from the target domain
+            dist: Cyclic1DDist(glbIdxType) // reference to glob dist
                      ) {
-    locid = _locid;
-    loc = dist.targetLocs(locid);
-    const locid0 = dist.targetLocDom.indexOrder(locid); // 0-based locale ID
+    this.glbIdxType = glbIdxType;
+
+    const locid0 = dist.targetLocDom.indexOrder(_locid); // 0-based locale ID
     const lo = min(glbIdxType) + locid0;
     const hi = max(glbIdxType);
     const numlocs = dist.targetLocDom.numIndices;
     myChunk = {lo..hi by numlocs};
+    locid = _locid;
+    loc = dist.targetLocs(locid);
+    this.initDone();
     if debugCyclic1D then
       writeln("locale ", locid, " owns ", myChunk);
   }
 
-  proc writeThis(x:Writer) {
+  proc writeThis(x) {
     x.write("locale ", loc.id, " owns chunk: ", myChunk);
   }
 }
@@ -225,18 +237,23 @@ class Cyclic1DDom {
 
   //
   // an array of local domain class descriptors -- set up in
-  // initialize() below
+  // initializer below
   //
   //
   // TODO: would like this to be const and initialize in-place,
-  // removing the initialize method; would want to be able to use
+  // removing the initializer; would want to be able to use
   // an on-clause at the expression list to make this work.
   // Otherwise, would have to move the allocation into a function
   // just to get it at the statement level.
   //
   var locDoms: [dist.targetLocDom] LocCyclic1DDom(glbIdxType);
 
-  proc initialize() {
+  proc init(type idxType, myDist, myDom) {
+    glbIdxType = idxType;
+    dist = myDist;
+    whole = myDom;
+
+    this.initDone();
     for locid in dist.targetLocDom do
       on dist.targetLocs(locid) do {
         locDoms(locid) = new LocCyclic1DDom(glbIdxType, this, 
@@ -244,6 +261,12 @@ class Cyclic1DDom {
       }
     if debugCyclic1D then
       [loc in dist.targetLocDom] writeln(loc, " owns ", locDoms(loc));
+  }
+
+  proc deinit() {
+    for locid in dist.targetLocDom do
+      on dist.targetLocs(locid) do
+        delete locDoms(locid);
   }
 
   //
@@ -332,7 +355,7 @@ class Cyclic1DDom {
   //
   // the print method for the domain
   //
-  proc writeThis(x:Writer) {
+  proc writeThis(x) {
     x.write(whole);
   }
 
@@ -410,7 +433,7 @@ class LocCyclic1DDom {
   //
   // how to write out this locale's indices
   //
-  proc writeThis(x:Writer) {
+  proc writeThis(x) {
     x.write(myBlock);
   }
 
@@ -461,10 +484,20 @@ class Cyclic1DArr {
   //
   var locArr: [dom.dist.targetLocDom] LocCyclic1DArr(glbIdxType, elemType);
 
-  proc initialize() {
+  proc init(type idxType, type eltType, myDom) {
+    glbIdxType = idxType;
+    elemType = eltType;
+    dom = myDom;
+    this.initDone();
     for locid in dom.dist.targetLocDom do
       on dom.dist.targetLocs(locid) do
         locArr(locid) = new LocCyclic1DArr(glbIdxType, elemType, dom.locDoms(locid));
+  }
+
+  proc deinit() {
+    for locid in dom.dist.targetLocDom do
+      on dom.dist.targetLocs(locid) do
+        delete locArr(locid);
   }
 
   //
@@ -511,7 +544,7 @@ class Cyclic1DArr {
   //
   // how to print out the whole array, sequentially
   //
-  proc writeThis(x: Writer) {
+  proc writeThis(x) {
     var first = true;
     for loc in dom.dist.targetLocDom {
       // May want to do something like the following:
@@ -597,7 +630,7 @@ class LocCyclic1DArr {
   //
   // prints out this locale's piece of the array
   //
-  proc writeThis(x: Writer) {
+  proc writeThis(x) {
     // May want to do something like the following:
     //      on loc {
     // but it causes deadlock -- see writeThisUsingOn.chpl

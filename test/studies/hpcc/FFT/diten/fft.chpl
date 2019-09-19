@@ -39,7 +39,7 @@ config const epsilon = 2.0 ** -51.0,
 // specify the fixed seed explicitly
 //
 config const useRandomSeed = false,
-             seed = if useRandomSeed then SeedGenerator.currentTime else 314159265;
+             seed = if useRandomSeed then SeedGenerator.oddCurrentTime else 314159265;
 
 //
 // Configuration constants to control what's printed -- benchmark
@@ -190,19 +190,23 @@ proc dfft(A: [?ADom], W, phase) {
 // this is the radix-4 butterfly routine that takes multipliers wk1,
 // wk2, and wk3 and a 4-element array (slice) A.
 //
-proc butterfly(wk1, wk2, wk3, X:[0..3]) {
-  var x0 = X(0) + X(1),
-      x1 = X(0) - X(1),
-      x2 = X(2) + X(3),
-      x3rot = (X(2) - X(3))*1.0i;
+proc butterfly(wk1, wk2, wk3, X:[?D]) {
+  const i0 = D.low,
+        i1 = i0 + D.stride,
+        i2 = i1 + D.stride,
+        i3 = i2 + D.stride;
+  var x0 = X(i0) + X(i1),
+      x1 = X(i0) - X(i1),
+      x2 = X(i2) + X(i3),
+      x3rot = (X(i2) - X(i3))*1.0i;
 
-  X(0) = x0 + x2;                   // compute the butterfly in-place on X
+  X(i0) = x0 + x2;                   // compute the butterfly in-place on X
   x0 -= x2;
-  X(2) = wk2 * x0;
+  X(i2) = wk2 * x0;
   x0 = x1 + x3rot;
-  X(1) = wk1 * x0;
+  X(i1) = wk1 * x0;
   x0 = x1 - x3rot;
-  X(3) = wk3 * x0;
+  X(i3) = wk3 * x0;
 }
 
 proc butterfly(wk1, wk2, wk3, A, rng) {
@@ -256,7 +260,7 @@ proc initVectors(Twiddles, z) {
   computeTwiddles(Twiddles);
   bitReverseShuffle(Twiddles);
 
-  fillRandom(z, seed);
+  fillRandom(z, seed, algorithm=RNG.NPB);
 
   if (printArrays) {
     writeln("After initialization, Twiddles is: ", Twiddles, "\n");
@@ -298,14 +302,14 @@ proc bitReverseShuffle(Vect: [?Dom]) {
 proc bitReverse(val: ?valType, revBits = 64) {
   param mask = 0x0102040810204080;
   const valReverse64 = bitMatMultOr(mask, bitMatMultOr(val:uint(64), mask)),
-        valReverse = bitRotLeft(valReverse64, revBits);
+        valReverse = rotl(valReverse64, revBits);
   return valReverse: valType;
 }
 
 //
 // Compute the log base 4 of x
 //
-proc log4(x) return logBasePow2(x, 2);  
+proc log4(x) return logBasePow2(x, 2);
 
 //
 // verify that the results are correct by reapplying the dfft and then
@@ -341,12 +345,4 @@ proc printResults(successful, execTime) {
     writeln("Execution time = ", execTime);
     writeln("Performance (Gflop/s) = ", 5 * (m * n / execTime) * 1e-9);
   }
-}
-
-proc tmp_localSlice(A, rng) {
-  var low: A.rank*A._value.idxType;
-  for param i in 1..A.rank {
-    low(i) = rng.low;
-  }
-  return A._value.locArr(A._value.dom.dist.idxToLocaleInd(low)).myElems(rng);
 }

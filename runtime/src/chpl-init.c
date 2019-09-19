@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2014 Cray Inc.
+ * Copyright 2004-2018 Cray Inc.
  * Other additional copyright holders may be indicated within.
  * 
  * The entirety of this work is licensed under the Apache License,
@@ -29,8 +29,11 @@
 #include "chpl-init.h"
 #include "chpl-mem.h"
 #include "chplmemtrack.h"
+#include "chpl-qsbr.h"
 #include "chpl-privatization.h"
 #include "chpl-tasks.h"
+#include "chpl-topo.h"
+#include "chpl-linefile-support.h"
 #include "chplsys.h"
 #include "config.h"
 #include "error.h"
@@ -41,19 +44,14 @@
 #include <time.h>
 #include <sys.h>
 
-static const char myFilename[] = 
-#ifdef CHPL_DEVELOPER
-  __FILE__;
-#else
-  "<internal>";
-#endif
+static const int32_t myFilename = CHPL_FILE_IDX_INTERNAL;
 
 chpl_main_argument chpl_gen_main_arg;
 
 char* chpl_executionCommand;
 
 int handleNonstandardArg(int* argc, char* argv[], int argNum, 
-                         int32_t lineno, c_string filename) {
+                         int32_t lineno, int32_t filename) {
 
   if (mainHasArgs) {
     chpl_gen_main_arg.argv[chpl_gen_main_arg.argc] = argv[argNum];
@@ -96,6 +94,11 @@ static void recordExecutionCommand(int argc, char *argv[]) {
 //
 void chpl_rt_preUserCodeHook(void) {
   chpl_comm_barrier("pre-user-code hook begin");
+
+  chpl_taskRunningCntReset(0, 0);
+  if (chpl_nodeID == 0) {
+    chpl_taskRunningCntInc(0, 0);
+  }
 
   //
   // Set up any memory tracking requested.
@@ -149,6 +152,7 @@ void chpl_rt_init(int argc, char* argv[]) {
   parseArgs(false, parse_dash_E, &argc, argv);
 
   chpl_error_init();  // This does local-only initialization
+  chpl_topo_init();
   chpl_comm_init(&argc, &argv);
   chpl_mem_init();
   chpl_comm_post_mem_init();
@@ -185,6 +189,11 @@ void chpl_rt_init(int argc, char* argv[]) {
   //
   chpl_task_init();
 
+  //
+  // Initialize Quiescent State-Based Reclamation Pseudo-Garbage Collector.
+  //
+  chpl_qsbr_init();
+
   // Initialize privatization, needs to happen before hitting module init
   chpl_privatization_init();
 
@@ -217,12 +226,13 @@ void chpl_rt_finalize(int return_value) {
 // "main-task" which is either "chpl_executable_init" or "chpl_library_init".
 //
 void chpl_std_module_init(void) {
+  // chpl__initStringLiterals runs the constructors for all string literals. We
+  // need to setup the literals on every locale before any other chapel code is
+  // run.
+  chpl__initStringLiterals();
   chpl__heapAllocateGlobals(); // allocate global vars on heap for multilocale
 
   if (chpl_nodeID == 0) {
-    // OK, we can create tasks now.
-    chpl_task_setSerial(false);
-
     //
     // This just sets all of the initialization predicates to false.
     // Must occur before any other call to a chpl__init_<foo> function.
@@ -269,6 +279,12 @@ void chpl_executable_init(void) {
     chpl_gen_main_arg.return_value = chpl_gen_main(&chpl_gen_main_arg);
   }
 
+}
+
+void chpl_execute_module_deinit(c_fn_ptr deinitFun) {
+  void (*deinitFn)(void);
+  deinitFn = deinitFun;
+  deinitFn();
 }
 
 //

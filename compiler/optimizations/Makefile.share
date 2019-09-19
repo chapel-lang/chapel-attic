@@ -1,4 +1,4 @@
-# Copyright 2004-2014 Cray Inc.
+# Copyright 2004-2018 Cray Inc.
 # Other additional copyright holders may be indicated within.
 # 
 # The entirety of this work is licensed under the Apache License,
@@ -17,21 +17,20 @@
 
 OPTIMIZATIONS_SRCS = \
 	bulkCopyRecords.cpp \
-	complex2record.cpp \
 	copyPropagation.cpp \
 	deadCodeElimination.cpp \
 	inlineFunctions.cpp \
+	inferConstRefs.cpp \
 	liveVariableAnalysis.cpp \
 	localizeGlobals.cpp \
 	loopInvariantCodeMotion.cpp \
-	narrowWideReferences.cpp \
 	optimizeOnClauses.cpp \
-	reachingDefinitionsAnalysis.cpp \
+	refPropagation.cpp \
 	remoteValueForwarding.cpp \
 	removeEmptyRecords.cpp \
 	removeUnnecessaryAutoCopyCalls.cpp \
 	removeUnnecessaryGotos.cpp \
-	removeWrapRecords.cpp \
+	replaceArrayAccessesWithRefTemps.cpp \
 	scalarReplace.cpp
 
 SVN_SRCS = $(OPTIMIZATIONS_SRCS)

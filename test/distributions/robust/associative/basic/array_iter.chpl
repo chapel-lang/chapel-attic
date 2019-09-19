@@ -15,15 +15,15 @@ for i in D {
   DomRealType += myIdx:realType;
   if doString {
     var s: string;
-    s.write(myIdx);
+    s = myIdx:string;
     ArithStringRef(i) = s;
     DomStringType += s;
   }
 }
-QuickSort(ArithIntRef);
-QuickSort(ArithUintRef);
-QuickSort(ArithRealRef);
-if doString then QuickSort(ArithStringRef);
+quickSort(ArithIntRef);
+quickSort(ArithUintRef);
+quickSort(ArithRealRef);
+if doString then quickSort(ArithStringRef);
 if debug then writeln(DomIntType);
 if debug then writeln(ArithIntRef);
 if debug then writeln(DomUintType);
@@ -45,8 +45,8 @@ forall ar in DomRealType do
   AReal(ar) = ar;
 if debug then writeln(AReal);
 if doString {
-  forall as in DomStringType do
-    AString(as) = as;
+  forall aStr in DomStringType do
+    AString(aStr) = aStr;
   if debug then writeln(AString);
 }
 
@@ -62,7 +62,7 @@ if doString {
 }
 
 proc testSerial(AAssoc, D, Arr, ArrRef) {
-  type idxType = AAssoc._value.dom.idxType;
+  type idxType = AAssoc.idxType;
   for aa in AAssoc {
     if idxType != string {
       var ai = aa;
@@ -75,20 +75,20 @@ proc testSerial(AAssoc, D, Arr, ArrRef) {
   }
   if debug then writeln(Arr);
   var success = true;
-  QuickSort(Arr);
+  quickSort(Arr);
   for i in D {
     if Arr(i) != ArrRef(i) {
       success = false;
       break;
     }
   }
-  writeln("Serial array iteration (", typeToString(idxType), ") : ",
+  writeln("Serial array iteration (", idxType:string, ") : ",
           if success then "SUCCESS" else "FAILED");
 }
 
 // could probably use serial true on testSerial
 proc testParallel(AAssoc, D, Arr, ArrRef) {
-  type idxType = AAssoc._value.dom.idxType;
+  type idxType = AAssoc.idxType;
   forall aa in AAssoc {
     if idxType != string {
       var ai = aa;
@@ -101,14 +101,14 @@ proc testParallel(AAssoc, D, Arr, ArrRef) {
   }
   if debug then writeln(Arr);
   var success = true;
-  QuickSort(Arr);
+  quickSort(Arr);
   for i in D {
     if Arr(i) != ArrRef(i) {
       success = false;
       break;
     }
   }
-  writeln("Serial array iteration (", typeToString(idxType), ") : ",
+  writeln("Serial array iteration (", idxType:string, ") : ",
           if success then "SUCCESS" else "FAILED");
 }
 

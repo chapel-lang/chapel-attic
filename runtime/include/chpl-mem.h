@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2014 Cray Inc.
+ * Copyright 2004-2018 Cray Inc.
  * Other additional copyright holders may be indicated within.
  * 
  * The entirety of this work is licensed under the Apache License,
@@ -27,10 +27,31 @@
 #include <string.h>
 #include <assert.h>
 #include "arg.h"
+#include "chpl-comm.h"
 #include "chpl-mem-hook.h"
+#include "chpl-topo.h"
 #include "chpltypes.h"
 #include "chpl-tasks.h"
 #include "error.h"
+
+
+/* The names and arguments for these functions are part
+   of Chapel's user-facing interface because they are
+   documented in a doc/rst/developer README
+ */
+// start public interface
+static inline void* chpl_calloc(size_t n, size_t size);
+static inline void* chpl_malloc(size_t size);
+static inline void* chpl_memalign(size_t boundary, size_t size);
+static inline void* chpl_realloc(void* ptr, size_t size);
+static inline void chpl_free(void* ptr);
+int chpl_posix_memalign(void** ptr, size_t alignment, size_t size);
+void* chpl_valloc(size_t size);
+void* chpl_pvalloc(size_t size);
+// end public interface
+
+// returns 0 if valid, EINVAL otherwise
+int chpl_posix_memalign_check_valid(size_t alignment);
 
 // runtime/include/mem/*/chpl-mem-impl.h defines
 // chpl_calloc, chpl_malloc, chpl_realloc, chpl_free
@@ -38,17 +59,16 @@
 // and no additional error checking.
 #include "chpl-mem-impl.h"
 
-
 void chpl_mem_init(void);
 void chpl_mem_exit(void);
 
 int chpl_mem_inited(void);
 
 
-static ___always_inline
+static inline
 void* chpl_mem_allocMany(size_t number, size_t size,
                          chpl_mem_descInt_t description,
-                         int32_t lineno, c_string filename) {
+                         int32_t lineno, int32_t filename) {
   void* memAlloc;
   chpl_memhook_malloc_pre(number, size, description, lineno, filename);
   memAlloc = chpl_malloc(number*size);
@@ -57,16 +77,16 @@ void* chpl_mem_allocMany(size_t number, size_t size,
   return memAlloc;
 }
 
-static ___always_inline
+static inline
 void* chpl_mem_alloc(size_t size, chpl_mem_descInt_t description,
-                     int32_t lineno, c_string filename) {
+                     int32_t lineno, int32_t filename) {
   return chpl_mem_allocMany(1, size, description, lineno, filename);
 }
 
-static ___always_inline
+static inline
 void* chpl_mem_allocManyZero(size_t number, size_t size,
                              chpl_mem_descInt_t description,
-                             int32_t lineno, c_string filename) {
+                             int32_t lineno, int32_t filename) {
   void* memAlloc;
   chpl_memhook_malloc_pre(number, size, description, lineno, filename);
   memAlloc = chpl_calloc(number, size);
@@ -75,16 +95,17 @@ void* chpl_mem_allocManyZero(size_t number, size_t size,
   return memAlloc;
 }
 
-static ___always_inline
-void* chpl_mem_calloc(size_t size, chpl_mem_descInt_t description,
-                      int32_t lineno, c_string filename) {
-  return chpl_mem_allocManyZero(1, size, description, lineno, filename);
+static inline
+void* chpl_mem_calloc(size_t number, size_t size,
+                      chpl_mem_descInt_t description,
+                      int32_t lineno, int32_t filename) {
+  return chpl_mem_allocManyZero(number, size, description, lineno, filename);
 }
 
-static ___always_inline
+static inline
 void* chpl_mem_realloc(void* memAlloc, size_t size,
                        chpl_mem_descInt_t description,
-                       int32_t lineno, c_string filename) {
+                       int32_t lineno, int32_t filename) {
   void* moreMemAlloc;
 
   chpl_memhook_realloc_pre(memAlloc, size, description,
@@ -100,58 +121,166 @@ void* chpl_mem_realloc(void* memAlloc, size_t size,
   return moreMemAlloc;
 }
 
-static ___always_inline
-void chpl_mem_free(void* memAlloc, int32_t lineno, c_string filename) {
+static inline
+void chpl_mem_free(void* memAlloc, int32_t lineno, int32_t filename) {
   chpl_memhook_free_pre(memAlloc, lineno, filename);
   chpl_free(memAlloc);
 }
 
+static inline
+chpl_bool chpl_mem_size_justifies_comm_alloc(size_t size) {
+  //
+  // Don't try to use comm layer allocation unless the size is beyond
+  // the comm layer threshold and enough pages to make localization
+  // worthwhile.
+  //
+  return (size >= chpl_comm_regMemAllocThreshold()
+          && size >= 2 * chpl_comm_regMemHeapPageSize());
+}
+
+static inline
+void* chpl_mem_array_alloc(size_t nmemb, size_t eltSize, c_sublocid_t subloc,
+                           chpl_bool* callAgain, void* repeat_p,
+                           int32_t lineno, int32_t filename) {
+  const size_t size = nmemb * eltSize;
+  void* p;
+
+  //
+  // Temporarily, to support dynamic array registration, we accept a
+  // couple of additional arguments.  On a first call, to allocate,
+  // pass NULL for repeat_p.  This function will return a pointer to
+  // the allocated memory and either true or false in *callAgain.  If
+  // false then the allocation procedure is complete.  If true, then
+  // after initializing the memory the caller should call us again,
+  // repeating the original arguments and passing the pointer returned
+  // by the first call in repeat_p.  We will then call the comm layer
+  // post-alloc function.
+  //
+  if (repeat_p == NULL) {
+    //
+    // Allocate and maybe localize.
+    //
+    chpl_bool do_localize;
+
+    p = NULL;
+    *callAgain = false;
+    if (chpl_mem_size_justifies_comm_alloc(size)) {
+      p = chpl_comm_regMemAlloc(size);
+      if (p != NULL) {
+        *callAgain = true;
+        do_localize = (subloc == c_sublocid_all) ? true : false;
+      }
+    }
+
+    if (p == NULL) {
+      p = chpl_mem_allocMany(nmemb, eltSize, CHPL_RT_MD_ARRAY_ELEMENTS,
+                             lineno, filename);
+      do_localize = (subloc == c_sublocid_all) ? true : false;
+    }
+
+    if (do_localize) {
+      if (isActualSublocID(subloc)) {
+        chpl_topo_setMemLocality(p, size, true, subloc);
+      }
+    }
+  } else {
+    //
+    // do comm layer post-allocation, if we got the memory from there.
+    //
+    p = repeat_p;
+    chpl_comm_regMemPostAlloc(p, size);
+  }
+
+  return p;
+}
+
+static inline
+void* chpl_mem_wide_array_alloc(int32_t dstNode, size_t nmemb, size_t eltSize,
+                                c_sublocid_t subloc,
+                                chpl_bool* callAgain, void* repeat_p,
+                                int32_t lineno, int32_t filename) {
+  if (dstNode != chpl_nodeID)
+    chpl_error("array vector data is not local", lineno, filename);
+  return chpl_mem_array_alloc(nmemb, eltSize, subloc, callAgain, repeat_p,
+                              lineno, filename);
+}
+
+static inline
+void chpl_mem_array_free(void* p,
+                         size_t nmemb, size_t eltSize,
+                         int32_t lineno, int32_t filename) {
+  const size_t size = nmemb * eltSize;
+
+  //
+  // If the size indicates we might have gotten this memory from the
+  // comm layer then try to free it there.  If not, or if so but the
+  // comm layer says it didn't come from there, free it in the memory
+  // layer.
+  //
+  if (chpl_mem_size_justifies_comm_alloc(size)
+      && chpl_comm_regMemFree(p, size)) {
+    return;
+  }
+
+  chpl_mem_free(p, lineno, filename);
+}
+
+static inline
+void chpl_mem_wide_array_free(int32_t dstNode, void* p,
+                              size_t nmemb, size_t eltSize,
+                              int32_t lineno, int32_t filename) {
+  if (dstNode != chpl_nodeID)
+    chpl_error("array vector data is not local", lineno, filename);
+  chpl_mem_array_free(p, nmemb, eltSize, lineno, filename);
+}
+
 // Provide a handle to instrument Chapel calls to memcpy.
-static ___always_inline
+static inline
 void* chpl_memcpy(void* dest, const void* src, size_t num)
 {
-  assert(dest != src);
+  assert(dest != src || num == 0);
   return memcpy(dest, src, num);
 }
 
-// free a c_string_copy, no error checking.
-// The argument type is explicitly c_string_copy, since only an "owned" string
+// Query the allocator to ask for a good size to allocate that is at least
+// minSize. One example where this is useful is to grow a vector while
+// minimizing memory wasted by overallocation.
+//
+// If an allocator does not have the ability to get this information, minSize
+// will be returned.
+static inline size_t chpl_mem_good_alloc_size(size_t minSize, int32_t lineno, int32_t filename) {
+  return chpl_good_alloc_size(minSize);
+}
+
+// free a c_string, no error checking.
+// The argument type is explicitly c_string, since only an "owned" string
 // should be freed.
-static ___always_inline
-void chpl_rt_free_c_string_copy(c_string_copy *s, int32_t lineno, c_string filename)  {
+static inline
+void chpl_rt_free_c_string(c_string *s, int32_t lineno, int32_t filename)  {
   assert(*s!=NULL);
   chpl_mem_free((void *) *s, lineno, filename);
   *s = NULL;
 }
 
-// free a c_string (deprecated)
-// This function is needed only because NewString.chpl uses the c_string type.
-// c_strings are "unowned" so should not be freed, but NewString.chpl was written
-// before this distinction was made.
-static ___always_inline
-void chpl_rt_free_c_string(c_string* s, int32_t lineno, c_string filename)
-{
-  // As far as the C compiler is concerned c_string and c_string_copy are the
-  // same type, so no explicit cast is required.
-  chpl_rt_free_c_string_copy(s, lineno, filename);
-}
-
 void chpl_mem_layerInit(void);
 void chpl_mem_layerExit(void);
-void* chpl_mem_layerAlloc(size_t, int32_t lineno, c_string filename);
-void* chpl_mem_layerRealloc(void*, size_t, int32_t lineno, c_string filename);
-void chpl_mem_layerFree(void*, int32_t lineno, c_string filename);
+void* chpl_mem_layerAlloc(size_t, int32_t lineno, int32_t filename);
+void* chpl_mem_layerRealloc(void*, size_t, int32_t lineno, int32_t filename);
+void chpl_mem_layerFree(void*, int32_t lineno, int32_t filename);
 
 #else // LAUNCHER
 
-#include <stdlib.h>
+#include "chpl-mem-sys.h"
 #include "arg.h"
 
 #define chpl_mem_allocMany(number, size, description, lineno, filename)        \
-  malloc((number)*(size))
+  sys_malloc((number)*(size))
+
+#define chpl_mem_alloc(size, description, lineno, filename)        \
+  sys_malloc(size)
 
 #define chpl_mem_free(ptr, lineno, filename)        \
-  free(ptr)
+  sys_free(ptr)
 
 #endif // LAUNCHER
 

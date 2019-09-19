@@ -59,7 +59,6 @@ as defined in the referenced subsections:
 \begin{itemize}
 \item numeric, boolean, and enumerated types~(\rsec{Implicit_NumBoolEnum_Conversions}),
 \item class types~(\rsec{Implicit_Class_Conversions}),
-\item record types~(\rsec{Implicit_Record_Conversions}),
 \item integral types in the special case when the expression's value
       is a compile-time constant~(\rsec{Implicit_Compile_Time_Constant_Conversions}), and
 \item from an integral or class type to \chpl{bool}
@@ -378,3 +377,39 @@ An expression of record type \chpl{C} can be explicitly converted to
 another record type \chpl{D} provided that \chpl{C} is derived
 from \chpl{D}.  There are no explicit record conversions that are not
 also implicit record conversions.
+
+\subsection{Explicit Range Conversions}
+\label{Explicit_Range_Conversions}
+\index{conversions!range}
+\index{conversions!explicit!range}
+
+An expression of stridable range type can be explicitly converted
+to an unstridable range type, changing the stride to 1 in the process.
+
+\subsection{Explicit Domain Conversions}
+\label{Explicit_Domain_Conversions}
+\index{conversions!domain}
+\index{conversions!explicit!domain}
+
+An expression of stridable domain type can be explicitly converted
+to an unstridable domain type, changing all strides to 1 in the process.
+
+\subsection{Explicit Type to String Conversions}
+\label{Explicit_Type_to_String_Conversions}
+\index{conversions!type to string}
+\index{conversions!explicit!type to string}
+
+A type expression can be explicitly converted to a \chpl{string}. The resultant
+\chpl{string} is the name of the type.
+
+\begin{chapelexample}{explicit-type-to-string.chpl}
+For example:
+\begin{chapel}
+var x: real(64) = 10.0;
+writeln(x.type:string);
+\end{chapel}
+\begin{chapeloutput}
+real(64)
+\end{chapeloutput}
+This program will print out the string \chpl{"real(64)"}.
+\end{chapelexample}

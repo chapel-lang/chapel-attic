@@ -49,9 +49,9 @@ class Function {
     const quad_w : [quadDom] real; // weights
 
     const quad_phiDom: domain(2);
-    const quad_phi   : [quad_phiDom] real; // phi[point,i]
-    const quad_phiT  : [quad_phiDom] real; // phi[point,i] transpose
-    const quad_phiw  : [quad_phiDom] real; // phi[point,i]*weight[point]
+    var   quad_phi   : [quad_phiDom] real; // phi[point,i]
+    var   quad_phiT  : [quad_phiDom] real; // phi[point,i] transpose
+    var   quad_phiw  : [quad_phiDom] real; // phi[point,i]*weight[point]
 
     // blocks of the block tridiagonal derivative operator
     const dcDom: domain(2);
@@ -59,9 +59,9 @@ class Function {
     const r0   : [dcDom] real;
     const rp   : [dcDom] real;
 
-    proc Function(k:int=5, thresh:real=1e-5, f:AFcn=nil, initial_level:int=2, 
-                 max_level:int=30, autorefine:bool=true, compressed:bool=false, 
-                 sumC:FTree=new FTree(order=k), diffC:FTree=new FTree(order=k)) {
+    proc init(k:int=5, thresh:real=1e-5, f:AFcn=nil, initial_level:int=2,
+              max_level:int=30, autorefine:bool=true, compressed:bool=false,
+              sumC:FTree=new FTree(order=k), diffC:FTree=new FTree(order=k)) {
         if debug then writeln("Creating Function: k=", k, " thresh=", thresh);
         this.k = k;
         this.thresh = thresh;
@@ -74,65 +74,32 @@ class Function {
         this.diffC = diffC;
        
         if debug then writeln("  initializing two-scale relation coefficients");
-        init_twoscale(k);
-       
-        if debug then writeln("  initializing quadrature coefficients");
-        init_quadrature(k);
-
-        if debug then writeln("  initializing tridiagonal derivative operator");
-        make_dc_periodic(k);
-
-        // initial refinement of analytic function f(x)
-        if f != nil {
-            if debug then writeln("  performing initial refinement of f(x)");
-            for l in 0..2**initial_level-1 {
-                const node = new Node(initial_level, l);
-                refine(node);
-            }
-        }
-        
-        if debug then writeln("done.");
-    }
-
-
-    proc ~Function() {
-        delete sumC;
-        delete diffC;
-    }
-
-
-    /** Initialize the two-scale relation coefficient matricies.
-     */
-    proc init_twoscale(k) {
         hgDom = {0..2*k-1, 0..2*k-1};
         hg = hg_getCoeffs(k);
-        [(i,j) in hgDom] hgT[i,j] = hg[j,i];
-    }
 
-
-    /** Initialize the quadrature coefficient matricies.
-     */
-    proc init_quadrature(k) {
+       
+        if debug then writeln("  initializing quadrature coefficients");
         quadDom = {0..k-1};
         quad_x = gl_getPoints(k);
         quad_w = gl_getWeights(k);
-        
+
         quad_phiDom = {0..k-1, 0..k-1};
+
+
+        if debug then writeln("  initializing tridiagonal derivative operator");
+        dcDom = {0..k-1, 0..k-1};
+
+        this.initDone();
+
+        [(i,j) in hgDom] hgT[i,j] = hg[j,i];
+
         for i in quad_phiDom.dim(1) {
             const p = phi(quad_x[i], k);
             quad_phi [i, ..] = p;
             quad_phiw[i, ..] = quad_w[i] * p;
             quad_phiT[.., i] = p;
         }
-    }
 
-
-    /** Return the level-0 blocks rm, r0, rp of the central
-        difference derivative operator with periodic boundary
-        conditions on either side.
-     */
-    proc make_dc_periodic(k) {
-        dcDom = {0..k-1, 0..k-1};
         var iphase = 1.0;
         for i in dcDom.dim(1) {
             var jphase = 1.0;
@@ -148,8 +115,25 @@ class Function {
             }
             iphase = -iphase;
         }
+
+
+        // initial refinement of analytic function f(x)
+        if f != nil {
+            if debug then writeln("  performing initial refinement of f(x)");
+            for l in 0..2**initial_level-1 {
+                const node = new Node(initial_level, l);
+                refine(node);
+            }
+        }
+
+        if debug then writeln("done.");
     }
 
+
+    proc deinit() {
+        delete sumC;
+        delete diffC;
+    }
 
     /** Return a deep copy of this Function
      */
@@ -195,8 +179,8 @@ class Function {
     proc refine(curNode: Node) {
         // project f(x) at next level
         var sc : [0..2*k-1] real;
-        var s0 : [0..k-1] => sc[0..k-1];
-        var s1 : [0..k-1] => sc[k..2*k-1];
+        ref s0 = sc[0..k-1];
+        ref s1 = sc[k..2*k-1];
 
         const child = curNode.get_children();
         s0 = project(child(1));
@@ -571,7 +555,8 @@ class Function {
     inline proc truncate(x) {
       const eps = 1e-8;
       if abs(x) < eps then return 0.0;
-      else return x;
+      if abs(x) > 1.0/eps then return trunc(x/10) * 10;
+      return x;
     }
     
     /** Mostly for debugging, print summary of coefficients,
@@ -588,8 +573,8 @@ class Function {
                 ncoeffs += 1;
             }
             if ncoeffs != 0 then
-                writeln("   level ", format("##", n), "   #boxes=",
-                        format("####", ncoeffs), "  norm=", format("%0.2e", truncate(sqrt(sum))));
+	        writef("   level %{##}   #boxes=%{####}  norm=%0.2er\n",
+		       n, ncoeffs, truncate(sqrt(sum)));
         }
 
         writeln("difference coefficients:");
@@ -600,8 +585,8 @@ class Function {
                 ncoeffs += 1;
             }
             if ncoeffs != 0 then
-                writeln("   level ", format("##", n), "   #boxes=",
-                        format("####", ncoeffs), "  norm=", format("%0.2e", truncate(sqrt(sum))));
+	        writef("   level %{##}   #boxes=%{####}  norm=%0.2er\n",
+		       n, ncoeffs, truncate(sqrt(sum)));
         }
 
         writeln("-----------------------------------------------------\n");
@@ -614,12 +599,9 @@ class Function {
     proc evalNPT(npt) {
         for i in 0..npt {
             var (fval, Fval) = (f(i/npt:real), this(i/npt:real));
-            //writeln(" -- ", format("%0.2f", i/npt:real), ":  F_numeric()=", format("% 0.5e", Fval),
-            //        "  f_analytic()=", format("% 0.5e", fval), " err=", format("% 0.5e", Fval-fval),
-            //        if abs(Fval-fval) > thresh then "  > thresh" else "");
-            writeln(" -- ", format("%0.2f", i/npt:real), ":  F_numeric()=", format("% 0.8f", truncate(Fval)),
-                    "  f_analytic()=", format("% 0.8f", truncate(fval)),
-                    if abs(Fval-fval) > thresh then " err > thresh" else "");
+            writef(" -- %.2dr:  F_numeric()=% .8dr  f_analytic()=% .8dr%s\n",
+		   i/npt:real, truncate(Fval), truncate(fval), 
+		   if abs(Fval-fval) > thresh then " err > thresh" else "");
         }
     }
 }

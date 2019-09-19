@@ -42,7 +42,7 @@ config const epsilon = 2.0e-15;
 // specify the fixed seed explicitly
 //
 config const useRandomSeed = true,
-             seed = if useRandomSeed then SeedGenerator.currentTime else 31415;
+             seed = if useRandomSeed then SeedGenerator.oddCurrentTime else 31415;
 
 //
 // Configuration constants to control what's printed -- benchmark
@@ -73,8 +73,8 @@ proc main() {
       piv: [1..n] indexType,         // a vector of pivot values
       x  : [1..n] elemType;          // the solution vector, x
 
-  var A => Ab[MatrixSpace],          // an alias for the Matrix part of Ab
-      b => Ab[.., n+1];              // an alias for the last column of Ab
+  ref A = Ab[MatrixSpace],           // an alias for the Matrix part of Ab
+      b = Ab[.., n+1];               // an alias for the last column of Ab
 
   initAB(Ab);
 
@@ -214,10 +214,7 @@ proc schurComplement(Ab: [1..n, 1..n+1] elemType, ptOp: indexType) {
             bBlkD = replBD[ptOp..#blkSize, col..#blkSize],
             cBlkD = AbD[row..#blkSize, col..#blkSize];
 
-      dgemm(aBlkD.dim(1).length,
-            aBlkD.dim(2).length,
-            bBlkD.dim(2).length,
-            replA(aBlkD),
+      dgemm(replA(aBlkD),
             replB(bBlkD),
             Ab(cBlkD));
       // }
@@ -227,16 +224,13 @@ proc schurComplement(Ab: [1..n, 1..n+1] elemType, ptOp: indexType) {
 //
 // calculate C = C - A * B.
 //
-proc dgemm(p: indexType,       // number of rows in A
-          q: indexType,       // number of cols in A, number of rows in B
-          r: indexType,       // number of cols in B
-          A: [1..p, 1..q] ?t,
-          B: [1..q, 1..r] t,
-          C: [1..p, 1..r] t) {
+proc dgemm(A: [?AD] ?t,
+           B: [?BD] t,
+           C: [?CD] t) {
   // Calculate (i,j) using a dot product of a row of A and a column of B.
-  for i in 1..p do
-    for j in 1..r do
-      for k in 1..q do
+  for i in AD.dim(1) do
+    for j in CD.dim(2) do
+      for k in AD.dim(2) do
         C[i,j] -= A[i, k] * B[k, j];
 }
 
@@ -357,8 +351,8 @@ proc initAB(Ab: [] elemType) {
 // calculate norms and residuals to verify the results
 //
 proc verifyResults(Ab, MatrixSpace, x) {
-  var A => Ab[MatrixSpace],
-      b => Ab[.., n+1];
+  ref A = Ab[MatrixSpace],
+      b = Ab[.., n+1];
 
   initAB(Ab);
   

@@ -9,25 +9,35 @@ proc return_literal() {
 }
 
 proc create_alias(A: []) {
-  var A2 => A;
+  const ref A2 = A;
 }
 proc return_alias(A: []) {
-  var A2 => A;
+  const ref A2 = A;
   return A2;
 }
 
 proc create_slice(A: []) {
   A[2..3];
 }
+
+proc pass_original(A: [] ) {
+  A;
+}
+
+proc return_original(A: []) {
+  return A;
+}
+
 proc return_slice(A: []) {
   return A[2..3];
 }
 
-proc create_reindex(A: [3..6]) {
+proc create_reindex(A: []) {
+  A.reindex(3..6);
   if dummy then writeln(A.domain);
 }
-proc return_reindex(A: [3..6]) {
-  return A;
+proc return_reindex(A: []) {
+  return A.reindex(3..6);
 }
 
 use Memory;
@@ -39,7 +49,7 @@ proc main() {
   }
   var m2 = memoryUsed();
   writeln("\t", m2-m1, " bytes leaked");
-  if printMemStats then printMemTable();
+  if printMemStats then printMemAllocs();
 
   writeln("Calling return_literal():");
   m1 = memoryUsed();
@@ -48,7 +58,7 @@ proc main() {
   }
   m2 = memoryUsed();
   writeln("\t", m2-m1, " bytes leaked");
-  if printMemStats then printMemTable();
+  if printMemStats then printMemAllocs();
 
   writeln("Calling return_literal() with assignment:");
   m1 = memoryUsed();
@@ -57,7 +67,7 @@ proc main() {
   }
   m2 = memoryUsed();
   writeln("\t", m2-m1, " bytes leaked");
-  if printMemStats then printMemTable();
+  if printMemStats then printMemAllocs();
 
   const A = return_literal();
 
@@ -68,7 +78,7 @@ proc main() {
   }
   m2 = memoryUsed();
   writeln("\t", m2-m1, " bytes leaked");
-  if printMemStats then printMemTable();
+  if printMemStats then printMemAllocs();
 
   writeln("Calling return_alias():");
   m1 = memoryUsed();
@@ -77,7 +87,7 @@ proc main() {
   }
   m2 = memoryUsed();
   writeln("\t", m2-m1, " bytes leaked");
-  if printMemStats then printMemTable();
+  if printMemStats then printMemAllocs();
 
   writeln("Calling return_alias() with assignment:");
   m1 = memoryUsed();
@@ -86,7 +96,7 @@ proc main() {
   }
   m2 = memoryUsed();
   writeln("\t", m2-m1, " bytes leaked");
-  if printMemStats then printMemTable();
+  if printMemStats then printMemAllocs();
 
   writeln("Calling create_slice():");
   m1 = memoryUsed();
@@ -95,7 +105,7 @@ proc main() {
   }
   m2 = memoryUsed();
   writeln("\t", m2-m1, " bytes leaked");
-  if printMemStats then printMemTable();
+  if printMemStats then printMemAllocs();
 
   writeln("Calling return_slice():");
   m1 = memoryUsed();
@@ -104,7 +114,7 @@ proc main() {
   }
   m2 = memoryUsed();
   writeln("\t", m2-m1, " bytes leaked");
-  if printMemStats then printMemTable();
+  if printMemStats then printMemAllocs();
 
   writeln("Calling return_slice() with assignment:");
   m1 = memoryUsed();
@@ -113,7 +123,61 @@ proc main() {
   }
   m2 = memoryUsed();
   writeln("\t", m2-m1, " bytes leaked");
-  if printMemStats then printMemTable();
+  if printMemStats then printMemAllocs();
+
+  writeln("Calling pass_original() for slice:");
+  m1 = memoryUsed();
+  serial {
+    pass_original(A[2..3]);
+  }
+  m2 = memoryUsed();
+  writeln("\t", m2-m1, " bytes leaked");
+  if printMemStats then printMemAllocs();
+
+  writeln("Calling return_original() for slice:");
+  m1 = memoryUsed();
+  serial {
+    return_original(A[2..3]);
+  }
+  m2 = memoryUsed();
+  writeln("\t", m2-m1, " bytes leaked");
+  if printMemStats then printMemAllocs();
+
+  writeln("Calling return_original for slice with assignment:");
+  m1 = memoryUsed();
+  serial {
+    var A2 = return_original(A[2..3]);
+  }
+  m2 = memoryUsed();
+  writeln("\t", m2-m1, " bytes leaked");
+  if printMemStats then printMemAllocs();
+
+  writeln("Calling pass_original() with reindex:");
+  m1 = memoryUsed();
+  serial {
+    pass_original(A.reindex(3..6));
+  }
+  m2 = memoryUsed();
+  writeln("\t", m2-m1, " bytes leaked");
+  if printMemStats then printMemAllocs();
+
+  writeln("Calling return_original() with reindex:");
+  m1 = memoryUsed();
+  serial {
+    return_original(A.reindex(3..6));
+  }
+  m2 = memoryUsed();
+  writeln("\t", m2-m1, " bytes leaked");
+  if printMemStats then printMemAllocs();
+
+  writeln("Calling return_original() with reindex and assignment:");
+  m1 = memoryUsed();
+  serial {
+    var A2 = return_original(A.reindex(3..6));
+  }
+  m2 = memoryUsed();
+  writeln("\t", m2-m1, " bytes leaked");
+  if printMemStats then printMemAllocs();
 
   writeln("Calling create_reindex():");
   m1 = memoryUsed();
@@ -122,7 +186,7 @@ proc main() {
   }
   m2 = memoryUsed();
   writeln("\t", m2-m1, " bytes leaked");
-  if printMemStats then printMemTable();
+  if printMemStats then printMemAllocs();
 
   writeln("Calling return_reindex():");
   m1 = memoryUsed();
@@ -131,7 +195,7 @@ proc main() {
   }
   m2 = memoryUsed();
   writeln("\t", m2-m1, " bytes leaked");
-  if printMemStats then printMemTable();
+  if printMemStats then printMemAllocs();
 
   writeln("Calling return_reindex() with assignment:");
   m1 = memoryUsed();
@@ -140,6 +204,5 @@ proc main() {
   }
   m2 = memoryUsed();
   writeln("\t", m2-m1, " bytes leaked");
-  if printMemStats then printMemTable();
-
+  if printMemStats then printMemAllocs();
 }

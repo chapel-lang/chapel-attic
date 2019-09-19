@@ -13,29 +13,28 @@
 # loops to change.
 
 # for i in 1..2 do write(i); writeln();
-ic__F1_high = INT64(2);
-for (i = INT64(1); ((i <= _ic__F1_high)); i += INT64(1))
+_ic__F#_high_chpl = INT#(#);
+for (i_chpl = INT#(#); ((i_chpl <= _ic__F#_high_chpl)); i_chpl += INT#(#)) {
 
 # for i in 2..2+1 do write(i); writeln();
-_ic__F1_high2 = INT64(3);
-for (i2 = INT64(2); ((i2 <= _ic__F1_high2)); i2 += INT64(1))
+_ic__F#_high_chpl# = INT#(#);
+for (i_chpl# = INT#(#); ((i_chpl# <= _ic__F#_high_chpl#)); i_chpl# += INT#(#)) {
 
 # var lo=3, hi=4; for i in lo..hi do write(i); writeln();
-_ic__F1_high3 = INT64(4);
-for (i3 = INT64(3); ((i3 <= _ic__F1_high3)); i3 += INT64(1))
+_ic__F#_high_chpl# = INT#(#);
+for (i_chpl# = INT#(#); ((i_chpl# <= _ic__F#_high_chpl#)); i_chpl# += INT#(#)) {
 
 # for i in 4..5 by 2 do write(i); writeln();
-_ic__F1_high4 = INT64(5);
-for (i4 = INT64(4); ((i4 <= _ic__F1_high4)); i4 += INT64(2)) {
+_ic__F#_high_chpl# = INT#(#);
+for (i_chpl# = INT#(#); ((i_chpl# <= _ic__F#_high_chpl#)); i_chpl# += INT#(#)) {
+
+# for i in 2..#4 do write(i); writeln();
+_ic__F#_high_chpl# = ret_x#_chpl;
+for (i_chpl# = ret_x#_chpl; ((i_chpl# <= _ic__F#_high_chpl#)); i_chpl# += INT#(#)) {
 
 # for (i, j) in zip(1..10 by 3, 1..10 by -3) do write(i,j); writeln();
-_ic__F1_high5 = INT64(10);
-for (_ic__F3_i = INT64(1),_ic__F3_i2 = INT64(10); (T = (_ic__F3_i <= _ic__F1_high5),T); T2 = _ic__F3_i,T2 += INT64(3),_ic__F3_i = T2,T3 = _ic__F3_i2,T3 += INT64(-3),_ic__F3_i2 = T3)
+_ic__F#_i_chpl = INT#(#);
+for (_ic__F#_i_chpl = INT#(#),_ic__F#_i_chpl# = INT#(#); (tmp_chpl = (_ic__F#_i_chpl <= INT#(#)),tmp_chpl); tmp_chpl# = _ic__F#_i_chpl,tmp_chpl# += INT#(#),_ic__F#_i_chpl = tmp_chpl#,tmp_chpl# = _ic__F#_i_chpl#,tmp_chpl# += INT#(-#),_ic__F#_i_chpl# = tmp_chpl#) {
 
 # var r = 1..10 by 2; for (i, j) in zip(1..10 by 2, r) do write(i, j); writeln();
-_ic__F1_high6 = INT64(10);
-for (_ic__F3_i3 = INT64(1),_ic__value = T5; (T6 = (_ic__F3_i3 <= _ic__F1_high6),T6); T7 = _ic__F3_i3,T7 += INT64(2),_ic__F3_i3 = T7,T8 = _ic__value,T8 += ret19,_ic__value = T8)
-
-# coforall i in 5..5 do write(i); writeln();
-_ic__F1_high7 = INT64(5);
-for (i5 = INT64(5); ((i5 <= _ic__F1_high7)); i5 += INT64(1))
+for (_ic__F#_i_chpl# = INT#(#),_ic__value_chpl = ret_chpl; (tmp_chpl# = (_ic__F#_i_chpl# <= _ic__F#_high_chpl#),tmp_chpl#); tmp_chpl# = _ic__F#_i_chpl#,tmp_chpl# += INT#(#),_ic__F#_i_chpl# = tmp_chpl#,tmp_chpl# = _ic__value_chpl,tmp_chpl# += ret_chpl#,_ic__value_chpl = tmp_chpl#) {

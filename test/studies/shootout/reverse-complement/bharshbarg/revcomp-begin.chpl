@@ -1,32 +1,27 @@
-extern proc memcpy(a:[], b, len);
+/* The Computer Language Benchmarks Game
+   http://benchmarksgame.alioth.debian.org/
 
-// For consistency with the other shootouts, a value is passed to this
-// benchmark in the Computer Language Benchmarks Game test suite, even though
-// the input set provided is used to determine the problem size.  Store that
-// passed value here.
-config const n = 0;
+   contributed by Ben Harshbarger
+   derived from the GNU C version by Jeremy Zerfas
+*/
 
-proc string.toBytes() {
-   var b : [1..this.length] uint(8);
-   memcpy(b, this, this.length);
-   return b;
-}
-
-const pairs = "ATCGGCTAUAMKRYWWSSYRKMVBHDDHBVNN\n\n".toBytes();
 var table : [1..128] uint(8);
 
-proc main() {
-  param newLineChar = 0x0A;
-  param greaterThan = 0x3E;
-  var inFile = openfd(0); // stdin
+const newLine     = ascii("\n");
+const greaterThan = ascii(">");
+
+proc main(args: [] string) {
+  var inFile = openfd(0);
   const fileLen = inFile.length();
   var data : [1..fileLen] uint(8);
   var r = inFile.reader(locking=false);
 
+  const pairs = [c in "ATCGGCTAUAMKRYWWSSYRKMVBHDDHBVNN\n\n"] ascii(c);
+
   // initialize complement table
   for i in 1..pairs.size by 2 {
     table[pairs[i]] = pairs[i+1];      // uppercase
-    if pairs[i] != newLineChar then
+    if pairs[i] != newLine then
       table[pairs[i] + 32] = pairs[i+1]; // lowercase
   }
 
@@ -60,28 +55,22 @@ proc main() {
   binout.write(data);
 }
 
-proc process(ref data : [], in from : int, end : int) {
+proc process(data : [], in front : int, in back : int) {
 
-  // Skip the header information
-  while data[from] != 0xa do from += 1;
-  from += 1;
+  // Advance to the next line
+  while data[front] != newLine do front += 1;
+  front += 1;
 
-  const len = end - from;
-  const off = 60 - (len % 61);
+  // Walk backward past any newlines
+  while data[back] == newLine do back -= 1;
 
-  if off > 0 {
-    var m = from + 60 - off;
-    while m < end {
-      for i in 0..off-1 by -1 do data[m+1+i] = data[m+i];
-      data[m+1] = 0xa;
-      m += 61;
-    }
-  }
+  while front <= back {
+    const temp  = table[data[front]];
+    data[front] = table[data[back]];
+    data[back]  = temp;
 
-  const middle = (end-from)/2;
-  for i in 0 .. middle {
-    const c = table[data[from+i]];
-    data[from+i] = table[data[end-i]];
-    data[end-i] = c;
+    // Advance to next character, skip any newlines
+    do { front += 1; } while data[front] == newLine;
+    do { back  -= 1; } while data[back]  == newLine;
   }
 }

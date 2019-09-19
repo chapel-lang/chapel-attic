@@ -9,14 +9,14 @@ proc dgemm(
     p : int,    // number of rows in A
     q : int,    // number of cols in A, number of rows in B
     r : int,    // number of cols in B
-    A : [1..p, 1..q] ?t,
-    B : [1..q, 1..r] t,
-    C : [1..p, 1..r] t)
+    A : [?AD] ?t,
+    B : [?BD] t,
+    C : [?CD] t)
 {
     // Calculate (i,j) using a dot product of a row of A and a column of B.
-    for i in 1..p {
-        for j in 1..r {
-            for k in 1..q {
+    for i in AD.dim(1) {
+        for j in CD.dim(2) {
+            for k in AD.dim(2) {
                 C[i,j] -= A[i, k] * B[k, j];
             }
         }
@@ -435,6 +435,11 @@ proc test_updateBlockRow(rprt = true) : bool {
     }
 }
 
+proc truncateZero(x: real) {
+  const eps = 1e-8;
+  return if abs(x) < eps then 0.0 else x;
+}
+
 proc test_LUFactorizeNorms(
     n    : int,
     A    : [1..n, 1..n] real,
@@ -468,9 +473,9 @@ proc test_LUFactorizeNorms(
     var resid2 = axmbNorm / (eps * a1norm * x1Norm);
     var resid3 = axmbNorm / (eps * aInfNorm * xInfNorm);
 
-    writeln("Residual 1: ", resid1);
-    writeln("Residual 2: ", resid2);
-    writeln("Residual 3: ", resid3);
+    writeln("Residual 1: ", truncateZero(resid1));
+    writeln("Residual 2: ", truncateZero(resid2));
+    writeln("Residual 3: ", truncateZero(resid3));
 }
 
 proc test_LUFactorize(rprt = true) : bool {
@@ -548,11 +553,11 @@ proc main() {
 
     var n = 10;
     var data : [{1..n, 1..n+1}] real = [(i,j) in {1..n, 1..n+1}](i*50)+(j*4)+i/j;
-    var A    : [1..n, 1..n] => data[1..n, 1..n];
-    var b    : [1..n] => data[1..n, n+1];
+    ref A    = data[1..n, 1..n];
+    ref b    = data[1..n, n+1];
     var dataHat : [1..n, 1..n+1] real = data;
-    var AHat : [1..n, 1..n] => dataHat[1..n, 1..n];
-    var bHat : [1..n] => dataHat[1..n, n+1];
+    ref AHat = dataHat[1..n, 1..n];
+    ref bHat = dataHat[1..n, n+1];
     var piv  : [1..n] int;
 
     piv = 1..10;
@@ -568,6 +573,7 @@ proc main() {
     }
 
     writeln("Result is: ");
+    dataHat = truncateZero(dataHat);
     writeln(dataHat);
 
     test_LUFactorizeNorms(n, A, b, AHat, bHat, piv);
@@ -579,6 +585,7 @@ proc main() {
     LUFactorize(n, dataHat, piv);
     writeln();
     writeln("Result is: ");
+    dataHat = truncateZero(dataHat);
     writeln(dataHat);
 }
 

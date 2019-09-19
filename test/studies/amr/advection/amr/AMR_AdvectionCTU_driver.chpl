@@ -40,7 +40,7 @@ class GradientFlagger: Flagger {
     
     for grid in level_solution.level.grids {
 
-      const value => current_data(grid).value;
+      const ref value = current_data(grid).value;
       
       for cell in grid.cells {
         
@@ -175,7 +175,7 @@ proc main {
   hierarchy.clawOutput(frame_number);
   write("done.\n");
   
-  writeln("Current time of AMRHierarchy: " + format("%8.4E",hierarchy.time));
+  writef("Current time of AMRHierarchy: %8.4Er\n", hierarchy.time);
 
   
   //---- Subsequent outputs ----
@@ -195,7 +195,7 @@ proc main {
 
   //<=== Generate output <===
   
-  
+  delete bc;
+  delete hierarchy;
+  delete flagger;
 }
-
-

@@ -1,0 +1,2 @@
+owned-comp.chpl:6: In function 'matches':
+owned-comp.chpl:7: error: unresolved call '==(C, Owned(C))'

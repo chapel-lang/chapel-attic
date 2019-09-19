@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2014 Cray Inc.
+ * Copyright 2004-2018 Cray Inc.
  * Other additional copyright holders may be indicated within.
  *
  * The entirety of this work is licensed under the Apache License,
@@ -22,6 +22,12 @@
 
 #include "LoopStmt.h"
 
+// A ForLoop represents the for-statement language construct as described in
+// the specification (see "The For Loop" section in the chapter on "Statements").
+// The buildForLoop() method transforms the elements of the for-statement
+// parser production into its internal representation.
+// ForLoop objects are also used to represent coforall-statements and zippered
+// iteration.
 class ForLoop : public LoopStmt
 {
   //
@@ -34,13 +40,32 @@ public:
                                        bool       coforall,
                                        bool       zippered);
 
+  static BlockStmt*      buildLoweredForallLoop (Expr*      indices,
+                                                 Expr*      iteratorExpr,
+                                                 BlockStmt* body,
+                                                 bool       coforall,
+                                                 bool       zippered);
+
+
+private:
+  static BlockStmt*      doBuildForLoop (Expr*      indices,
+                                         Expr*      iteratorExpr,
+                                         BlockStmt* body,
+                                         bool       coforall,
+                                         bool       zippered,
+                                         bool       isLoweredForall);
+
+
+
   //
   // Instance Interface
   //
 public:
                          ForLoop(VarSymbol* index,
                                  VarSymbol* iterator,
-                                 BlockStmt* initBody);
+                                 BlockStmt* initBody,
+                                 bool       zippered,
+                                 bool       isLoweredForall);
   virtual               ~ForLoop();
 
   virtual ForLoop*       copy(SymbolMap* map      = NULL,
@@ -50,10 +75,19 @@ public:
   virtual void           verify();
   virtual void           accept(AstVisitor* visitor);
 
+  // Interface to Expr
+  virtual void           replaceChild(Expr* oldAst, Expr* newAst);
   virtual Expr*          getFirstExpr();
   virtual Expr*          getNextExpr(Expr* expr);
 
   virtual bool           isForLoop()                                  const;
+  virtual bool           isCoforallLoop()                             const;
+  // Forall loops start out as ForallStmt but at some point are
+  // lowered into a sequence for For loops. This function indicates
+  // if this ForLoop represents a lowered Forall.
+  // This function should return `true` only for the loop implementing
+  // standalone iteration or the loop implementing leader iteration.
+  virtual bool           isLoweredForallLoop()                        const;
 
   virtual bool           deadBlockCleanup();
 
@@ -62,6 +96,7 @@ public:
 
   SymExpr*               indexGet()                                   const;
   SymExpr*               iteratorGet()                                const;
+  bool                   zipperedGet()                                const;
 
   virtual CallExpr*      blockInfoGet()                               const;
   virtual CallExpr*      blockInfoSet(CallExpr* expr);
@@ -71,6 +106,8 @@ private:
 
   SymExpr*               mIndex;
   SymExpr*               mIterator;
+  bool                   mZippered;
+  bool                   mLoweredForall;
 };
 
 #endif

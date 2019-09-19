@@ -1,16 +1,25 @@
 #!/usr/bin/env python
-import sys, os
+import os
+import sys
 
-import chpl_platform
+chplenv_dir = os.path.dirname(__file__)
+sys.path.insert(0, os.path.abspath(chplenv_dir))
+
+import chpl_platform, overrides
+from chpl_home_utils import using_chapel_module
 from utils import memoize
+
 
 @memoize
 def get():
-    comm_val = os.environ.get('CHPL_COMM')
+    comm_val = overrides.get('CHPL_COMM')
     if not comm_val:
         platform_val = chpl_platform.get('target')
-        # automatically uses gasnet when on a cray-x* or cray-cs machine
-        if platform_val.startswith('cray-'):
+        # Use ugni on cray-x* series
+        if platform_val.startswith('cray-x'):
+            comm_val = 'ugni'
+        # Use gasnet on cray-cs
+        elif platform_val.startswith('cray-'):
             comm_val = 'gasnet'
         else:
             comm_val = 'none'

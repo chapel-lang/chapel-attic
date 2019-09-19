@@ -181,7 +181,7 @@ Ranges have the following additional properties.
 
 \index{ranges!iterable}
 \item The range is \emph{iterable}, that is, it is legal to iterate over it,
-  if is has the first index.
+  if it has the first index.
 
 \end{itemize}
 
@@ -442,6 +442,23 @@ produces an empty range, matching the default value for a
 \label{Ranges_Common_Operations}
 \index{ranges!operations}
 
+All operations on a range return a new range rather than modifying the existing one.  This
+supports a coding style in which all ranges are \emph{immutable} (i.e. declared
+as \chpl{const}).  
+
+\begin{rationale}
+
+The intention is to provide ranges as immutable objects.
+
+Immutable objects may be cached without
+creating coherence concerns.  They are also inherently thread-safe.  In terms of
+implementation, immutable objects are created in a consistent state and stay that way:
+Outside of constructors, internal consistency checks can be dispensed with.
+
+These are the same arguments as were used to justify making strings immutable in Java and C\#.
+
+\end{rationale}
+
 %REVIEW: vass: this should really be implicit conversion
 % and apply uniformly, like e.g. numeric implicit conversions.
 %If needed, define also explicit range conversions.
@@ -458,8 +475,8 @@ Range assignment is legal when:
 \item An implicit conversion is allowed from \chpl{idxType} of the source range
        to \chpl{idxType} of the destination range type,
 \item the two range types have the same \chpl{boundedType}, and
-\item either the destination range is stridable or the source range's
-      stride is 1.
+\item either the destination range is stridable or the source range
+      is not stridable.
 \end{itemize}
 
 \subsection{Range Comparisons}
@@ -488,6 +505,13 @@ only if the range is iterable. In this case the loop iterates over the
 members of the range's represented sequence, in the order defined by
 the sequence. If the range is empty, no iterations are executed.
 
+\begin{craychapel}
+An attempt to iterate over a range causes an error if adding stride to
+the range's last index overflows its index type, i.e. if the sum is
+greater than the index type's maximum value, or smaller than its
+minimum value.
+\end{craychapel}
+
 \subsubsection{Iterating over Unbounded Ranges in Zippered Iterations}
 \label{Iterating_over_Unbounded_Ranges_in_Zippered_Iterations}
 \index{ranges!iteration!zippered}
@@ -511,6 +535,45 @@ produces the output
 (1, 3); (2, 4); (3, 5); (4, 6); (5, 7); 
 \end{chapelprintoutput}
 \end{chapelexample}
+
+\subsection{Range Promotion of Scalar Functions}
+\label{Range_Promotion_of_Scalar_Functions}
+\index{ranges!promotion}
+\index{promotion!range}
+
+Range values may be passed to a scalar function argument whose type
+matches the range's index type.  This results in a promotion of the
+scalar function as described in~\rsec{Promotion}.
+
+\begin{chapelexample}{rangePromotion.chpl}
+Given a function \chpl{addOne(x:int)} that accepts \chpl{int} values and
+a range \chpl{1..10}, the function \chpl{addOne()} can be called with
+\chpl{1..10} as its actual argument which will result in the function
+being invoked for each value in the range.
+
+\begin{chapel}
+proc addOne(x:int) {
+  return x + 1;
+}
+var A:[1..10] int;
+A = addOne(1..10);
+\end{chapel}
+\begin{chapelpost}
+writeln(A);
+\end{chapelpost}
+\begin{chapeloutput}
+2 3 4 5 6 7 8 9 10 11
+\end{chapeloutput}
+
+\end{chapelexample}
+
+The last statement is equivalent to:
+\begin{chapel}
+forall (a,i) in zip(A,1..10) do
+  a = addOne(i);
+\end{chapel}
+
+
 
 %REVIEW: perhaps define implicit/explicit conversions as well
 % under "Common Operations"?
@@ -539,7 +602,7 @@ range-expression:
 \subsection{By Operator}
 \label{By_Operator_For_Ranges}
 \index{ranges!strided}
-\index{by (range)@\chpl{by} (range)}
+\index{by@\chpl{by}!on ranges}
 \index{operators!by (range)@\chpl{by} (range)}
 \index{ranges!by operator@\chpl{by} operator}
 
@@ -639,10 +702,11 @@ R into the expression.
 
 
 \subsection{Align Operator}
-\label{Align_Operator}
+\label{Align_Operator_For_Ranges}
 \index{ranges!align}
-\index{align@\chpl{align}}
-\index{operator!align@\chpl{align}}
+\index{align@\chpl{align}!on ranges}
+\index{operators!align (range)@\chpl{align} (range)}
+\index{ranges!align operator@\chpl{align} operator}
 
 The \chpl{align} operator can be applied to any range, and creates a new range
 with the given alignment.  
@@ -653,7 +717,8 @@ aligned-range-expression:
   range-expression `align' expression
 \end{syntax}
 \noindent The type of the resulting range expression is the same as that of the
-range appearing as the left operand.  An implicit conversion from
+range appearing as the left operand, but with the \chpl{stridable} parameter
+set to \chpl{true}.  An implicit conversion from
 the type of the right operand to the index type of the operand range
 must be allowed.
 The resulting range has the
@@ -735,7 +800,7 @@ away.  Specifically:
 \item If the count times the stride is positive, the low bound is preserved
 and the high bound is adjusted to be one less than the low bound plus that
 product.
-\item Iff the count times the stride is negative, the high bound is preserved
+\item If the count times the stride is negative, the high bound is preserved
 and the low bound is adjusted to be one greater than the high bound plus that
 product.
 \end{itemize}
@@ -868,11 +933,12 @@ operation would be completely ambiguous.  The only reasonable action for the
 implementation is to generate an error.
 \end{rationale}
 
-If the resulting represented sequence cannot be expressed as a range of the
-expected type, an error is generated. This can happen, for example, when
-the operands represent all odd and all even numbers, or when the first
-operand is an unbounded range with unsigned \chpl{idxType} and the second
-operand represents only negative numbers.
+If the resulting sequence cannot be expressed as a range of the
+original type, the slice expression evaluates to the empty
+range \chpl{1..0}. This can happen, for example, when the operands
+represent all odd and all even numbers, or when the first operand is
+an unbounded range with unsigned \chpl{idxType} and the second operand
+represents only negative numbers.
 
 \begin{chapelexample}{rangeSlicing.chpl}
 In the following example, \chpl{r} represents the integers from 1 to
@@ -952,7 +1018,7 @@ proc $range$.aligned : bool
 \end{protohead}
 %REVIEW: better name?
 \begin{protobody}
-Reports whether the range's alignment is \emph{not} ambiguous.
+Reports whether the range's alignment is unambiguous.
 \end{protobody}
 
 \index{ranges!alignedHigh@\chpl{alignedHigh}}

@@ -29,6 +29,15 @@ class DistribArray {
     }
   }
 
+  proc deinit() {
+    if isLocalize then return;
+    for loc in LocaleSpace {
+      on Locales(loc) {
+        delete internalArr(loc);
+      }
+    }
+  }
+
   proc localize() {
     var localArrays: [LocaleSpace] DistribArray(arrType);
     for loc in LocaleSpace {
@@ -64,7 +73,7 @@ class DistribArray {
     }
   }
 
-  proc writeThis(w: Writer) {
+  proc writeThis(w) {
     on Locales(0) {
       for i in 0..arrSize-1 {
         w.writeln(element(i));
@@ -90,8 +99,10 @@ class DistribArray {
 
 proc main {
   var delta: sync real;
-  var localAs => (new DistribArray(real, size)).localize();
-  var localBs => (new DistribArray(real, size)).localize();
+  var distA = new DistribArray(real, size);
+  var distB = new DistribArray(real, size);
+  ref localAs = distA.localize();
+  ref localBs = distB.localize();
   localAs(0).element(0) = 1.0;
 
   do {
@@ -120,5 +131,9 @@ proc main {
   } while (delta > epsilon);
 
   write(localAs(0));
+
+  delete distA, distB;
+  for a in localAs do delete a;
+  for b in localBs do delete b;
 }
 

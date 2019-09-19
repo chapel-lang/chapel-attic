@@ -14,7 +14,7 @@ config const numTrials = 10,
              epsilon = 0.0;
 
 config const useRandomSeed = true,
-             seed = if useRandomSeed then SeedGenerator.currentTime else 314159265;
+             seed = if useRandomSeed then SeedGenerator.oddCurrentTime else 314159265;
 
 config const printParams = true,
              printArrays = false,
@@ -70,6 +70,9 @@ proc main() {
 
   const validAnswer = verifyResults(A, B, C);
   printResults(validAnswer, execTime);
+  delete A, B, C;
+  delete ProblemSpace;
+  delete ProblemDist;
 }
 
 
@@ -85,7 +88,7 @@ proc initVectors(B, C) {
   // TODO: should write a fillRandom() implementation that does this
   coforall loc in B.dom.dist.targetLocDom {
     on B.dom.dist.targetLocs(loc) {
-      var randlist = new RandomStream(seed);
+      var randlist = new NPBRandomStream(eltType=real, seed=seed);
       // TODO: Need to clean this up to use more normal method names
       randlist.skipToNth(B.locArr(loc).locDom.low);
       randlist.fillRandom(B.locArr(loc).myElems);

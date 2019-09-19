@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2014 Cray Inc.
+ * Copyright 2004-2018 Cray Inc.
  * Other additional copyright holders may be indicated within.
  * 
  * The entirety of this work is licensed under the Apache License,
@@ -17,19 +17,43 @@
  * limitations under the License.
  */
 
-/* system call wrapping */
+/*
+   Support for low-level programming and system calls.
+
+   This module is for low-level programming. It provides Chapel versions of
+   many POSIX/Linux C library or system calls. For documentation on these
+   system calls and constants, please see your system's manual pages.
+   
+   Each of the functions in this file provides the same functionality
+   as the corresponding function without the ``sys_`` prefix, except that
+   the ``sys_`` versions all return an error code (of type :type:`~SysBasic.err_t`)
+   and return any other values (such as how much was read) through an out
+   argument.
+
+   For example, you can find more about the ``mmap`` call with:
+   
+   .. code-block:: sh
+
+     man mmap
+     
+   The call available here, :proc:`sys_mmap`, always returns an error
+   code (or 0 for no error). The pointer value normally returned by ``mmap``
+   will be returned through the final ``ret_out`` argument.
+
+ */
 module Sys {
-  /* BASIC TYPES */
+  // get basic types from SysBasic
   use SysBasic;
 
  
-  /* CONSTANTS */
+  // CONSTANTS
 
   // note that if a constant is not defined in the C environment,
   // the compile will fail when it is used (and not here!)
   // That means that we can just list all of the constants we know of,
   // for different OSs, and if one is missing errors will occur in
   // C code generation.
+  // mferguson -- TODO -- is that still true? Even for LLVM?
 
 
   // basic file flags
@@ -191,7 +215,8 @@ module Sys {
   extern record sys_sockaddr_t {
     var addr:sys_sockaddr_storage_t;
     var len:socklen_t;
-    proc sys_sockaddr_t() {
+    proc init() {
+      this.initDone();
       sys_init_sys_sockaddr_t(this);
     }
   }
@@ -217,7 +242,6 @@ module Sys {
   extern proc sys_init_sys_sockaddr(ref addr:sys_sockaddr_t);
   extern proc sys_strerror(error:err_t, ref string_out:c_string):err_t;
 
-  extern proc sys_readlink(path:c_string, ref string_out:c_string):err_t;
   extern proc sys_readlink(path:c_string, ref string_out:c_string):err_t;
   extern proc sys_getenv(name:c_string, ref string_out:c_string):c_int;
   extern proc sys_open(pathname:c_string, flags:c_int, mode:mode_t, ref fd_out:fd_t):err_t;

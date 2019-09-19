@@ -1,13 +1,7 @@
 use IO;
-use AdvancedIters;
+use Sort;
 
-extern proc memcpy(x : [], b, len:int);
-
-// For consistency with the other shootouts, a value is passed to this
-// benchmark in the Computer Language Benchmarks Game test suite, even though
-// the input set provided is used to determine the problem size.  Store that
-// passed value here.
-config const n = 0;
+extern proc memcpy(x : [], b:c_string, len:int);
 
 config const tableSize = 1 << 16;
 config const lineSize = 61;
@@ -65,7 +59,7 @@ class Table {
     }
   }
 
-  proc ~Table() {
+  proc deinit() {
     for n in table do {
       var cur = n;
       while cur != nil {
@@ -99,13 +93,12 @@ proc decode(data : uint, size : int) {
 proc calculate(data : [] uint(8), size : int) {
   var freqs = new Table();
 
-  const ntasks = defaultNumTasks(0);
   var lock : sync bool;
   lock = true;
   const sizeRange = 0..size-1;
-  coforall tid in 1..ntasks {
+  coforall tid in 1..here.maxTaskPar {
     var curArr = new Table();
-    for i in tid .. data.size-size by ntasks {
+    for i in tid .. data.size-size by here.maxTaskPar {
       curArr[hash(data, i, sizeRange)] += 1;
     }
     lock; // acquire lock
@@ -125,7 +118,7 @@ proc write_frequencies(data : [] uint(8), size : int) {
   var arr : [1..freqs.size] (int, uint);
   for (a, (k,v)) in zip(arr, freqs) do
     a = (v,k);
-  QuickSort(arr, reverse=true);
+  quickSort(arr, comparator=reverseComparator);
 
   for (f, s) in arr do
     writef("%s %.3dr\n", decode(s, size), (100.0 * f) / sum);
@@ -139,9 +132,9 @@ proc write_count(data : [] uint(8), str : string) {
   delete freqs;
 }
 
-proc string.toBytes() ref {
+proc string.toBytes() {
    var b : [1..this.length] uint(8);
-   memcpy(b, this, this.length);
+   memcpy(b, this.c_str(), this.length);
    return b;
 }
 
@@ -149,7 +142,7 @@ inline proc startsWithThree(data : []) {
   return data[1] == 0x3E && data[2] == 0x54 && data[3] == 0x48;
 }
 
-proc main() {
+proc main(args: [] string) {
   // Open stdin and a binary reader channel
   const inFile = openfd(0);
   const fileLen = inFile.length();

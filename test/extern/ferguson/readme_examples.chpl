@@ -1,6 +1,6 @@
 var i:c_int;
 var i_ptr = c_ptrTo(i); // now i_ptr has type c_ptr(c_int) == int* in C
-writeln(typeToString(i_ptr.type));
+writeln(i_ptr.type:string);
 
 var cArray = c_calloc(c_int, 10);
 assert(cArray != nil);
@@ -25,9 +25,7 @@ byRef(x); // ref argument intent allows the variable to be passed directly
 byPtr(c_ptrTo(x)); // c_ptr argument must be constructed explicitly
 
 // both of these correspond to void fn(const char* x)
-extern proc byString(x:string);
 extern proc byCString(x:c_string);
 
-byString("Hello");
 byCString("Hello".c_str());
 

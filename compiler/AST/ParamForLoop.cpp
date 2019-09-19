@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2014 Cray Inc.
+ * Copyright 2004-2018 Cray Inc.
  * Other additional copyright holders may be indicated within.
  *
  * The entirety of this work is licensed under the Apache License,
@@ -22,6 +22,8 @@
 #include "AstVisitor.h"
 #include "build.h"
 #include "resolution.h"
+#include "resolveFunction.h"
+#include "stringutil.h"
 
 /************************************ | *************************************
 *                                                                           *
@@ -38,6 +40,7 @@ BlockStmt* ParamForLoop::buildParamForLoop(VarSymbol* indexVar,
   VarSymbol*   strideVar  = newParamVar();
 
   LabelSymbol* breakLabel = new LabelSymbol("_breakLabel");
+  LabelSymbol* continueLabel  = new LabelSymbol("_unused_continueLabel");
 
   CallExpr*    call       = toCallExpr(range);
   Expr*        low        = NULL;
@@ -46,7 +49,7 @@ BlockStmt* ParamForLoop::buildParamForLoop(VarSymbol* indexVar,
 
   BlockStmt*   outer      = new BlockStmt();
 
-  if (call && call->isNamed("by"))
+  if (call && call->isNamed("chpl_by"))
   {
     stride = call->get(2)->remove();
     call   = toCallExpr(call->get(1));
@@ -81,9 +84,12 @@ BlockStmt* ParamForLoop::buildParamForLoop(VarSymbol* indexVar,
                                        lowVar,
                                        highVar,
                                        strideVar,
+                                       continueLabel,
                                        breakLabel,
                                        stmts));
 
+  // this continueLabel will be replaced by a per-iteration one.
+  outer->insertAtTail(new DefExpr(continueLabel));
   outer->insertAtTail(new DefExpr(breakLabel));
 
   return buildChapelStmt(outer);
@@ -113,9 +119,11 @@ ParamForLoop::ParamForLoop(VarSymbol*   indexVar,
                            VarSymbol*   lowVar,
                            VarSymbol*   highVar,
                            VarSymbol*   strideVar,
+                           LabelSymbol* continueLabel,
                            LabelSymbol* breakLabel,
                            BlockStmt*   initBody) : LoopStmt(initBody)
 {
+  continueLabelSet(continueLabel);
   breakLabelSet(breakLabel);
 
   mResolveInfo = new CallExpr(PRIM_BLOCK_PARAM_LOOP,
@@ -252,9 +260,6 @@ void ParamForLoop::accept(AstVisitor* visitor)
 {
   if (visitor->enterParamForLoop(this) == true)
   {
-    for_alist(next_ast, body)
-      next_ast->accept(visitor);
-
     if (indexExprGet() != 0)
       indexExprGet()->accept(visitor);
 
@@ -267,8 +272,11 @@ void ParamForLoop::accept(AstVisitor* visitor)
     if (strideExprGet() != 0)
       strideExprGet()->accept(visitor);
 
-    if (modUses)
-      modUses->accept(visitor);
+    for_alist(next_ast, body)
+      next_ast->accept(visitor);
+
+    if (useList)
+      useList->accept(visitor);
 
     if (byrefVars)
       byrefVars->accept(visitor);
@@ -281,17 +289,20 @@ void ParamForLoop::verify()
 {
   BlockStmt::verify();
 
-  if (mResolveInfo              == 0)
+  if (mResolveInfo              == NULL)
     INT_FATAL(this, "ParamForLoop::verify. mResolveInfo is NULL");
 
-  if (BlockStmt::blockInfoGet() != 0)
+  if (BlockStmt::blockInfoGet() != NULL)
     INT_FATAL(this, "ParamForLoop::verify. blockInfo is not NULL");
 
-  if (modUses                   != 0)
-    INT_FATAL(this, "ParamForLoop::verify. modUses   is not NULL");
+  if (useList                   != NULL)
+    INT_FATAL(this, "ParamForLoop::verify. useList   is not NULL");
 
-  if (byrefVars                 != 0)
+  if (byrefVars                 != NULL)
     INT_FATAL(this, "ParamForLoop::verify. byrefVars is not NULL");
+
+  if (forallIntents             != NULL)
+    INT_FATAL(this, "ParamForLoop::verify. forallIntents is not NULL");
 }
 
 GenRet ParamForLoop::codegen()
@@ -318,14 +329,46 @@ Expr* ParamForLoop::getFirstExpr()
 {
   INT_ASSERT(mResolveInfo != 0);
 
-  return indexExprGet();
+  return mResolveInfo->getFirstExpr();
 }
 
 Expr* ParamForLoop::getNextExpr(Expr* expr)
 {
-  INT_ASSERT(expr == mResolveInfo);
+  Expr* retval = this;
 
-  return (body.head != 0) ? body.head->getFirstExpr() : this;
+  if (expr == mResolveInfo && body.head != NULL)
+    retval = body.head->getFirstExpr();
+
+  return retval;
+}
+
+
+/* This function copies the body of a param for loop while
+   adjusting it slightly - to stamp out each iteration.
+
+   * Inserts the body before the expression beforeHere
+   * i should be a loop variable index (used to label iterations)
+   * Assumes that map already contains the mapping redefining
+     the index variable.
+   * continueSym is the symbol for the loop's continue label.
+     This function will replace that with a new continue label
+     local to this iteration.
+*/
+static void copyBodyHelper(Expr* beforeHere, int64_t i,
+                           SymbolMap* map, ParamForLoop* loop,
+                           Symbol* continueSym)
+{
+  // Replace the continue label with a per-iteration label
+  // that is at the end of that iteration.
+  LabelSymbol* continueLabel = new
+    LabelSymbol(astr("_continueLabel", istr(i)));
+  Expr* defContinueLabel = new DefExpr(continueLabel);
+
+  beforeHere->insertBefore(defContinueLabel);
+
+  map->put(continueSym, continueLabel);
+
+  defContinueLabel->insertBefore(loop->copyBody(map));
 }
 
 CallExpr* ParamForLoop::foldForResolve()
@@ -338,9 +381,9 @@ CallExpr* ParamForLoop::foldForResolve()
   if (!lse             || !hse             || !sse)
     USR_FATAL(this, "param for loop must be defined over a bounded param range");
 
-  VarSymbol* lvar      = toVarSymbol(lse->var);
-  VarSymbol* hvar      = toVarSymbol(hse->var);
-  VarSymbol* svar      = toVarSymbol(sse->var);
+  VarSymbol* lvar      = toVarSymbol(lse->symbol());
+  VarSymbol* hvar      = toVarSymbol(hse->symbol());
+  VarSymbol* svar      = toVarSymbol(sse->symbol());
 
   CallExpr*  noop      = new CallExpr(PRIM_NOOP);
 
@@ -350,7 +393,8 @@ CallExpr* ParamForLoop::foldForResolve()
   if (!lvar->immediate || !hvar->immediate || !svar->immediate)
     USR_FATAL(this, "param for loop must be defined over a bounded param range");
 
-  Symbol*      idxSym  = idxExpr->var;
+  Symbol*      idxSym  = idxExpr->symbol();
+  Symbol*      continueSym = continueLabelGet();
   Type*        idxType = indexType();
   IF1_int_type idxSize = (get_width(idxType) == 32) ? INT_SIZE_32 : INT_SIZE_64;
 
@@ -359,9 +403,9 @@ CallExpr* ParamForLoop::foldForResolve()
 
   if (is_int_type(idxType))
   {
-    int64_t low    = lvar->immediate->int_value();
-    int64_t high   = hvar->immediate->int_value();
-    int64_t stride = svar->immediate->int_value();
+    int64_t low    = lvar->immediate->to_int();
+    int64_t high   = hvar->immediate->to_int();
+    int64_t stride = svar->immediate->to_int();
 
     if (stride <= 0)
     {
@@ -370,8 +414,7 @@ CallExpr* ParamForLoop::foldForResolve()
         SymbolMap map;
 
         map.put(idxSym, new_IntSymbol(i, idxSize));
-
-        noop->insertBefore(copyBody(&map));
+        copyBodyHelper(noop, i, &map, this, continueSym);
       }
     }
     else
@@ -382,7 +425,7 @@ CallExpr* ParamForLoop::foldForResolve()
 
         map.put(idxSym, new_IntSymbol(i, idxSize));
 
-        noop->insertBefore(copyBody(&map));
+        copyBodyHelper(noop, i, &map, this, continueSym);
       }
     }
   }
@@ -390,9 +433,9 @@ CallExpr* ParamForLoop::foldForResolve()
   {
     INT_ASSERT(is_uint_type(idxType) || is_bool_type(idxType));
 
-    uint64_t low    = lvar->immediate->uint_value();
-    uint64_t high   = hvar->immediate->uint_value();
-    int64_t  stride = svar->immediate->int_value();
+    uint64_t low    = lvar->immediate->to_uint();
+    uint64_t high   = hvar->immediate->to_uint();
+    int64_t  stride = svar->immediate->to_int();
 
     if (stride <= 0)
     {
@@ -402,7 +445,7 @@ CallExpr* ParamForLoop::foldForResolve()
 
         map.put(idxSym, new_UIntSymbol(i, idxSize));
 
-        noop->insertBefore(copyBody(&map));
+        copyBodyHelper(noop, i, &map, this, continueSym);
       }
     }
     else
@@ -413,7 +456,7 @@ CallExpr* ParamForLoop::foldForResolve()
 
         map.put(idxSym, new_UIntSymbol(i, idxSize));
 
-        noop->insertBefore(copyBody(&map));
+        copyBodyHelper(noop, i, &map, this, continueSym);
       }
     }
   }
@@ -438,26 +481,29 @@ Type* ParamForLoop::indexType()
   SymExpr*  lse     = lowExprGet();
   SymExpr*  hse     = highExprGet();
   CallExpr* range    = new CallExpr("chpl_build_bounded_range",
-                                    lse->copy(), hse->copy());
+                                    lse->copy(),
+                                    hse->copy());
   Type*     idxType = 0;
 
   insertBefore(range);
 
   resolveCall(range);
 
-  if (FnSymbol* sym = range->isResolved())
+  if (FnSymbol* sym = range->resolvedFunction())
   {
-    resolveFormals(sym);
+    resolveSignature(sym);
 
     DefExpr* formal = toDefExpr(sym->formals.get(1));
 
-    if (toArgSymbol(formal->sym)->typeExpr)
+    if (toArgSymbol(formal->sym)->typeExpr != NULL) {
       idxType = toArgSymbol(formal->sym)->typeExpr->body.tail->typeInfo();
-    else
+    } else {
       idxType = formal->sym->type;
+    }
 
     range->remove();
   }
+
   else
   {
     INT_FATAL("unresolved range");

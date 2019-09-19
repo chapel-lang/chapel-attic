@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2014 Cray Inc.
+ * Copyright 2004-2018 Cray Inc.
  * Other additional copyright holders may be indicated within.
  * 
  * The entirety of this work is licensed under the Apache License,
@@ -24,6 +24,10 @@
 
 #include "chpl-threads.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 
 //
 // Because we use the task tracking table for fifo tasking, this gives
@@ -46,6 +50,24 @@ void chpl_task_stdModulesInitialized(void);
 //
 typedef uint64_t chpl_taskID_t;
 #define chpl_nullTaskID 0
+#ifndef CHPL_TASK_ID_STRING_MAX_LEN
+#define CHPL_TASK_ID_STRING_MAX_LEN 21
+#endif
+
+//
+// Task layer private area argument bundle header
+//
+typedef struct {
+  chpl_bool is_executeOn;
+  int lineno;
+  int filename;
+  c_sublocid_t requestedSubloc;  
+  chpl_fn_int_t requested_fid;
+  chpl_fn_p requested_fn;
+  chpl_taskID_t id;
+  chpl_task_ChapelData_t state;
+} chpl_task_bundle_t;
+
 
 //
 // Condition variables
@@ -102,5 +124,20 @@ static inline
 c_sublocid_t chpl_task_getRequestedSubloc(void) {
   return c_sublocid_any;
 }
+
+
+#ifdef CHPL_TASK_SUPPORTS_REMOTE_CACHE_IMPL_DECL
+#error "CHPL_TASK_SUPPORTS_REMOTE_CACHE_IMPL_DECL is already defined!"
+#else
+#define CHPL_TASK_SUPPORTS_REMOTE_CACHE_IMPL_DECL 1
+#endif
+static inline
+int chpl_task_supportsRemoteCache(void) {
+  return 1;
+}
+
+#ifdef __cplusplus
+} // end extern "C"
+#endif
 
 #endif

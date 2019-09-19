@@ -1,4 +1,4 @@
-# Copyright 2004-2014 Cray Inc.
+# Copyright 2004-2018 Cray Inc.
 # Other additional copyright holders may be indicated within.
 # 
 # The entirety of this work is licensed under the Apache License,
@@ -18,14 +18,52 @@
 CHPL_MAKE_HOST_TARGET = --target
 include $(CHPL_MAKE_HOME)/make/Makefile.base
 
-LD = $(CC)
+
+MAKE_COMP_GEN_CFLAGS =
+
+# These Make ifdefs are used for printcompileline and printcflags
+# in order to correctly set COMP_GEN_CFLAGS.
+ifeq ($(COMP_GEN_WARN), 1)
+  MAKE_COMP_GEN_CFLAGS += $(WARN_GEN_CFLAGS)
+endif
+MAKE_COMP_GEN_CFLAGS += $(SQUASH_WARN_GEN_CFLAGS)
+ifeq ($(COMP_GEN_DEBUG), 1)
+  MAKE_COMP_GEN_CFLAGS += $(DEBUG_CFLAGS)
+  DEBUG = 1
+else
+  # no need for a NO_DEBUG_CFLAGS yet
+  # MAKE_COMP_GEN_CFLAGS += $(NO_DEBUG_CFLAGS)
+  DEBUG = 0
+endif
+ifeq ($(COMP_GEN_OPT), 1)
+  MAKE_COMP_GEN_CFLAGS += $(OPT_CFLAGS)
+  OPTIMIZE = 1
+else
+  MAKE_COMP_GEN_CFLAGS += $(NO_OPT_CFLAGS)
+  OPTIMIZE = 0
+endif
+ifeq ($(COMP_GEN_SPECIALIZE), 1)
+  MAKE_COMP_GEN_CFLAGS += $(SPECIALIZE_CFLAGS)
+endif
+# COMP_GEN_FLOAT_OPT = -1 -> IEEE strict
+ifeq ($(COMP_GEN_FLOAT_OPT), -1)
+  MAKE_COMP_GEN_CFLAGS += $(IEEE_FLOAT_GEN_CFLAGS)
+endif
+# COMP_GEN_FLOAT_OPT = 1 -> IEEE lax, optimize please
+ifeq ($(COMP_GEN_FLOAT_OPT), 1)
+  MAKE_COMP_GEN_CFLAGS += $(FAST_FLOAT_GEN_CFLAGS)
+endif
+
+COMP_GEN_CFLAGS = $(MAKE_COMP_GEN_CFLAGS) $(COMP_GEN_USER_CFLAGS)
 
 include $(CHPL_MAKE_HOME)/runtime/etc/Makefile.threads-$(CHPL_MAKE_THREADS)
 -include $(CHPL_MAKE_HOME)/runtime/etc/Makefile.tasks-$(CHPL_MAKE_TASKS)
 include $(CHPL_MAKE_HOME)/runtime/etc/Makefile.comm-$(CHPL_MAKE_COMM)
 include $(CHPL_MAKE_HOME)/runtime/etc/Makefile.mem-$(CHPL_MAKE_MEM)
+-include $(CHPL_MAKE_HOME)/runtime/etc/Makefile.unwind-$(CHPL_MAKE_UNWIND)
 include $(CHPL_MAKE_HOME)/runtime/etc/Makefile.gmp-$(CHPL_MAKE_GMP)
 -include $(CHPL_MAKE_HOME)/runtime/etc/Makefile.hwloc-$(CHPL_MAKE_HWLOC)
+# Makefile.jemalloc-$(CHPL_MAKE_JEMALLOC) is included in Makefile.mem-jemalloc
 include $(CHPL_MAKE_HOME)/runtime/etc/Makefile.regexp-$(CHPL_MAKE_REGEXP)
 include $(CHPL_MAKE_HOME)/runtime/etc/Makefile.auxFilesys
 
@@ -48,21 +86,41 @@ HEADER_CFLAGS = $(RUNTIME_CFLAGS)
 
 GEN_CFLAGS += $(HEADER_CFLAGS)
 
+GEN_LFLAGS += $(RUNTIME_LFLAGS)
+
 CHPL_RT_INC_DIR = $(RUNTIME_INCLS)
 
-CHPL_RT_LIB_DIR = $(CHPL_MAKE_HOME)/$(LIB_RT_DIR)
+ifndef CHPL_MAKE_RUNTIME_LIB
+CHPL_MAKE_RUNTIME_LIB = $(CHPL_MAKE_HOME)/lib
+endif
+
+CHPL_RT_LIB_DIR = $(CHPL_MAKE_RUNTIME_LIB)/$(CHPL_MAKE_RUNTIME_SUBDIR)
+
+x:
+	@echo $(CHPL_MAKE_RUNTIME_LIB)
 
 printincludesanddefines:
-	@echo $(RUNTIME_DEFS) $(RUNTIME_INCLS)
+	@echo $(CHPL_MAKE_BASE_CFLAGS) $(RUNTIME_DEFS) $(RUNTIME_INCLS)
 
 printcompileline:
-	@echo $(CC) $(GEN_CFLAGS) $(COMP_GEN_CFLAGS) $(CHPL_RT_INC_DIR)
+	@echo $(CC) $(CHPL_MAKE_BASE_CFLAGS) $(GEN_CFLAGS) $(COMP_GEN_CFLAGS) $(CHPL_RT_INC_DIR)
+
+printcxxcompileline:
+	@echo $(CXX) $(CHPL_MAKE_BASE_CXXFLAGS) $(GEN_CXXFLAGS) $(COMP_GEN_CXXFLAGS) $(CHPL_RT_INC_DIR)
+
+printcflags:
+	@echo $(CHPL_MAKE_BASE_CFLAGS) $(GEN_CFLAGS) $(COMP_GEN_CFLAGS)
+
+printcxxflags:
+	@echo $(CHPL_MAKE_BASE_CXXFLAGS) $(GEN_CXXFLAGS) $(COMP_GEN_CXXFLAGS)
 
 printlibraries:
-	@echo $(GEN_LFLAGS) $(COMP_GEN_LFLAGS) -L$(CHPL_RT_LIB_DIR) -lchpl -lm $(LIBS)
+	@echo $(GEN_LFLAGS) $(COMP_GEN_LFLAGS) -L$(CHPL_RT_LIB_DIR) \
+	      -lchpl $(LIBS) -lm $(CHPL_MAKE_THIRD_PARTY_LINK_ARGS) $(CHPL_MAKE_BASE_LFLAGS)
 
 printlinkline:
-	@echo $(LD) $(GEN_LFLAGS) $(COMP_GEN_LFLAGS) -L$(CHPL_RT_LIB_DIR) -lchpl -lm $(LIBS)
+	@echo $(LD) $(GEN_LFLAGS) $(COMP_GEN_LFLAGS) -L$(CHPL_RT_LIB_DIR) \
+	      -lchpl $(LIBS) -lm $(CHPL_MAKE_THIRD_PARTY_LINK_ARGS) $(CHPL_MAKE_BASE_LFLAGS)
 
 
 printmaino:
@@ -71,11 +129,16 @@ printmaino:
 printllvminstall:
 	@echo $(LLVM_INSTALL_DIR)
 
+printclangcc:
+	@echo $(CLANG_CC)
+
+printclangcxx:
+	@echo $(CLANG_CXX)
 
 checkRtLibDir:
 ifeq ($(wildcard $(CHPL_RT_LIB_DIR)),)
 ifdef CHPL_DEVELOPER
-	$(warning Expected runtime configuration: $(shell basename $(CHPL_RT_LIB_DIR)))
+	$(warning Expected runtime library in $(CHPL_RT_LIB_DIR))
 endif
 ifeq ($(CHPL_MODULE_HOME),$(CHPL_HOME))
 	$(error The requested configuration is not included in the module. \

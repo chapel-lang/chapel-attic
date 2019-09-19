@@ -12,7 +12,7 @@ use ReplicatedDist;
 config const blk = 5, fac=10;
 const n = blk*fac;
 
-const Dist2D = new dmap(new ReplicatedDist());
+const Dist2D = new dmap(new Replicated());
 
 proc main() {
   const AbD: domain(2) dmapped Dist2D = {1..n, 1..n};
@@ -38,7 +38,7 @@ proc main() {
 
       dgemm(/*replA(aBlkD),
             replB(bBlkD),
-            */Ab(cBlkD));
+            */Ab(cBlkD).reindex({1..blk, 1..blk}));
   }
 
   writeln("finish");

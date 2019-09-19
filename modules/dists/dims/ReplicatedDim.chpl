@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2014 Cray Inc.
+ * Copyright 2004-2018 Cray Inc.
  * Other additional copyright holders may be indicated within.
  * 
  * The entirety of this work is licensed under the Apache License,
@@ -25,8 +25,29 @@
 //
 
 use DimensionalDist2D;
+use RangeChunk only ;
 
+/*
+This Replicated dimension specifier is for use with the
+:class:`DimensionalDist2D` distribution.
 
+The dimension of a domain or array for which this specifier is used
+has a *replicand* for each element of ``targetLocales``
+in the same dimension. This is similar to the Replicated distribution
+(:class:`Replicated`). The dimension specifies differs
+in that it always accesses the local replicand, whereas the Replicated
+distribution accesses all replicands in certain cases, as specified there.
+
+**Constructor Arguments**
+
+The ``ReplicatedDim`` class constructor is available as follows:
+
+  .. code-block:: chapel
+
+    proc ReplicatedDim.ReplicatedDim(numLocales:int)
+
+It creates a dimension specifier for replication over ``numLocales`` locales.
+*/
 class ReplicatedDim {
   // REQ over how many locales
   // todo: can the Dimensional do without this one?
@@ -202,13 +223,6 @@ proc ReplicatedDim.dsiNewRectangularDom1d(type idxType, param stridable: bool,
 proc ReplicatedDim.toString()
   return "ReplicatedDim(" + numLocales:string + ")";
 
-// REQ-2 create a 1-d global distribution descriptor that
-// describes a reindexing of 'this' from 'oldRange' to 'newRange'.
-// This is the 1-d counterpart of dsiCreateReindexDist().
-proc ReplicatedDim.dsiCreateReindexDist1d(newRange: range(?), oldRange: range(?)) {
-  return this;
-}
-
 // REQ is this a replicated distribution?
 proc Replicated1dom.dsiIsReplicated1d() param return true;
 
@@ -255,53 +269,7 @@ proc Replicated1locdom.dsiSetLocalIndices1d(globDD, locId: locIdT) {
   return locWholeR;
 }
 
-// REQ-2 - like dsiBuildRectangularDom: create a new global domain descriptor
-// for our dimension when the corresponding domain is created as a modification
-// of an existing domain, preserving the domain map.
-//
-// 'rangeArg' is what dsiSetIndices1d would be invoked on.
-// 'DD' is the distribution descriptor for 'this' (a 'ReplicatedDim', in this case).
-// 'idxType' and 'stoIndexT' of the result are the same as for 'this'.
-//
-// Just like in the multi-dimensional case, we show here how to write
-// dsiBuildRectangularDom1d from existing methods.
-//
-proc Replicated1dom.dsiBuildRectangularDom1d(DD,
-                                   param stridable:bool,
-                                   rangeArg: range(idxType,
-                                                   BoundedRangeType.bounded,
-                                                   stridable))
-{
-  type dummy_stoIndexT = int; // use 'this.stoIndexT' when needed
-  const result = DD.dsiNewRectangularDom1d(this.idxType, stridable,
-                                           dummy_stoIndexT);
-  result.dsiSetIndices1d(rangeArg);
-  return result;
-}
 
-// REQ-2 - the local-descriptor companion to dsiBuildRectangularDom1d.
-//
-// Just like
-//   dsiBuildRectangularDom1d = dsiNewRectangularDom1d + dsiSetIndices1d,
-// we show here
-//   dsiBuildLocalDom1d       = dsiNewLocalDom1d       + dsiSetLocalIndices1d.
-//
-// 'idxType' and 'stoIndexT' of the result are the same as for 'this'.
-// 'newGlobDD' is the global domain descriptor (a 'Replicated1dom', in this case)
-// whose local descriptor is to be created.
-//
-// Returns (new local 1-d domain descriptor, new storage range),
-// which could be the results of dsiNewLocalDom1d() and
-// dsiSetLocalIndices1d(), resp.
-//
-proc Replicated1locdom.dsiBuildLocalDom1d(newGlobDD, locId: locIdT) {
-  type  old_stoIndexT = this.stoIndexT;
-
-  const newLocDD = newGlobDD.dsiNewLocalDom1d(old_stoIndexT, locId);
-  const newStoRng = newLocDD.dsiSetLocalIndices1d(newGlobDD, locId);
-
-  return (newLocDD, newStoRng);
-}
 
 // REQ indicate whether "storage indices" returned by dsiSetLocalIndices1d()
 // correspond to "user indices". (In which case dsiAccess1d() returns
@@ -337,9 +305,8 @@ proc Replicated1locdom.dsiMyDensifiedRangeForTaskID1d(globDD, taskid:int, numTas
   : dsiMyDensifiedRangeType1d(globDD)
 {
   type IT = globDD.idxType;
-  const (startIx, endIx) = _computeChunkStartEnd(locWholeR.length,
-                                                 numTasks:IT, taskid:IT+1);
-  return (startIx:IT - 1) .. (endIx:IT - 1);
+  const (start, end) = chunkOrder(locWholeR, numTasks:IT, taskid:IT);
+  return (start:IT)..(end:IT);
 }
 
 // REQ the range type returned/yielded by dsiMyDensifiedRangeForSingleTask1d()

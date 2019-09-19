@@ -121,16 +121,16 @@ proc randomMake(desc : string, a :[?D], n : int) {
 proc repeatMake(desc : string, alu : string, n : int) {
   stdout.write(desc);
   var r : int = alu.length;
-  var s : string = alu + alu + alu.substring(1..n%r);
+  var s : string = alu + alu + alu[1..n%r];
   var j : int;
 
   for i in 0..(n / LINE_LENGTH)-1 {
     j = i*LINE_LENGTH % r;
-    stdout.writeln(s.substring(j + 1..j + LINE_LENGTH));
+    stdout.writeln(s[j + 1..j + LINE_LENGTH]);
   }
   if (n % LINE_LENGTH) {
     j = (n / LINE_LENGTH)*LINE_LENGTH % r;
-    stdout.writeln(s.substring(j + 1..j + (n % LINE_LENGTH)));
+    stdout.writeln(s[j + 1..j + (n % LINE_LENGTH)]);
   }
 }
 
@@ -140,4 +140,8 @@ proc main() {
   repeatMake(">ONE Homo sapiens alu\n", ALU, n * 2);
   randomMake(">TWO IUB ambiguity codes\n", IUB, n * 3);
   randomMake(">THREE Homo sapiens frequency\n", HomoSapiens, n * 5);
+
+  delete random;
+  for h in HomoSapiens do delete h;
+  for i in IUB         do delete i;
 }

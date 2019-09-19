@@ -60,6 +60,23 @@ if ($tmpstatus != 0) then
     exit($tmpstatus)
 endif
 
+# Build chpldoc and run chpldoc-check.
+$mymake -j$num_procs chpldoc
+set tmpstatus = $status
+if ($tmpstatus != 0) then
+    echo "ERROR: make chpldoc failed"
+    exit($tmpstatus)
+endif
+rehash   # required for csh only; if we convert this to bash, drop this
+
+$mymake check-chpldoc
+set tmpstatus = $status
+if ($tmpstatus != 0) then
+    echo "ERROR: make check-chpldoc failed"
+    exit($tmpstatus)
+endif
+
+
 # Calculate expected version string from version_num.h.
 set major=`cat compiler/main/version_num.h | grep MAJOR_VERSION | cut -f3 -d' ' | sed 's/\"//g'`
 set minor=`cat compiler/main/version_num.h | grep MINOR_VERSION | cut -f3 -d' ' | sed 's/\"//g'`
@@ -67,7 +84,7 @@ set patch=`cat compiler/main/version_num.h | grep UPDATE_VERSION | cut -f3 -d' '
 set expected_version_string="$major.$minor.$patch"
 
 # Test chpl --version for expected string version.
-set version_string = `chpl --version | grep 'Version' | cut -d' ' -f 3`
+set version_string = `chpl --version | grep 'version' | cut -d' ' -f 3`
 set versionstatus = $status
 if ($versionstatus != 0) then
     echo "ERROR: execution of chpl --version failed"
@@ -83,6 +100,11 @@ endif
 #
 cd examples
 $mymake -j$num_procs
+set tmpstatus = $status
+if ($tmpstatus != 0) then
+    echo "ERROR: compiling examples with 'make' failed"
+    exit($tmpstatus)
+endif
 cd ..
 
 
@@ -95,7 +117,15 @@ if ($tmpstatus != 0) then
     echo "ERROR: cd into examples failed"
     exit($tmpstatus)
 endif
-./start_test -logfile Logs/testReleaseHelp.log
+
+set start_test_flags = ''
+if ($?CHPL_TEST_RELEASE_NORECURSE) then
+    set start_test_flags = ${start_test_flags}' --norecurse'
+endif
+
+./start_test ${start_test_flags} -logfile Logs/testReleaseHelp.log
+
+endif
 set tmpstatus = $status
 if ($tmpstatus != 0) then
     echo "ERROR: testing of examples failed"

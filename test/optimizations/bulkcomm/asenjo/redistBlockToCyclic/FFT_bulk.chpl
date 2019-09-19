@@ -13,17 +13,17 @@ proc BlockArr.copyBtoC(B)
   coforall loc in Locales do on loc
   {
     param stridelevels=1;
-    var dststrides:[1..#stridelevels] int(32); 
-    var srcstrides: [1..#stridelevels] int(32);
-    var count: [1..#(stridelevels+1)] int(32);
-    var lid=loc.id; 
+    var dststrides:[1..#stridelevels] size_t;
+    var srcstrides: [1..#stridelevels] size_t;
+    var count: [1..#(stridelevels+1)] size_t;
+    var lid=loc.id;
 
     var numLocales: int(32)=dom.dist.targetLocDom.dim(1).length:int(32);
     var n:int(32)=dom.dist.boundingBox.dim(1).length:int(32);
     var src = locArr[lid].myElems._value.theData;
 
     dststrides[1]=1;
-    srcstrides[1]=numLocales;
+    srcstrides[1]=numLocales.safeCast(size_t);
 
     var dststr=dststrides._value.theData;
     var srcstr=srcstrides._value.theData;
@@ -36,7 +36,7 @@ proc BlockArr.copyBtoC(B)
     //writeln("Domain: ",dom.whole.dims());
 
     //a,b: first and last global indices in each locale
-    var a: int(32)=dom.locDoms[lid].myBlock.low:int(32); 
+    var a: int(32)=dom.locDoms[lid].myBlock.low:int(32);
     var b: int(32)=dom.locDoms[lid].myBlock.high:int(32);
     var blksize=b-a+1;
     //writeln("Locale", here.id," : blksize ",blksize," subblock first index  a ",a,
@@ -60,7 +60,7 @@ proc BlockArr.copyBtoC(B)
       //var destr = privB.locArr[dst].myElems._value.theData;
       var destr = B._value.locArr[dst].myElems._value.theData;
       count[1]=1;
-      count[2]=chunksize;
+      count[2]=chunksize.safeCast(size_t);
 
       __primitive("chpl_comm_put_strd",
 		  __primitive("array_get",destr,
@@ -68,7 +68,7 @@ proc BlockArr.copyBtoC(B)
 		  __primitive("array_get",dststr,dststrides._value.getDataIndex(1)),
 		  dst,
 		  __primitive("array_get",src,
-			      locArr[lid].myElems._value.getDataIndex(schunkini)),  
+			      locArr[lid].myElems._value.getDataIndex(schunkini)),
 		  __primitive("array_get",srcstr,srcstrides._value.getDataIndex(1)),
 		  __primitive("array_get",cnt, count._value.getDataIndex(1)),
 		  stridelevels);
@@ -79,13 +79,13 @@ proc BlockArr.copyBtoC(B)
 
 proc  BlockArr.copyCtoB(B)
 {
- 
+
   coforall loc in Locales do on loc
   {
     param stridelevels=1;
-    var dststrides:[1..#stridelevels] int(32);
-    var srcstrides: [1..#stridelevels] int(32);
-    var count: [1..#(stridelevels+1)] int(32); 
+    var dststrides:[1..#stridelevels] size_t;
+    var srcstrides: [1..#stridelevels] size_t;
+    var count: [1..#(stridelevels+1)] size_t;
     var lid=loc.id;
     var numLocales: int=dom.dist.targetLocDom.dim(1).length;
     var n:int(32)=dom.dist.boundingBox.dim(1).length:int(32);
@@ -98,7 +98,7 @@ proc  BlockArr.copyCtoB(B)
     var num: int;
     var schunkini: int;
     var chunksize: int;
-    var a: int(32)=dom.locDoms[lid].myBlock.low:int(32); 
+    var a: int(32)=dom.locDoms[lid].myBlock.low:int(32);
     var b: int(32)=dom.locDoms[lid].myBlock.high:int(32);
     num=b-a+1;
 
@@ -118,14 +118,14 @@ proc  BlockArr.copyCtoB(B)
       else chunksize=num/numLocales+1;
 
       var destr = B._value.locArr[dst].myElems._value.theData;
-      dststrides[1]=numLocales:int(32);
+      dststrides[1]=numLocales:size_t;
       srcstrides[1]=1;
       count[1]=1;
-      count[2]=chunksize:int(32);
+      count[2]=chunksize:size_t;
 
       __primitive("chpl_comm_get_strd",
 		  __primitive("array_get",src,
-			        locArr[lid].myElems._value.getDataIndex(schunkini)),
+                              locArr[lid].myElems._value.getDataIndex(schunkini)),
 		  __primitive("array_get",dststr,dststrides._value.getDataIndex(1)),
 		  dst,
 		  __primitive("array_get",destr,
@@ -184,7 +184,7 @@ config const epsilon = 2.0 ** -51.0,
 // specify the fixed seed explicitly
 //
 config const useRandomSeed = true,
-  seed = if useRandomSeed then SeedGenerator.currentTime else 314159265;
+  seed = if useRandomSeed then SeedGenerator.oddCurrentTime else 314159265;
 
 //
 // Configuration constants to control what's printed -- benchmark
@@ -204,7 +204,7 @@ proc main() {
   // This implementation assumes 4**k locales due to its assertion that
   // all butterflies are local to a given locale
   //
-  assert(4**log4(numLocales) == numLocales, 
+  assert(4**log4(numLocales) == numLocales,
          "numLocales must be a power of 4 for this fft implementation");
 
   //
@@ -241,19 +241,19 @@ proc main() {
     domain(1, idxType) dmapped Cyclic(startIdx=0:idxType) = ProblemSpace;
 
   var Zcyc: [CycDom] elemType;
-  
+
   initVectors(Twiddles, z);            // initialize twiddles and input vector z
   var t1,t2,T1,T2,T3,T4: real;
   const startTime = getCurrentTime();  // capture the start time
   [(a,b) in zip(Zblk, z)] a = conjg(b);      // store the conjugate of z in Zblk
 
-  //Comm y tieme bitReverse 
+  //Comm y tieme bitReverse
   t1=getCurrentTime();
   bitReverseShuffle(Zblk);                // permute Zblk
   t2=getCurrentTime();
   T1=t2-t1;
 
-  //Comm and Time dfft  
+  //Comm and Time dfft
   t1=getCurrentTime();
   dfft(Zblk, Twiddles, cyclicPhase=false); // compute the DFFT, block phases
   t2=getCurrentTime();
@@ -275,8 +275,8 @@ proc main() {
   t1=getCurrentTime();
   dfft(Zcyc, Twiddles, cyclicPhase=true); // compute the DFFT, cyclic phases
   t2=getCurrentTime();
-  T2=T2+t2-t1; 
- 
+  T2=T2+t2-t1;
+
   t1=getCurrentTime();
   //    forall (b, c) in zip(Zblk, Zcyc) do        // copy vector back to Block storage
   //   b = c;
@@ -285,7 +285,7 @@ proc main() {
   T4=t2-t1;
 
   const execTime = getCurrentTime() - startTime;     // store the elapsed time
-  //  writeln("bitReverse Time = ",T1);  
+  //  writeln("bitReverse Time = ",T1);
   //  writeln("dffts Time = ",T2," copyBtoC time= ",T3, " copyCtoB time= ",T4);
 
   const validAnswer = verifyResults(z, Zblk, Zcyc, Twiddles); // validate answer
@@ -324,7 +324,7 @@ proc dfft(A: [?ADom], W, cyclicPhase) {
       //
       forall lo in bankStart..#str do
         on ADom.dist.idxToLocale(lo) do
-          local butterfly(wk1, wk2, wk3, A.localSlice(lo..by str #radix));
+          local do butterfly(wk1, wk2, wk3, A.localSlice(lo..by str #radix));
 
       //
       // update the multipliers for the high bank
@@ -339,7 +339,7 @@ proc dfft(A: [?ADom], W, cyclicPhase) {
       //
       forall lo in bankStart+span..#str do
         on ADom.dist.idxToLocale(lo) do
-          local butterfly(wk1, wk2, wk3, A.localSlice(lo.. by str #radix));
+          local do butterfly(wk1, wk2, wk3, A.localSlice(lo.. by str #radix));
     }
   }
 
@@ -355,7 +355,7 @@ proc dfft(A: [?ADom], W, cyclicPhase) {
     if (str*radix == numElements) {
       forall lo in 0..#str do
         on ADom.dist.idxToLocale(lo) do
-          local butterfly(1.0, 1.0, 1.0, A.localSlice(lo.. by str # radix));
+          local do butterfly(1.0, 1.0, 1.0, A.localSlice(lo.. by str # radix));
     }
     //
     // ...otherwise using a simple radix-2 butterfly scheme
@@ -376,19 +376,23 @@ proc dfft(A: [?ADom], W, cyclicPhase) {
 // this is the radix-4 butterfly routine that takes multipliers wk1,
 // wk2, and wk3 and a 4-element array (slice) A.
 //
-proc butterfly(wk1, wk2, wk3, X:[0..3]) {
-  var x0 = X(0) + X(1),
-    x1 = X(0) - X(1),
-    x2 = X(2) + X(3),
-    x3rot = (X(2) - X(3))*1.0i;
+proc butterfly(wk1, wk2, wk3, X:[?D]) {
+  const i0 = D.low,
+        i1 = i0 + D.stride,
+        i2 = i1 + D.stride,
+        i3 = i2 + D.stride;
+  var x0 = X(i0) + X(i1),
+      x1 = X(i0) - X(i1),
+      x2 = X(i2) + X(i3),
+      x3rot = (X(i2) - X(i3))*1.0i;
 
-  X(0) = x0 + x2;                   // compute the butterfly in-place on X
+  X(i0) = x0 + x2;                   // compute the butterfly in-place on X
   x0 -= x2;
-  X(2) = wk2 * x0;
+  X(i2) = wk2 * x0;
   x0 = x1 + x3rot;
-  X(1) = wk1 * x0;
+  X(i1) = wk1 * x0;
   x0 = x1 - x3rot;
-  X(3) = wk3 * x0;
+  X(i3) = wk3 * x0;
 }
 
 //
@@ -396,7 +400,7 @@ proc butterfly(wk1, wk2, wk3, X:[0..3]) {
 // of the DFFT simply by yielding tuples: (radix**i, radix**(i+1))
 //
 iter genDFTStrideSpan(numElements, cyclicPhase) {
-  const (start, end) = if !cyclicPhase then (1, numLocales:idxType) 
+  const (start, end) = if !cyclicPhase then (1, numLocales:idxType)
     else (numLocales, numElements-1);
   var stride = start;
   for i in log4(start)+1..log4(end):int {
@@ -467,14 +471,14 @@ proc bitReverseShuffle(Vect: [?Dom]) {
 proc bitReverse(val: ?valType, revBits = 64) {
   param mask = 0x0102040810204080;
   const valReverse64 = bitMatMultOr(mask, bitMatMultOr(val:uint(64), mask)),
-    valReverse = bitRotLeft(valReverse64, revBits);
+    valReverse = rotl(valReverse64, revBits);
   return valReverse: valType;
 }
 
 //
 // Compute the log base 4 of x
 //
-proc log4(x) return logBasePow2(x, 2);  
+proc log4(x) return logBasePow2(x, 2);
 
 	     //
 	     // verify that the results are correct by reapplying the dfft and then

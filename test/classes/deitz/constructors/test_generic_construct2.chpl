@@ -4,11 +4,14 @@ class C {
   var x: ct;
   var y: bt;
 
-  proc C(type ct, type bt, y: ct) {
+  proc init(type ct, type bt, y: ct) {
+    this.ct = ct;
+    this.bt = bt;
     x = y;
   }
 
-  proc C(type ct, y: ct) {
+  proc init(type ct, y: ct) {
+    this.ct = ct;
     x = y;
   }
 }

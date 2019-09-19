@@ -21,8 +21,8 @@ class GridCFGhostRegion {
   //|/...............|/
 
   const grid:             Grid;
-  const coarse_neighbors: domain(Grid);
-  const transfer_regions:  [coarse_neighbors] MultiDomain(dimension,stridable=true);
+  var coarse_neighbors: domain(Grid);
+  var transfer_regions:  [coarse_neighbors] MultiDomain(dimension,stridable=true);
   
   // /|'''''''''''''''/|
   //< |    fields    < |
@@ -31,16 +31,17 @@ class GridCFGhostRegion {
 
   
   //|\''''''''''''''''''''|\
-  //| >    constructor    | >
+  //| >    initializer    | >
   //|/....................|/
   
-  proc GridCFGhostRegion (
+  proc init (
     grid:         Grid,
     parent_level: Level,
     coarse_level: Level)
   {
         
     this.grid = grid;
+    this.initDone();
     
     
     //==== Calculate refinement ratio ====
@@ -84,21 +85,21 @@ class GridCFGhostRegion {
 
   }
   // /|''''''''''''''''''''/|
-  //< |    constructor    < |
+  //< |    initializer    < |
   // \|....................\|
 
 
 
   //|\'''''''''''''''''''|\
-  //| >    destructor    | >
+  //| >  deinitializer   | >
   //|/...................|/
   
-  proc ~GridCFGhostRegion ()
+  proc deinit ()
   {       
     for multidomain in transfer_regions do delete multidomain;
   }
   // /|'''''''''''''''''''/|
-  //< |    destructor    < |
+  //< |  deinitializer   < |
   // \|...................\|
   
 
@@ -160,7 +161,7 @@ class LevelCFGhostRegion {
   //--------------------------------------------------------------------
   // Intended constructor signature is
   //    LevelCFGhostRegion( level, coarse_level ).
-  // The 'initalize' method is required instead of a proper constructor
+  // The 'initialize' method is required instead of a proper constructor
   // because grid_cf_ghost_regions depends on level.grids.
   //--------------------------------------------------------------------
   
@@ -178,15 +179,15 @@ class LevelCFGhostRegion {
   
   
   //|\'''''''''''''''''''|\
-  //| >    destructor    | >
+  //| >  deinitializer   | >
   //|/...................|/
   
-  proc ~LevelCFGhostRegion ()
+  proc deinit ()
   {
     for region in grid_cf_ghost_regions do delete region;
   }
   // /|'''''''''''''''''''/|
-  //< |    destructor    < |
+  //< |  deinitializer   < |
   // \|...................\|
   
   
@@ -304,10 +305,10 @@ class GridCFGhostSolution {
   
   
   //|\'''''''''''''''''''|\
-  //| >    destructor    | >
+  //| >  deinitializer   | >
   //|/...................|/
   
-  proc ~GridCFGhostSolution () {
+  proc deinit () {
     
     for multiarray in old_data do delete multiarray;
     
@@ -315,7 +316,7 @@ class GridCFGhostSolution {
 
   }
   // /|'''''''''''''''''''/|
-  //< |    destructor    < |
+  //< |  deinitializer   < |
   // \|...................\|
 
 
@@ -449,15 +450,15 @@ class LevelCFGhostSolution {
  
  
   //|\'''''''''''''''''''|\
-  //| >    destructor    | >
+  //| >  deinitializer   | >
   //|/...................|/
   
-  proc ~LevelCFGhostSolution () 
+  proc deinit () 
   {  
     for solution in grid_cf_ghost_solutions do delete solution;
   }
   // /|'''''''''''''''''''/|
-  //< |    destructor    < |
+  //< |  deinitializer   < |
   // \|...................\|
   
   
@@ -557,9 +558,9 @@ proc GridVariable.fillCFGhostRegion (
   //==== Make sure that t1 < time < t2, with small margin for roundoff error ====
   assert(time > t1 - 1.0E-8  &&  time < t2 + 1.0E-8,
 	 "Warning: LevelVariable.getFineBoundaryValues\n" +
-	 "Requesting fine data at time " + format("%8.4E",time) + "\n" +
-	 "coarse_overlap_solution.old_time =     " + format("%8.4E", t1) + "\n" +
-	 "coarse_overlap_solution.current_time = " + format("%8.4E", t2));
+	 "Requesting fine data at time " + "%8.4Er".format(time) + "\n" +
+	 "coarse_overlap_solution.old_time =     " + "%8.4Er".format(t1) + "\n" +
+	 "coarse_overlap_solution.current_time = " + "%8.4Er".format(t2));
   
   
   //==== Interpolate ====

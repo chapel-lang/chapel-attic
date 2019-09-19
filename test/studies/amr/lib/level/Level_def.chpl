@@ -37,8 +37,8 @@ class Level {
   // the level.
   //--------------------------------------------------------------
   
+  const possible_cells:       domain(dimension, stridable=true);
   const possible_ghost_cells: domain(dimension, stridable=true);
-  const possible_cells:       subdomain(possible_ghost_cells);
 
 
   //==== Child grid info ====
@@ -59,10 +59,10 @@ class Level {
 
 
   //|\''''''''''''''''''''|\
-  //| >    constructor    | >
+  //| >    initializer    | >
   //|/....................|/
 
-  proc Level(
+  proc init(
     x_low: dimension*real,
     x_high: dimension*real,
     n_cells: dimension*int,
@@ -90,20 +90,20 @@ class Level {
     // must be multiplied by 2 because a cell is 2 indices wide.
     //---------------------------------------------------------------
 
-    possible_ghost_cells = possible_cells.expand(2*n_ghost_cells);    
+    possible_ghost_cells = possible_cells.expand(2*n_ghost_cells);
 
   }
   // /|''''''''''''''''''''/|
-  //< |    constructor    < |
+  //< |    initializer    < |
   // \|....................\|
   
   
   
   //|\'''''''''''''''''''|\
-  //| >    destructor    | >
+  //| >  deinitializer   | >
   //|/...................|/
   
-  proc ~Level () 
+  proc deinit () 
   {
     for grid in grids
     {
@@ -113,7 +113,7 @@ class Level {
     }
   }
   // /|'''''''''''''''''''/|
-  //< |    destructor    < |
+  //< |  deinitializer   < |
   // \|...................\|
   
   
@@ -154,7 +154,7 @@ class Level {
   // sensible.  Mainly for testing and debugging.
   //-----------------------------------------------------------
   
-  proc writeThis(w: Writer) {
+  proc writeThis(w) {
     writeln("Level bounds: ", x_low, "  ", x_high);
     writeln("Number of cells: ", n_cells);
     writeln("Number of ghost cells: ", n_ghost_cells);
@@ -318,13 +318,14 @@ class SiblingGhostRegion {
   
   
   //|\''''''''''''''''''''|\
-  //| >    constructor    | >
+  //| >    initializer    | >
   //|/....................|/
   
-  proc SiblingGhostRegion (
+  proc init (
     level: Level,
     grid:  Grid)
   {
+    this.initDone();
     for sibling in level.grids 
     {
       if sibling != grid 
@@ -339,19 +340,19 @@ class SiblingGhostRegion {
     }
   }
   // /|''''''''''''''''''''/|
-  //< |    constructor    < |
+  //< |    initializer    < |
   // \|....................\|
   
   
   
   //|\'''''''''''''''''''|\
-  //| >    destructor    | >
+  //| >  deinitializer   | >
   //|/...................|/
   
-  proc ~SiblingGhostRegion () {}
+  proc deinit () {}
 
   // /|'''''''''''''''''''/|
-  //< |    destructor    < |
+  //< |  deinitializer   < |
   // \|...................\|
   
   
@@ -454,7 +455,7 @@ proc readLevel(file_name: string){
   var dim_in: int;
   input_file.readln(dim_in);
   assert(dim_in == dimension, 
-         "error: dimension of space.txt must equal " + format("%i",dimension));
+         "error: dimension of space.txt must equal " + "%i".format(dimension));
   input_file.readln(); // empty line
 
   var x_low, x_high:    dimension*real;

@@ -1,38 +1,31 @@
 #!/usr/bin/env python
-import sys, os, optparse
+import optparse
+import os
+import sys
 
-import chpl_arch, chpl_comm, chpl_comm_segment, chpl_compiler, chpl_platform
-from utils import memoize
+chplenv_dir = os.path.dirname(__file__)
+sys.path.insert(0, os.path.abspath(chplenv_dir))
+
+import chpl_platform, overrides
+from utils import error, memoize
+
 
 @memoize
 def get(flag='host'):
     if flag == 'host':
         mem_val = 'cstdlib'
     elif flag == 'target':
-        mem_val = os.environ.get('CHPL_MEM')
+        mem_val = overrides.get('CHPL_MEM')
         if not mem_val:
-            comm_val = chpl_comm.get()
-            platform_val = chpl_platform.get('host')
-            arch_val = chpl_arch.get('target', get_lcd=True)
-            tcmallocCompat = ["gnu", "clang", "intel"]
+            platform_val = chpl_platform.get('target')
+            cygwin = platform_val.startswith('cygwin')
 
-            # true if tcmalloc is compatible with the target compiler
-            #if (not (platform_val == 'cray-xc' and arch_val == 'knc') and
-            #        (not platform_val.startswith("cygwin")) and
-            #        any(sub in chpl_compiler.get('target') for sub in tcmallocCompat)):
-            #    return 'tcmalloc'
-            if comm_val == 'gasnet':
-                segment_val = chpl_comm_segment.get()
-                if segment_val == 'fast' or segment_val == 'large':
-                    mem_val = 'dlmalloc'
-                else:
-                    mem_val = 'cstdlib'
-            elif comm_val == 'ugni':
-                mem_val = 'tcmalloc'
-            else:
+            if cygwin:
                 mem_val = 'cstdlib'
+            else:
+                mem_val = 'jemalloc'
     else:
-        raise ValueError("Invalid flag: '{0}'".format(flag))
+        error("Invalid flag: '{0}'".format(flag), ValueError)
     return mem_val
 
 

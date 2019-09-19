@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2014 Cray Inc.
+ * Copyright 2004-2018 Cray Inc.
  * Other additional copyright holders may be indicated within.
  *
  * The entirety of this work is licensed under the Apache License,
@@ -33,6 +33,9 @@
 #ifndef _BASEAST_H_
 #define _BASEAST_H_
 
+#include <ostream>
+#include <string>
+
 #include "map.h"
 #include "vec.h"
 
@@ -46,32 +49,50 @@
   macro(PrimitiveType) sep                         \
   macro(EnumType) sep                              \
   macro(AggregateType) sep                         \
+                                                   \
   macro(ModuleSymbol) sep                          \
-  macro(VarSymbol) sep                             \
-  macro(ArgSymbol) sep                             \
-  macro(TypeSymbol) sep                            \
-  macro(FnSymbol) sep                              \
-  macro(EnumSymbol) sep                            \
-  macro(LabelSymbol) sep                           \
+  macro(VarSymbol)    sep                          \
+  macro(ArgSymbol)    sep                          \
+  macro(ShadowVarSymbol) sep                       \
+  macro(TypeSymbol)   sep                          \
+  macro(FnSymbol)     sep                          \
+  macro(EnumSymbol)   sep                          \
+  macro(LabelSymbol)  sep                          \
+                                                   \
   macro(SymExpr) sep                               \
   macro(UnresolvedSymExpr) sep                     \
   macro(DefExpr) sep                               \
   macro(CallExpr) sep                              \
+  macro(ContextCallExpr) sep                       \
+  macro(ForallExpr) sep                            \
   macro(NamedExpr) sep                             \
+                                                   \
+  macro(UseStmt) sep                               \
   macro(BlockStmt) sep                             \
   macro(CondStmt) sep                              \
   macro(GotoStmt) sep                              \
+  macro(DeferStmt) sep                             \
+  macro(ForallStmt) sep                            \
+  macro(TryStmt) sep                               \
+  macro(ForwardingStmt) sep                        \
+  macro(CatchStmt) sep                             \
   macro(ExternBlockStmt)
 
 #define foreach_ast(macro)                         \
   foreach_ast_sep(macro, ;)
 
+#define for_alive_in_Vec(TYPE, VAR, VEC)           \
+  forv_Vec(TYPE, VAR, VEC) if (VAR->inTree())
+
+class BaseAST;
 class AstVisitor;
 class Expr;
 class GenRet;
+class LcnSymbol;
 class Symbol;
 class Type;
 
+class BlockStmt;
 class LoopStmt;
 class WhileStmt;
 class WhileDoStmt;
@@ -80,9 +101,22 @@ class ForLoop;
 class CForLoop;
 class ParamForLoop;
 
+class QualifiedType;
+
 #define proto_classes(type) class type
 foreach_ast(proto_classes);
 #undef proto_classes
+
+#define def_vec_hash(SomeType) \
+    template<> \
+    uintptr_t _vec_hasher(SomeType* obj);
+
+foreach_ast(def_vec_hash);
+def_vec_hash(Symbol);
+def_vec_hash(Type);
+def_vec_hash(BaseAST);
+
+#undef def_vec_hash
 
 //
 // declare global vectors for all AST node types
@@ -112,6 +146,13 @@ public:
 
   const char* filename;  // filename of location
   int         lineno;    // line number of location
+
+  inline bool operator==(const astlocT other) const {
+    return this->filename == other.filename && this->lineno == other.lineno;
+  }
+  inline bool operator!=(const astlocT other) const {
+    return this->filename != other.filename || this->lineno != other.lineno;
+  }
 };
 
 //
@@ -122,15 +163,24 @@ enum AstTag {
   E_UnresolvedSymExpr,
   E_DefExpr,
   E_CallExpr,
+  E_ContextCallExpr,
+  E_ForallExpr,
+  E_ForwardingStmt,
   E_NamedExpr,
+  E_UseStmt,
+  E_DeferStmt,
+  E_TryStmt,
+  E_CatchStmt,
   E_BlockStmt,
   E_CondStmt,
   E_GotoStmt,
+  E_ForallStmt,
   E_ExternBlockStmt,
 
   E_ModuleSymbol,
   E_VarSymbol,
   E_ArgSymbol,
+  E_ShadowVarSymbol,
   E_TypeSymbol,
   E_FnSymbol,
   E_EnumSymbol,
@@ -201,7 +251,7 @@ class BaseAST {
 public:
   virtual GenRet    codegen()                                          = 0;
   virtual bool      inTree()                                           = 0;
-  virtual Type*     typeInfo()                                         = 0;
+  virtual QualifiedType qualType()                                     = 0;
   virtual void      verify()                                           = 0;
   virtual void      accept(AstVisitor* visitor)                        = 0;
 
@@ -209,15 +259,25 @@ public:
   int               linenum()                                    const;
   const char*       stringLoc()                                  const;
 
+  Type*             typeInfo(); // note: calls qualType
+  bool              isRef();
+  bool              isWideRef();
+  bool              isRefOrWideRef();
   FnSymbol*         getFunction();
   ModuleSymbol*     getModule();
   Type*             getValType();
+  Type*             getRefType();
 
   const char*       astTagAsString()                             const;
 
   AstTag            astTag;     // BaseAST subclass
   int               id;         // Unique ID
   astlocT           astloc;     // Location of this node in the source code
+
+  void                printTabs(std::ostream *file, unsigned int tabs);
+  virtual void        printDocsDescription(const char *doc, std::ostream *file, unsigned int tabs);
+
+  static  const       std::string tabText;
 
 protected:
                     BaseAST(AstTag type);
@@ -226,7 +286,6 @@ protected:
 private:
                     BaseAST();
 
-  Type*             getRefType();
   Type*             getWideRefType();
 };
 
@@ -240,10 +299,13 @@ int    lastNodeIDUsed();
 // trace various AST node removals
 void   trace_remove(BaseAST* ast, char flag);
 
+void verifyInTree(BaseAST* ast, const char* msg);
+
 
 //
 // macro to update the global line number used to set the line number
-// of an AST node when it is constructed
+// of an AST node when it is constructed - or to print out the line
+// number of code related to a core dump.
 //
 // This should be used before constructing new nodes to make sure the
 // line number is correctly set. The global line number reverts to
@@ -266,13 +328,6 @@ public:
 };
 
 //
-// vectors of modules
-//
-extern Vec<ModuleSymbol*> allModules;  // contains all modules
-extern Vec<ModuleSymbol*> userModules; // contains main + user modules
-extern Vec<ModuleSymbol*> mainModules; // contains main modules
-
-//
 // class test inlines: determine the dynamic type of a BaseAST*
 //
 static inline bool isExpr(const BaseAST* a)
@@ -284,21 +339,41 @@ static inline bool isSymbol(const BaseAST* a)
 static inline bool isType(const BaseAST* a)
 { return a && isType(a->astTag); }
 
-#define def_is_ast(Type) \
-  static inline bool is##Type(BaseAST* a) { return a && a->astTag == E_##Type; }
+static inline bool isLcnSymbol(const BaseAST* a)
+{ return a && (a->astTag == E_ArgSymbol || a->astTag == E_VarSymbol || a->astTag == E_ShadowVarSymbol); }
+
+static inline bool isVarSymbol(const BaseAST* a)
+{ return a && (a->astTag == E_VarSymbol || a->astTag == E_ShadowVarSymbol); }
+
+static inline bool isCallExpr(const BaseAST* a)
+{ return a && (a->astTag == E_CallExpr || a->astTag == E_ContextCallExpr); }
+
+
+#define def_is_ast(Type)                          \
+  static inline bool is##Type(const BaseAST* a)   \
+  {                                               \
+    return a && a->astTag == E_##Type;            \
+  }
 
 def_is_ast(SymExpr)
 def_is_ast(UnresolvedSymExpr)
 def_is_ast(DefExpr)
-def_is_ast(CallExpr)
+def_is_ast(ContextCallExpr)
+def_is_ast(ForallExpr)
 def_is_ast(NamedExpr)
+def_is_ast(UseStmt)
 def_is_ast(BlockStmt)
 def_is_ast(CondStmt)
 def_is_ast(GotoStmt)
+def_is_ast(DeferStmt)
+def_is_ast(ForallStmt)
+def_is_ast(TryStmt)
+def_is_ast(ForwardingStmt)
+def_is_ast(CatchStmt)
 def_is_ast(ExternBlockStmt)
 def_is_ast(ModuleSymbol)
-def_is_ast(VarSymbol)
 def_is_ast(ArgSymbol)
+def_is_ast(ShadowVarSymbol)
 def_is_ast(TypeSymbol)
 def_is_ast(FnSymbol)
 def_is_ast(EnumSymbol)
@@ -308,33 +383,45 @@ def_is_ast(EnumType)
 def_is_ast(AggregateType)
 #undef def_is_ast
 
-bool isLoopStmt(BaseAST* a);
-bool isWhileStmt(BaseAST* a);
-bool isWhileDoStmt(BaseAST* a);
-bool isDoWhileStmt(BaseAST* a);
-bool isParamForLoop(BaseAST* a);
-bool isForLoop(BaseAST* a);
-bool isCForLoop(BaseAST* a);
+bool isLoopStmt(const BaseAST* a);
+bool isWhileStmt(const BaseAST* a);
+bool isWhileDoStmt(const BaseAST* a);
+bool isDoWhileStmt(const BaseAST* a);
+bool isParamForLoop(const BaseAST* a);
+bool isForLoop(const BaseAST* a);
+bool isCoforallLoop(const BaseAST* a);
+bool isCForLoop(const BaseAST* a);
 
 //
 // safe downcast inlines: downcast BaseAST*, Expr*, Symbol*, or Type*
 //   note: toDerivedClass is equivalent to dynamic_cast<DerivedClass*>
 //
 #define def_to_ast(Type) \
-  static inline Type * to##Type(BaseAST* a) { return is##Type(a) ? (Type*)a : NULL; }
+  static inline Type * to##Type(BaseAST* a) { return is##Type(a) ? (Type*)a : NULL; } \
+  static inline const Type * toConst##Type(const BaseAST* a) \
+    { return is##Type(a) ? (const Type*)a : NULL; }
+
 def_to_ast(SymExpr)
 def_to_ast(UnresolvedSymExpr)
 def_to_ast(DefExpr)
-def_to_ast(CallExpr)
+def_to_ast(ContextCallExpr)
+def_to_ast(ForallExpr)
 def_to_ast(NamedExpr)
+def_to_ast(UseStmt)
 def_to_ast(BlockStmt)
 def_to_ast(CondStmt)
 def_to_ast(GotoStmt)
+def_to_ast(DeferStmt)
+def_to_ast(ForallStmt)
+def_to_ast(TryStmt)
+def_to_ast(ForwardingStmt)
+def_to_ast(CatchStmt)
 def_to_ast(ExternBlockStmt)
 def_to_ast(Expr)
 def_to_ast(ModuleSymbol)
 def_to_ast(VarSymbol)
 def_to_ast(ArgSymbol)
+def_to_ast(ShadowVarSymbol)
 def_to_ast(TypeSymbol)
 def_to_ast(FnSymbol)
 def_to_ast(EnumSymbol)
@@ -355,6 +442,88 @@ def_to_ast(ParamForLoop);
 
 #undef def_to_ast
 
+#define def_less_ast(SomeType) \
+  namespace std { \
+    template<> struct less<SomeType*> { \
+      bool operator()(const SomeType* lhs, const SomeType* rhs) const { \
+        if (lhs == NULL && rhs != NULL) return true; \
+        if (lhs != NULL && rhs == NULL) return false; \
+        if (lhs == NULL && rhs == NULL) return false; \
+        return ((const BaseAST*)lhs)->id < ((const BaseAST*)rhs)->id; \
+      } \
+    }; \
+  }
+
+def_less_ast(SymExpr)
+def_less_ast(UnresolvedSymExpr)
+def_less_ast(DefExpr)
+def_less_ast(ContextCallExpr)
+def_less_ast(ForallExpr)
+def_less_ast(NamedExpr)
+def_less_ast(UseStmt)
+def_less_ast(BlockStmt)
+def_less_ast(CondStmt)
+def_less_ast(GotoStmt)
+def_less_ast(DeferStmt)
+def_less_ast(ForallStmt)
+def_less_ast(TryStmt)
+def_less_ast(ForwardingStmt)
+def_less_ast(CatchStmt)
+def_less_ast(ExternBlockStmt)
+def_less_ast(Expr)
+def_less_ast(ModuleSymbol)
+def_less_ast(VarSymbol)
+def_less_ast(ArgSymbol)
+def_less_ast(ShadowVarSymbol)
+def_less_ast(TypeSymbol)
+def_less_ast(FnSymbol)
+def_less_ast(EnumSymbol)
+def_less_ast(LabelSymbol)
+def_less_ast(Symbol)
+def_less_ast(PrimitiveType)
+def_less_ast(EnumType)
+def_less_ast(AggregateType)
+def_less_ast(Type)
+
+def_less_ast(LoopStmt);
+def_less_ast(WhileStmt);
+def_less_ast(WhileDoStmt);
+def_less_ast(DoWhileStmt);
+def_less_ast(ForLoop);
+def_less_ast(CForLoop);
+def_less_ast(ParamForLoop);
+
+#undef def_less_ast
+
+static inline LcnSymbol* toLcnSymbol(BaseAST* a)
+{
+  return isLcnSymbol(a) ? (LcnSymbol*) a : NULL;
+}
+
+static inline const LcnSymbol* toConstLcnSymbol(const BaseAST* a)
+{
+  return isLcnSymbol(a) ? (const LcnSymbol*) a : NULL;
+}
+
+CallExpr* getDesignatedCall(const ContextCallExpr* a);
+
+static inline CallExpr* toCallExpr(BaseAST* a)
+{
+  if (!a) return NULL;
+  if (a->astTag == E_CallExpr) return (CallExpr*) a;
+  if (a->astTag == E_ContextCallExpr) return getDesignatedCall((ContextCallExpr*)a);
+  return NULL;
+}
+
+static inline const CallExpr* toConstCallExpr(const BaseAST* a)
+{
+  if (!a) return NULL;
+  if (a->astTag == E_CallExpr) return (const CallExpr*) a;
+  if (a->astTag == E_ContextCallExpr) return getDesignatedCall((const ContextCallExpr*)a);
+  return NULL;
+}
+
+
 //
 // traversal macros
 //
@@ -374,11 +543,25 @@ def_to_ast(ParamForLoop);
     call(next_ast, __VA_ARGS__);                                        \
   }
 
+// Do not use for_vector to avoid #include astutil.h
+#define AST_CALL_STDVEC(_vec, _t, call, ...)                                 \
+  for (std::vector<_t*>::iterator it = _vec.begin(); it != _vec.end(); it++) \
+    { if (*it) call(*it, __VA_ARGS__); }
+
 #define AST_CHILDREN_CALL(_a, call, ...)                                \
   switch (_a->astTag) {                                                 \
   case E_CallExpr:                                                      \
     AST_CALL_CHILD(_a, CallExpr, baseExpr, call, __VA_ARGS__);          \
     AST_CALL_LIST(_a, CallExpr, argList, call, __VA_ARGS__);            \
+    break;                                                              \
+  case E_ContextCallExpr:                                               \
+    AST_CALL_LIST(_a, ContextCallExpr, options, call, __VA_ARGS__);     \
+    break;                                                              \
+  case E_ForallExpr:                                                    \
+    AST_CALL_CHILD(_a, ForallExpr, indices,      call, __VA_ARGS__);    \
+    AST_CALL_CHILD(_a, ForallExpr, iteratorExpr, call, __VA_ARGS__);    \
+    AST_CALL_CHILD(_a, ForallExpr, expr,         call, __VA_ARGS__);    \
+    AST_CALL_CHILD(_a, ForallExpr, cond,         call, __VA_ARGS__);    \
     break;                                                              \
   case E_NamedExpr:                                                     \
     AST_CALL_CHILD(_a, NamedExpr, actual, call, __VA_ARGS__);           \
@@ -387,6 +570,9 @@ def_to_ast(ParamForLoop);
     AST_CALL_CHILD(_a, DefExpr, init, call, __VA_ARGS__);               \
     AST_CALL_CHILD(_a, DefExpr, exprType, call, __VA_ARGS__);           \
     AST_CALL_CHILD(_a, DefExpr, sym, call, __VA_ARGS__);                \
+    break;                                                              \
+  case E_UseStmt:                                                       \
+    AST_CALL_CHILD(_a, UseStmt, src, call, __VA_ARGS__);                \
     break;                                                              \
                                                                                \
   case E_BlockStmt: {                                                          \
@@ -405,6 +591,11 @@ def_to_ast(ParamForLoop);
       AST_CALL_CHILD(stmt, ForLoop,      indexGet(),     call, __VA_ARGS__);   \
       AST_CALL_CHILD(stmt, ForLoop,      iteratorGet(),  call, __VA_ARGS__);   \
                                                                                \
+    } else if (stmt->isCoforallLoop() == true) {                               \
+      AST_CALL_LIST (stmt, ForLoop,      body,           call, __VA_ARGS__);   \
+      AST_CALL_CHILD(stmt, ForLoop,      indexGet(),     call, __VA_ARGS__);   \
+      AST_CALL_CHILD(stmt, ForLoop,      iteratorGet(),  call, __VA_ARGS__);   \
+                                                                               \
     } else if (stmt->isCForLoop()     == true) {                               \
       AST_CALL_LIST (stmt, CForLoop,     body,           call, __VA_ARGS__);   \
       AST_CALL_CHILD(stmt, CForLoop,     initBlockGet(), call, __VA_ARGS__);   \
@@ -418,8 +609,15 @@ def_to_ast(ParamForLoop);
     } else  {                                                                  \
       AST_CALL_LIST (stmt, BlockStmt,    body,           call, __VA_ARGS__);   \
       AST_CALL_CHILD(stmt, BlockStmt,    blockInfoGet(), call, __VA_ARGS__);   \
-      AST_CALL_CHILD(stmt, BlockStmt,    modUses,        call, __VA_ARGS__);   \
+      AST_CALL_CHILD(stmt, BlockStmt,    useList,        call, __VA_ARGS__);   \
       AST_CALL_CHILD(stmt, BlockStmt,    byrefVars,      call, __VA_ARGS__);   \
+      if (ForallIntents* bi = stmt->forallIntents) {                           \
+        AST_CALL_STDVEC(bi->fiVars,  Expr, call, __VA_ARGS__);                 \
+        AST_CALL_STDVEC(bi->riSpecs, Expr, call, __VA_ARGS__);                 \
+        AST_CALL_CHILD(bi, ForallIntents, iterRec,  call, __VA_ARGS__);        \
+        AST_CALL_CHILD(bi, ForallIntents, leadIdx,  call, __VA_ARGS__);        \
+        AST_CALL_CHILD(bi, ForallIntents, leadIdxCopy,  call, __VA_ARGS__);    \
+      }                                                                        \
     }                                                                          \
     break;                                                                     \
   }                                                                            \
@@ -432,6 +630,25 @@ def_to_ast(ParamForLoop);
   case E_GotoStmt:                                                      \
     AST_CALL_CHILD(_a, GotoStmt, label, call, __VA_ARGS__);             \
     break;                                                              \
+  case E_ForwardingStmt:                                                \
+    AST_CALL_CHILD(_a, ForwardingStmt, toFnDef, call, __VA_ARGS__);     \
+    break;                                                              \
+  case E_DeferStmt:                                                     \
+    AST_CALL_CHILD(_a, DeferStmt, body(), call, __VA_ARGS__);           \
+    break;                                                              \
+  case E_TryStmt:                                                       \
+    AST_CALL_CHILD(_a, TryStmt, _body, call, __VA_ARGS__);              \
+    AST_CALL_LIST(_a, TryStmt, _catches, call, __VA_ARGS__);            \
+    break;                                                              \
+  case E_CatchStmt:                                                     \
+    AST_CALL_CHILD(_a, CatchStmt, _body, call, __VA_ARGS__);            \
+    break;                                                              \
+  case E_ForallStmt:                                                          \
+    AST_CALL_LIST (_a, ForallStmt, inductionVariables(),  call, __VA_ARGS__); \
+    AST_CALL_LIST (_a, ForallStmt, iteratedExpressions(), call, __VA_ARGS__); \
+    AST_CALL_LIST (_a, ForallStmt, shadowVariables(),     call, __VA_ARGS__); \
+    AST_CALL_CHILD(_a, ForallStmt, loopBody(),            call, __VA_ARGS__); \
+    break;                                                                    \
   case E_ModuleSymbol:                                                  \
     AST_CALL_CHILD(_a, ModuleSymbol, block, call, __VA_ARGS__);         \
     break;                                                              \
@@ -440,12 +657,15 @@ def_to_ast(ParamForLoop);
     AST_CALL_CHILD(_a, ArgSymbol, defaultExpr, call, __VA_ARGS__);      \
     AST_CALL_CHILD(_a, ArgSymbol, variableExpr, call, __VA_ARGS__);     \
     break;                                                              \
+  case E_ShadowVarSymbol:                                               \
+    AST_CALL_CHILD(_a, ShadowVarSymbol, outerVarRep, call, __VA_ARGS__);\
+    AST_CALL_CHILD(_a, ShadowVarSymbol, specBlock,   call, __VA_ARGS__);\
+    break;                                                              \
   case E_TypeSymbol:                                                    \
     AST_CALL_CHILD(_a, Symbol, type, call, __VA_ARGS__);                \
     break;                                                              \
   case E_FnSymbol:                                                      \
     AST_CALL_LIST(_a, FnSymbol, formals, call, __VA_ARGS__);            \
-    AST_CALL_CHILD(_a, FnSymbol, setter, call, __VA_ARGS__);            \
     AST_CALL_CHILD(_a, FnSymbol, body, call, __VA_ARGS__);              \
     AST_CALL_CHILD(_a, FnSymbol, where, call, __VA_ARGS__);             \
     AST_CALL_CHILD(_a, FnSymbol, retExprType, call, __VA_ARGS__);       \
@@ -456,6 +676,7 @@ def_to_ast(ParamForLoop);
   case E_AggregateType:                                                 \
     AST_CALL_LIST(_a, AggregateType, fields, call, __VA_ARGS__);        \
     AST_CALL_LIST(_a, AggregateType, inherits, call, __VA_ARGS__);      \
+    AST_CALL_LIST(_a, AggregateType, forwardingTo, call, __VA_ARGS__);  \
     break;                                                              \
   default:                                                              \
     break;                                                              \

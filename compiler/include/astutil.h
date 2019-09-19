@@ -1,15 +1,15 @@
 /*
- * Copyright 2004-2014 Cray Inc.
+ * Copyright 2004-2018 Cray Inc.
  * Other additional copyright holders may be indicated within.
- * 
+ *
  * The entirety of this work is licensed under the Apache License,
  * Version 2.0 (the "License"); you may not use this file except
  * in compliance with the License.
- * 
+ *
  * You may obtain a copy of the License at
- * 
+ *
  *     http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -24,6 +24,7 @@
 #include "alist.h"
 
 #include <vector>
+#include <set>
 
 class Type;
 class FnSymbol;
@@ -34,37 +35,26 @@ class CallExpr;
 class SymExpr;
 class Expr;
 
-void normalize(BaseAST* base);
-
 // return vec of CallExprs of FnSymbols (no primitives)
-void collectFnCalls(BaseAST* ast, Vec<CallExpr*>& calls);
-void collectFnCallsSTL(BaseAST* ast, std::vector<CallExpr*>& calls);
+void collectFnCalls(BaseAST* ast, std::vector<CallExpr*>& calls);
 
 // collect Stmts and Exprs in the AST and return them in vectors
 // Versions ending in 'STL' use the C++ std::vector class
-void collect_asts(BaseAST* ast, Vec<BaseAST*>& asts);
-void collect_asts_STL(BaseAST* ast, std::vector<BaseAST*>& asts);
-void collect_asts_postorder(BaseAST*, Vec<BaseAST*>& asts);
-void collect_asts_postorder_STL(BaseAST*, std::vector<BaseAST*>& asts);
-void collect_top_asts(BaseAST* ast, Vec<BaseAST*>& asts);
-void collect_top_asts_STL(BaseAST* ast, std::vector<BaseAST*>& asts);
+void collect_asts(BaseAST* ast, std::vector<BaseAST*>& asts);
+void collect_asts_postorder(BaseAST*, std::vector<BaseAST*>& asts);
+void collect_top_asts(BaseAST* ast, std::vector<BaseAST*>& asts);
 void collectExprs(BaseAST* ast, std::vector<Expr*>& exprs);
-void collect_stmts(BaseAST* ast, Vec<Expr*>& stmts);
-void collect_stmts_STL(BaseAST* ast, std::vector<Expr*>& stmts);
-void collectDefExprs(BaseAST* ast, Vec<DefExpr*>& defExprs);
-void collectDefExprsSTL(BaseAST* ast, std::vector<DefExpr*>& defExprs);
-void collectCallExprs(BaseAST* ast, Vec<CallExpr*>& callExprs);
-void collectCallExprsSTL(BaseAST* ast, std::vector<CallExpr*>& callExprs);
-void collectMyCallExprs(BaseAST* ast, Vec<CallExpr*>& callExprs, FnSymbol* fn);
-void collectMyCallExprsSTL(BaseAST* ast, std::vector<CallExpr*>& callExprs, FnSymbol* fn);
-void collectGotoStmts(BaseAST* ast, Vec<GotoStmt*>& gotoStmts);
-void collectGotoStmtsSTL(BaseAST* ast, std::vector<GotoStmt*>& gotoStmts);
-void collectSymExprs(BaseAST* ast, Vec<SymExpr*>& symExprs);
-void collectSymExprsSTL(BaseAST* ast, std::vector<SymExpr*>& symExprs);
-void collectMySymExprs(Symbol* me, Vec<SymExpr*>& symExprs);
+void collect_stmts(BaseAST* ast, std::vector<Expr*>& stmts);
+void collectDefExprs(BaseAST* ast, std::vector<DefExpr*>& defExprs);
+void collectForallStmts(BaseAST* ast, std::vector<ForallStmt*>& forallStmts);
+void collectCallExprs(BaseAST* ast, std::vector<CallExpr*>& callExprs);
+void collectMyCallExprs(BaseAST* ast,
+                        std::vector<CallExpr*>& callExprs,
+                        FnSymbol* fn);
+void collectGotoStmts(BaseAST* ast, std::vector<GotoStmt*>& gotoStmts);
+void collectSymExprs(BaseAST* ast, std::vector<SymExpr*>& symExprs);
 void collectMySymExprs(Symbol* me, std::vector<SymExpr*>& symExprs);
-void collectSymbols(BaseAST* ast, Vec<Symbol*>& symbols);
-void collectSymbolsSTL(BaseAST* ast, std::vector<Symbol*>& symbols);
+void collectSymbols(BaseAST* ast, std::vector<Symbol*>& symbols);
 
 // utility routines for clearing and resetting lineno and filename
 void reset_ast_loc(BaseAST* destNode, astlocT astloc);
@@ -84,11 +74,22 @@ void collectSymbolSetSymExprVec(BaseAST* ast,
                                 Vec<SymExpr*>& symExprs);
 
 //
+// collect set of symbols
+//
+void collectSymbolSet(BaseAST* ast, Vec<Symbol*>& symSet);
+void collectSymbolSet(BaseAST* ast, std::set<Symbol*>& symSet);
+
+
+//
 // Checks if a callExpr is one of the op= primitives
 // Note, this does not check if a callExpr is an
 // op= function call (such as before inlining)
 //
 bool isOpEqualPrim(CallExpr* call);
+
+bool isMoveOrAssign(CallExpr* call);
+
+bool isDerefMove(CallExpr* call);
 
 //
 // Checks if a callExpr is a relational operator (<, <=, >, >=, ==, !=)
@@ -107,10 +108,8 @@ int isDefAndOrUse(SymExpr* se);
 // vectors are built differently depending on the other arguments
 //
 
-// builds the vectors for every variable/argument in 'symSet' and
-// looks for uses and defs only in 'symExprs'
+// builds the vectors for every variable/argument in 'symSet'
 void buildDefUseMaps(Vec<Symbol*>& symSet,
-                     Vec<SymExpr*>& symExprs,
                      Map<Symbol*,Vec<SymExpr*>*>& defMap,
                      Map<Symbol*,Vec<SymExpr*>*>& useMap);
 
@@ -131,13 +130,6 @@ void buildDefUseMaps(BlockStmt* block,
                      Map<Symbol*,Vec<SymExpr*>*>& defMap,
                      Map<Symbol*,Vec<SymExpr*>*>& useMap);
 
-// builds the vectors for every variable/argument in 'symSet' and
-// looks for uses and defs in the entire program
-inline void buildDefUseMaps(Vec<Symbol*>& symSet,
-                     Map<Symbol*,Vec<SymExpr*>*>& defMap,
-                     Map<Symbol*,Vec<SymExpr*>*>& useMap) {
-  buildDefUseMaps(symSet, gSymExprs, defMap, useMap);
-}
 
 //
 // add a def to a defMap or a use to a useMap
@@ -189,8 +181,11 @@ ArgSymbol* actual_to_formal( Expr *a);
 Expr* formal_to_actual(CallExpr* call, Symbol* formal);
 
 bool isTypeExpr(Expr* expr);
+bool givesType(Symbol* sym);
 
-// move to resolve when scope resolution is put in resolution directory
-BlockStmt* getVisibilityBlock(Expr* expr);
+Symbol* getSvecSymbol(CallExpr* call);
+void collectUsedFnSymbols(BaseAST* ast, std::set<FnSymbol*>& fnSymbols);
+
+void convertToQualifiedRefs();
 
 #endif

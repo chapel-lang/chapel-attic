@@ -1,4 +1,4 @@
-# Copyright 2004-2014 Cray Inc.
+# Copyright 2004-2018 Cray Inc.
 # Other additional copyright holders may be indicated within.
 # 
 # The entirety of this work is licensed under the Apache License,
@@ -17,7 +17,13 @@
 
 # put Cray PE cross-compilation gnu-specific settings here
 
-include $(CHPL_MAKE_HOME)/make/compiler/Makefile.$(CHPL_MAKE_TARGET_PLATFORM)
+CRAYPE_GEN_CFLAGS =
+CRAYPE_COMP_CXXFLAGS =
 
-RUNTIME_CFLAGS += -std=c99
-GEN_CFLAGS += -std=c99
+# Don't worry about libmvec.a in PrgEnv-gnu.  It's taken care of.
+WANT_LIBMVEC = no
+
+include $(CHPL_MAKE_HOME)/make/compiler/Makefile.gnu
+
+include $(CHPL_MAKE_HOME)/make/compiler/Makefile.cray-prgenv
+

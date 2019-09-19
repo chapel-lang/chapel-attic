@@ -1,15 +1,15 @@
 /*
- * Copyright 2004-2014 Cray Inc.
+ * Copyright 2004-2018 Cray Inc.
  * Other additional copyright holders may be indicated within.
- * 
+ *
  * The entirety of this work is licensed under the Apache License,
  * Version 2.0 (the "License"); you may not use this file except
  * in compliance with the License.
- * 
+ *
  * You may obtain a copy of the License at
- * 
+ *
  *     http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -20,7 +20,46 @@
 // DefaultOpaque.chpl
 //
 module DefaultOpaque {
-  
+  use ChapelStandard;
+
+  // record _OpaqueIndex is defined in ChapelArray
+
+  pragma "no doc"
+  proc _OpaqueIndexGetNext():uint {
+    var n:uint;
+    local {
+      n = _OpaqueIndexNext.fetchAdd(1, order=memory_order_relaxed);
+    }
+    return n+1;
+  }
+
+  // creating a new opaque index
+  proc _OpaqueIndexCreate() {
+    var idx:_OpaqueIndex;
+    idx.node = here.id;
+    idx.i = _OpaqueIndexGetNext();
+    return idx;
+  }
+  // support for pretending the default value is nil
+  inline proc =(ref a:_OpaqueIndex, b:_nilType) {
+    a.i = 0;
+  }
+  inline proc ==(a:_OpaqueIndex, b:_nilType) {
+    return a.i == 0;
+  }
+  inline proc ==(a:_nilType, b:_OpaqueIndex) {
+    return b.i == 0;
+  }
+  inline proc !=(a:_OpaqueIndex, b:_nilType) {
+    return a.i != 0;
+  }
+  inline proc !=(a:_nilType, b:_OpaqueIndex) {
+    return b.i != 0;
+  }
+  proc _OpaqueIndex.writeThis(writer) {
+    writer <~> "{}";
+  }
+
   class DefaultOpaqueDom: BaseOpaqueDom {
     type idxType = _OpaqueIndex;
     param parSafe: bool;
@@ -35,15 +74,22 @@ module DefaultOpaque {
       adomain = new DefaultAssociativeDom(_OpaqueIndex, dist, parSafe=parSafe);
     }
   
-    proc ~DefaultOpaqueDom() {
-      for i in adomain do delete i;
+    proc deinit() {
       delete adomain;
     }
   
     proc dsiCreate() {
-      var i = new _OpaqueIndex();
+      var i = _OpaqueIndexCreate();
       adomain.dsiAdd(i);
       return i;
+    }
+
+    proc dsiMyDist() {
+      return dist;
+    }
+
+    proc dsiAdd(i:idxType) {
+      return adomain.dsiAdd(i);
     }
   
     proc dsiGetIndices() return adomain;
@@ -52,6 +98,10 @@ module DefaultOpaque {
       adomain.dsiSetIndices(b);
     }
   
+    proc dsiAssignDomain(rhs: domain, lhsPrivate:bool) {
+      chpl_assignDomainWithIndsIterSafeForRemoving(this, rhs);
+    }
+
     iter these() {
       for i in adomain do
         yield i;
@@ -66,7 +116,13 @@ module DefaultOpaque {
       for i in adomain.these(tag=iterKind.follower, followThis) do
         yield i;
     }
-  
+
+    iter dsiIndsIterSafeForRemoving() {
+      for i in adomain.dsiIndsIterSafeForRemoving() {
+        yield i;
+      }
+    }
+
     proc dsiMember(ind: idxType) {
       return adomain.dsiMember(ind);
     }
@@ -81,18 +137,18 @@ module DefaultOpaque {
     }
   }
   
-  proc DefaultOpaqueDom.dsiSerialWrite(f: Writer) {
+  proc DefaultOpaqueDom.dsiSerialWrite(f) {
     adomain.dsiSerialWrite(f);
   }
   
-  proc DefaultOpaqueDom.dsiSerialRead(f: Reader) {
+  proc DefaultOpaqueDom.dsiSerialRead(f) {
     adomain.dsiSerialRead(f);
   }
   
-  proc DefaultOpaqueArr.dsiSerialWrite(f: Writer) {
+  proc DefaultOpaqueArr.dsiSerialWrite(f) {
     anarray.dsiSerialWrite(f);
   }
-  proc DefaultOpaqueArr.dsiSerialRead(f: Reader) {
+  proc DefaultOpaqueArr.dsiSerialRead(f) {
     anarray.dsiSerialRead(f);
   }
   
@@ -106,7 +162,7 @@ module DefaultOpaque {
     var anarray = new DefaultAssociativeArr(eltType=eltType, idxType=idxType,
                                             parSafeDom=parSafe, dom=dom.adomain);
   
-    proc ~DefaultOpaqueArr() {
+    proc deinit() {
       delete anarray;
     }
   
@@ -141,14 +197,14 @@ module DefaultOpaque {
     }
   
   
-    iter dsiSorted() {
-      for e in anarray.dsiSorted() do
+    iter dsiSorted(comparator) {
+      for e in anarray.dsiSorted(comparator) do
         yield e;
     }
   }
   
   proc DefaultOpaqueDom.dsiRemove(idx: idxType) {
-    adomain.dsiRemove(idx);
+    return adomain.dsiRemove(idx);
   }
   
 }

@@ -1,4 +1,4 @@
-# Copyright 2004-2014 Cray Inc.
+# Copyright 2004-2018 Cray Inc.
 # Other additional copyright holders may be indicated within.
 # 
 # The entirety of this work is licensed under the Apache License,
@@ -24,12 +24,24 @@ ifndef RUNTIME_ROOT
 RUNTIME_ROOT=$(CHPL_MAKE_HOME)/runtime/
 endif
 
+ifdef CHPL_MAKE_RUNTIME_INCL
+RUNTIME_INCLUDE_ROOT = $(CHPL_MAKE_RUNTIME_INCL)
+else
 RUNTIME_INCLUDE_ROOT = $(RUNTIME_ROOT)/include
+endif
 
 RUNTIME_DEFS += \
         -DCHPL_TASKS_MODEL_H=\"tasks-$(CHPL_MAKE_TASKS).h\" \
         -DCHPL_THREADS_MODEL_H=\"threads-$(CHPL_MAKE_THREADS).h\" \
 	$(CHPL_MAKE_WIDE_POINTERS_DEFINES)
+
+ifdef CHPL_QSBR_PROFILE
+RUNTIME_DEFS += -DCHPL_QSBR_PROFILE=1
+endif
+
+ifdef CHPL_QSBR_CHECK
+RUNTIME_DEFS += -DCHPL_QSBR_CHECK=1
+endif
 
 ifeq ($(DEBUG),1)
 RUNTIME_DEFS += -DCHPL_DEBUG
@@ -40,7 +52,7 @@ RUNTIME_DEFS += -DCHPL_COMM_DEBUG
 endif
 
 ifeq ($(OPTIMIZE),1)
-RUNTIME_DEFS += -DCHPL_OPTIMIZE
+RUNTIME_DEFS += -DCHPL_OPTIMIZE -DNDEBUG
 endif
 
 # For HDFS support (and backwards compatibility)
@@ -48,40 +60,70 @@ ifneq (,$(findstring hdfs,$(CHPL_MAKE_AUXFS)))
 	CHPL_AUXIO_INCLUDE ?= \
 		-I$(JAVA_INSTALL)/include \
 		-I$(JAVA_INSTALL)/include/linux \
-		-I$(HADOOP_INSTALL)/src/c++/libhdfs \
+		-I$(HADOOP_INSTALL)/include \
 
 	CHPL_AUXIO_LIBS ?= \
 		-L$(JAVA_INSTALL)/jre/lib/amd64/server \
-		-L$(HADOOP_INSTALL)/c++/Linux-amd64-64/lib 
+		-L$(HADOOP_INSTALL)/lib/native 
 endif 
 
 
 # Some tasking layers put something in RUNTIME_INCLS first.
 RUNTIME_INCLS += \
         -I. \
+        -I$(CHPL_MAKE_HOME)/modules/packages \
         -I$(RUNTIME_INCLUDE_ROOT)/localeModels/$(CHPL_MAKE_LOCALE_MODEL) \
         -I$(RUNTIME_INCLUDE_ROOT)/localeModels \
         -I$(RUNTIME_INCLUDE_ROOT)/comm/$(CHPL_MAKE_COMM) \
         -I$(RUNTIME_INCLUDE_ROOT)/comm \
         -I$(RUNTIME_INCLUDE_ROOT)/tasks/$(CHPL_MAKE_TASKS) \
         -I$(RUNTIME_INCLUDE_ROOT)/threads/$(CHPL_MAKE_THREADS) \
-        -I$(RUNTIME_INCLUDE_ROOT)/comp-$(CHPL_MAKE_COMPILER) \
-        -I$(RUNTIME_INCLUDE_ROOT)/$(subst -sim,,$(CHPL_MAKE_TARGET_PLATFORM)) \
         -I$(RUNTIME_INCLUDE_ROOT) \
         -I$(RUNTIME_INCLUDE_ROOT)/qio \
         -I$(RUNTIME_INCLUDE_ROOT)/atomics/$(CHPL_MAKE_ATOMICS) \
         -I$(RUNTIME_INCLUDE_ROOT)/mem/$(CHPL_MAKE_MEM) \
         -I$(THIRD_PARTY_DIR)/utf8-decoder \
+        -I$(RUNTIME_BUILD)/include \
 
-# Add any further includes (e.g. third party tcmalloc dir) for memory
+RUNTIME_CYGWIN=0
+ifeq ($(CHPL_MAKE_TARGET_PLATFORM),cygwin32)
+  RUNTIME_CYGWIN=1
+endif
+ifeq ($(CHPL_MAKE_TARGET_PLATFORM),cygwin64)
+  RUNTIME_CYGWIN=1
+endif
+
+# w32api is provided by cygwin32-w32api-runtime
+ifeq ($(RUNTIME_CYGWIN),1)
+  RUNTIME_INCLS += -I/usr/include/w32api
+endif
+
+# Add any further includes for memory including jemalloc target memory,
+# when making the launcher.
 MEM_INCLUDE=$(RUNTIME_ROOT)/make/Makefile.runtime.mem-$(CHPL_MAKE_MEM)
 ifneq ($(strip $(wildcard $(MEM_INCLUDE))),)
   include $(MEM_INCLUDE)
 endif
 
+ifeq ($(MAKE_LAUNCHER),1)
+  ifeq ($(CHPL_MAKE_TARGET_MEM),jemalloc)
+    TARGET_MEM_INCLUDE=\
+      $(RUNTIME_ROOT)/make/Makefile.runtime.mem-$(CHPL_MAKE_TARGET_MEM)
+    -include $(TARGET_MEM_INCLUDE)
+  endif
+endif
+
+# Add any further includes for COMM.
+COMM_INCLUDE=$(RUNTIME_ROOT)/make/Makefile.runtime.comm-$(CHPL_MAKE_COMM)
+-include $(COMM_INCLUDE)
+
 # Add any further includes for GMP.
 GMP_INCLUDE=$(RUNTIME_ROOT)/make/Makefile.runtime.gmp-$(CHPL_MAKE_GMP)
 -include $(GMP_INCLUDE)
+
+# Add any further includes for unwind.
+UNWIND_INCLUDE=$(RUNTIME_ROOT)/make/Makefile.runtime.unwind-$(CHPL_MAKE_UNWIND)
+-include $(UNWIND_INCLUDE)
 
 # Add any further includes for HWLOC.
 HWLOC_INCLUDE=$(RUNTIME_ROOT)/make/Makefile.runtime.hwloc-$(CHPL_MAKE_HWLOC)
@@ -95,5 +137,6 @@ RUNTIME_DEFS += -fPIC
 endif
 
 RUNTIME_CFLAGS += $(RUNTIME_DEFS)
-RUNTIME_CXXFLAGS += $(RUNTIME_DEFS)
+RUNTIME_CXXFLAGS += $(RUNTIME_DEFS) $(CXXFLAGS)
+
 

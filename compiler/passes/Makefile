@@ -1,4 +1,4 @@
-# Copyright 2004-2014 Cray Inc.
+# Copyright 2004-2018 Cray Inc.
 # Other additional copyright holders may be indicated within.
 # 
 # The entirety of this work is licensed under the Apache License,
@@ -30,7 +30,7 @@ include $(COMPILER_ROOT)/make/Makefile.compiler.head
 PASSES_OBJDIR = $(OBJ_SUBDIR)
 include Makefile.share
 
-TARGETS = reservedSymbolNames.h $(PASSES_OBJS)
+TARGETS = $(PASSES_OBJS)
 
 include $(COMPILER_ROOT)/make/Makefile.compiler.subdirrules
 
@@ -40,6 +40,3 @@ FORCE:
 # standard footer
 #
 include $(COMPILER_ROOT)/make/Makefile.compiler.foot
-
-reservedSymbolNames.h: reservedSymbolNames
-	sed -e 's/^\([ 	]*\)\([A-Za-z_][A-Za-z0-9_]*\)/\1cnames.set_add(astr("\2"));/' <$< >$@

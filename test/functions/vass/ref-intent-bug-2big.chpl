@@ -43,8 +43,8 @@ config const ldx=2, ldy=3;
 type elType = real;
 
 // for neighbor-cache pointers
-var auxArr: [1..1] elType;
-type cacheType = auxArr._value.type; // a class type, so it can be nil
+var auxArr: [1..1, 1..1] elType;
+type cacheType = auxArr[1,..]._value.type; // a class type, so it can be nil
 
 class LocalInfo {
   // our coordinates on the grid (perhaps not strictly needed)
@@ -66,10 +66,16 @@ class GlobalInfo {
 }
 
 // constructor for GlobalInfo
-proc GlobalInfo.GlobalInfo() {
+proc GlobalInfo.init() {
+  this.initDone();
   coforall ((ix,iy), inf) in zip(gridDist, infos) do on inf {
     inf = new LocalInfo(mygx=ix, mygy=iy);
   }
+}
+
+proc GlobalInfo.deinit() {
+  forall inf in infos do
+    delete inf;
 }
 
 // Here are all our local domains. WI <- Working Indices.
@@ -96,8 +102,9 @@ class GlobalData {
 }
 
 // constructor for GlobalData
-proc GlobalData.GlobalData(nameArg: string) {
+proc GlobalData.init(nameArg: string) {
   name=nameArg;
+  this.initDone();
   coforall (inf, dat, loc) in zip(WI.infos, datas, gridLocales) do on loc {
     dat = new LocalData(inf);
     // sanity checks
@@ -117,23 +124,34 @@ proc GlobalData.GlobalData(nameArg: string) {
     proc storecache(ref cache, dx, dy, slicex, slicey) {
       const ind = (ix+dx, iy+dy);
       if !gridDist.member(ind) {
-	msg1("  ", ind, "  no neighbor");
-	return;
+        msg1("  ", ind, "  no neighbor");
+        return;
       }
       const nbr = datas[ind]; // our neighbor
       on nbr {
-	msg1("  ", ind, "  slice at [", slicex, ",", slicey, "]");
-	var slice => nbr.ldata[slicex, slicey];
-	cache = slice._value;
-	if !noRefCount then cache._arrCnt.inc(1);  // this is a bit low-level
+        msg1("  ", ind, "  slice at [", slicex, ",", slicey, "]");
+        pragma "no auto destroy"
+          ref slice = nbr.ldata[slicex, slicey];
+        cache = slice._value;
       }
     }  // storecache()
   }  // forall
 }  // GlobalData constructor
 
+proc GlobalData.deinit() {
+  forall dat in datas do
+    delete dat;
+}
+
 // Our two global arrays, to switch between.
 const WA = new GlobalData("WA"),
       WB = new GlobalData("WB");
+
+proc deinit() {
+  delete WA;
+  delete WB;
+  delete WI;
+}
 
 // Reuse the name for an indexing operation.
 // This does not access neighbor caches.

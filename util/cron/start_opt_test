@@ -20,8 +20,8 @@ use Cwd 'abs_path';
 use File::Basename;
 
 # Mailing lists.
-$failuremail = "chapel-test-results-regressions\@lists.sourceforge.net";
-$allmail = "chapel-test-results-all\@lists.sourceforge.net";
+$failuremail = "chapel-test-results-regressions\@lists.sourceforge.net chapel_cronmail\@cray.com";
+$allmail = "chapel-test-results-all\@lists.sourceforge.net chapel_cronmail_all\@cray.com";
 
 while (@ARGV) {
   $flag = shift @ARGV;
@@ -72,7 +72,7 @@ foreach $line (@lines) {
     }
 }
 
-if ($cron) {
+if ($cron && (!exists($ENV{"CHPL_TEST_NOMAIL"}) or grep {$ENV{"CHPL_TEST_NOMAIL"} =~ /^$_$/i} ('','\s*','0','f(alse)?','no?'))) {
     $nerror = $nerrort2/2;
     if ($nerror == 0) {
         open(FILE, "| mail -s \"Cron $nerror/$nerror (chap02:opts tests)\" $allmail $ENV{'USER'}\@cray.com");
@@ -81,6 +81,9 @@ if ($cron) {
     }
 } else {
     open(FILE, ">&STDOUT");
+    if (exists($ENV{"CHPL_TEST_NOMAIL"})) {
+        print FILE "CHPL_TEST_NOMAIL: No mail\n";
+    }
 }
 
 $nerror = 0;

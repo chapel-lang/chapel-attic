@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2014 Cray Inc.
+ * Copyright 2004-2018 Cray Inc.
  * Other additional copyright holders may be indicated within.
  *
  * The entirety of this work is licensed under the Apache License,
@@ -18,6 +18,8 @@
  */
 
 module ChapelDynDispHack {
+  use ChapelStandard;
+
   //
   // This is an incredibly lame hack.  If the test:
   //
