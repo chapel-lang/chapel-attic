@@ -5,11 +5,10 @@ class Foo {
   param p: int = 3;
 
   proc init() {
-    this.initDone();
+    this.complete();
     p = 4; // This should fail
   }
 }
 
-var foo = new Foo();
+var foo = new borrowed Foo();
 writeln(foo);
-delete foo;

@@ -67,7 +67,7 @@ users/npadmana/npb-mg/mg-b.graph
 arrays/diten/time_iterate.graph
 arrays/diten/time_array_vs_tuple.graph
 arrays/diten/time_array_vs_ddata.graph
-arrays/diten/timeVectorArray.graph
+deprecated/arrayAsVec/timeVectorArray.graph
 arrays/ferguson/return-array-40000000.graph
 arrays/lydia/time_access.graph
 domains/ferguson/build-associative.graph
@@ -91,7 +91,7 @@ users/franzf/v0/chpl/main.graph
 reductions/diten/testSerialReductions.graph
 reductions/vass/reductions-perf.graph
 studies/rbc/tvandoren/RBC.graph
-exercises/c-ray/c-ray.graph
+exercises/c-ray/old/c-ray.graph
 users/npadmana/twopt/twopt-buildtrees.graph
 users/npadmana/twopt/twopt-paircount.graph
 performance/compiler/bradc/AllCompTime.graph
@@ -138,19 +138,16 @@ studies/shootout/spectral-norm/spectralnorm.graph
 studies/shootout/thread-ring/thread-ring.graph
 # suite: Submitted Shootout benchmarks
 studies/shootout/submitted/binarytrees-submitted.graph
-studies/shootout/submitted/chameneosredux-submitted.graph
 studies/shootout/submitted/fannkuchredux-submitted.graph
 studies/shootout/submitted/fasta-submitted.graph
 studies/shootout/submitted/knucleotide-submitted.graph
 studies/shootout/submitted/mandelbrot-submitted.graph
-studies/shootout/submitted/meteor-submitted.graph
 studies/shootout/submitted/nbody-submitted.graph
 studies/shootout/submitted/pidigits-submitted.graph
 studies/shootout/submitted/regexdna-submitted.graph
 studies/shootout/submitted/regexdnaredux-submitted.graph
 studies/shootout/submitted/revcomp-submitted.graph
 studies/shootout/submitted/spectralnorm-submitted.graph
-studies/shootout/submitted/threadring-submitted.graph
 # suite: Shootout extras
 studies/shootout/fasta/fasta-extras.graph
 studies/shootout/fasta/fastaredux.graph
@@ -233,7 +230,10 @@ parallel/taskCompare/lydia/loopCompare.graph
 # suite: Task Spawning
 parallel/taskCompare/elliot/taskSpawn.graph
 parallel/taskCompare/elliot/serialTaskSpawn.graph
+studies/hpcc/STREAMS/elliot/stream-task-placement.graph
+# suite: Barrier
 performance/comm/barrier/empty-chpl-barrier.graph
+studies/hpcc/STREAMS/elliot/stream-spmd-barrier.graph
 # suite: Compiler performance
 performance/compiler/bradc/fft-timecomp.graph
 performance/compiler/bradc/compSampler-timecomp.graph
@@ -242,6 +242,8 @@ performance/compiler/bradc/AllCompTime.graph
 # suite: Memory tracking
 memleaks.graph
 memleaksfull.graph
+# suite: Memory allocation
+memory/lifetime/allocation.graph
 # suite: Code size tracking
 studies/jacobi/jacobi.graph
 # suite: Startup tracking
@@ -268,15 +270,19 @@ library/packages/Sort/performance/sorts-quadratic.graph
 library/packages/LinearAlgebra/performance/linearalgebra-perf.graph
 sparse/CS/multiplication/cs-multiplication.graph
 sparse/CS/resize/cs-resize.graph
+library/packages/Sort/RadixSort/radixsortMSB.graph
 # suite: Misc
 users/franzf/v0/chpl/main.graph
 reductions/diten/testSerialReductions.graph
 reductions/vass/reductions-perf.graph
+parallel/forall/reduce-intents/ri-a2-AoA.graph
 spectests.graph
 studies/paracr/asenjo/PARACR-BC.graph
 library/standard/BitOps/c-tests/performance/bitops.graph
+library/standard/Random/performance/getNextPerf.graph
 studies/rbc/tvandoren/RBC.graph
-exercises/c-ray/c-ray.graph
+exercises/c-ray/old/c-ray.graph
+scan/scanPerf.graph
 # suite: Colorado State University
 studies/colostate/Jacobi1D.graph
 studies/colostate/Jacobi2D.graph
@@ -286,6 +292,9 @@ users/npadmana/twopt/twopt-buildtrees.graph
 users/npadmana/twopt/twopt-paircount.graph
 # suite: Elegance
 studies/elegance/elegance.graph
+# suite: Bale
+studies/bale/toposort/toposort.perf.graph
+studies/bale/toposort/toposort.time.graph
 # suite: Serial Performance
 patterns/primality/prime.graph
 statements/lydia/forCompare.graph
@@ -319,3 +328,4 @@ statements/lydia/moduleVersusFunctionDifAccess.graph
 statements/lydia/moduleVersusFunction.graph
 # suite: Samples (bogus)
 Samples/Performance/foo.graph
+Samples/Performance/cleanCopy/foobar.graph

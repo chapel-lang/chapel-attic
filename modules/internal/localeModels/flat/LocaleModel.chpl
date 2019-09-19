@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2018 Cray Inc.
+ * Copyright 2004-2019 Cray Inc.
  * Other additional copyright holders may be indicated within.
  *
  * The entirety of this work is licensed under the Apache License,
@@ -69,7 +69,7 @@ module LocaleModel {
       }
       _node_id = chpl_nodeID: int;
 
-      this.initDone();
+      this.complete();
 
       setup();
     }
@@ -83,16 +83,18 @@ module LocaleModel {
 
       _node_id = chpl_nodeID: int;
 
-      this.initDone();
+      this.complete();
 
       setup();
     }
 
-    proc chpl_id() return _node_id;     // top-level locale (node) number
-    proc chpl_localeid() {
+    // top-level locale (node) number
+    override proc chpl_id() return _node_id;
+
+    override proc chpl_localeid() {
       return chpl_buildLocaleID(_node_id:chpl_nodeID_t, c_sublocid_any);
     }
-    proc chpl_name() return local_name;
+    override proc chpl_name() return local_name;
 
     //
     // Support for different types of memory:
@@ -100,43 +102,36 @@ module LocaleModel {
     //
     // The flat memory model assumes only one memory.
     //
-    proc defaultMemory() : locale {
+    override proc defaultMemory() : locale {
       return this;
     }
 
-    proc largeMemory() : locale {
+    override proc largeMemory() : locale {
       return this;
     }
 
-    proc lowLatencyMemory() : locale {
+    override proc lowLatencyMemory() : locale {
       return this;
     }
 
-    proc highBandwidthMemory() : locale {
+    override proc highBandwidthMemory() : locale {
       return this;
-    }
-
-
-    proc writeThis(f) {
-      // Most classes will define it like this:
-      //      f <~> name;
-      // but here it is defined thus for backward compatibility.
-      f <~> new ioLiteral("LOCALE") <~> _node_id;
     }
 
     proc getChildSpace() return chpl_emptyLocaleSpace;
 
-    proc getChildCount() return 0;
+    override proc getChildCount() return 0;
 
     iter getChildIndices() : int {
       for idx in chpl_emptyLocaleSpace do
         yield idx;
     }
 
-    proc getChild(idx:int) : locale {
-      if boundsChecking then
-        halt("requesting a child from a LocaleModel locale");
-      return nil;
+    pragma "unsafe"
+    override proc getChild(idx:int) : locale {
+      halt("requesting a child from a flat LocaleModel locale");
+      var tmp:locale; // nil
+      return tmp;
     }
 
     iter getChildren() : locale  {
@@ -189,18 +184,18 @@ module LocaleModel {
     // We return numLocales for now, since we expect nodes to be
     // numbered less than this.
     // -1 is used in the abstract locale class to specify an invalid node ID.
-    proc chpl_id() return numLocales;
-    proc chpl_localeid() {
+    override proc chpl_id() return numLocales;
+    override proc chpl_localeid() {
       return chpl_buildLocaleID(numLocales:chpl_nodeID_t, c_sublocid_none);
     }
-    proc chpl_name() return local_name();
+    override proc chpl_name() return local_name();
     proc local_name() return "rootLocale";
 
-    proc writeThis(f) {
+    override proc writeThis(f) {
       f <~> name;
     }
 
-    proc getChildCount() return this.myLocaleSpace.numIndices;
+    override proc getChildCount() return this.myLocaleSpace.numIndices;
 
     proc getChildSpace() return this.myLocaleSpace;
 
@@ -209,17 +204,17 @@ module LocaleModel {
         yield idx;
     }
 
-    proc getChild(idx:int) return this.myLocales[idx];
+    override proc getChild(idx:int) return this.myLocales[idx];
 
     iter getChildren() : locale  {
       for loc in this.myLocales do
         yield loc;
     }
 
-    proc getDefaultLocaleSpace() const ref return this.myLocaleSpace;
-    proc getDefaultLocaleArray() const ref return myLocales;
+    override proc getDefaultLocaleSpace() const ref return this.myLocaleSpace;
+    override proc getDefaultLocaleArray() const ref return myLocales;
 
-    proc localeIDtoLocale(id : chpl_localeID_t) {
+    override proc localeIDtoLocale(id : chpl_localeID_t) {
       // In the default architecture, there are only nodes and no sublocales.
       // What is more, the nodeID portion of a wide pointer is the same as
       // the index into myLocales that yields the locale representing that
@@ -231,7 +226,7 @@ module LocaleModel {
       for loc in myLocales {
         on loc {
           rootLocaleInitialized = false;
-          delete loc;
+          delete _to_unmanaged(loc);
         }
       }
     }

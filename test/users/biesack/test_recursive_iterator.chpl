@@ -3,23 +3,23 @@ module missing_return_bug {
 
   class ValueNode : Node { const value : int; }
 
-  class Branch : Node { const left, right : Node; }
+  class Branch : Node { const left, right : unmanaged Node; }
 
-  proc node(a : int, b : int) : Branch {
-    return new Branch(new ValueNode(a), new ValueNode(b));
+  proc node(a : int, b : int) : unmanaged Branch {
+    return new unmanaged Branch(new unmanaged ValueNode(a), new unmanaged ValueNode(b));
   }
 
-  proc node(a, b : Node) : Branch {
-    return new Branch(a, b);
+  proc node(a, b : unmanaged Node) : unmanaged Branch {
+    return new unmanaged Branch(a, b);
   }
 
-  iter leaves(tree : Node) : int {
+  iter leaves(tree : unmanaged Node) : int {
     select tree.type {
-      when ValueNode do {
+      when unmanaged ValueNode do {
         yield tree.value;
       }
 
-      when Branch do {
+      when unmanaged Branch do {
         if (tree.left != nil) {
           for leaf in leaves(tree.left) do yield leaf;
         }

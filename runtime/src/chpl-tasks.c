@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2018 Cray Inc.
+ * Copyright 2004-2019 Cray Inc.
  * Other additional copyright holders may be indicated within.
  * 
  * The entirety of this work is licensed under the Apache License,
@@ -23,9 +23,8 @@
 //
 #include "chplrt.h"
 #include "chpl-comm.h"
-#include "chplsys.h"
 #include "chpl-tasks.h"
-#include "chpl-qsbr.h"
+#include "chpl-topo.h"
 #include "error.h"
 
 #include <inttypes.h>
@@ -50,12 +49,12 @@ int32_t chpl_task_getenvNumThreadsPerLocale(void)
     int32_t lim = chpl_comm_getMaxThreads();
 
     if (strcmp(p, "MAX_PHYSICAL") == 0) {
-      num = chpl_getNumPhysicalCpus(true);
+      num = chpl_topo_getNumCPUsPhysical(true);
       if (lim > 0 && lim < num)
         num = lim;
     }
     else if (strcmp(p, "MAX_LOGICAL") == 0) {
-      num = chpl_getNumLogicalCpus(true);
+      num = chpl_topo_getNumCPUsLogical(true);
       if (lim > 0 && lim < num)
         num = lim;
     }
@@ -208,12 +207,3 @@ size_t chpl_task_getDefaultCallStackSize(void)
 
   return deflt;
 }
-
-void chpl_task_threadOnPark(void) {
-  chpl_qsbr_blocked();
-}
-
-void chpl_task_threadOnUnpark(void) {
-  chpl_qsbr_unblocked();
-}
-

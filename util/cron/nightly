@@ -28,6 +28,7 @@ $valgrind = 0;
 $interpret = 0;
 $printusage = 1;
 $debug = 1;
+$asserts = 0;
 $runtests = 1;
 $buildruntime = 1;
 $hello = 0;
@@ -52,7 +53,6 @@ $verify = 0;
 $retaintree = 0;
 $dist = "";
 $llvm = 0;
-$localeModelSuite = 0;
 $memleaks = "";
 $multilocale = 0;
 $svnrevopt = "";
@@ -87,13 +87,7 @@ while (@ARGV) {
     } elsif ($flag eq "-examples") {
         $examples = 1;
     } elsif ($flag eq "-multilocale") {
-        $examples = 1;
         $multilocale = 1;
-    } elsif ($flag eq "-localeModel") {
-        # TODO: Allow -localeModel to run full suite (e.g. w/o setting
-        #       $examples = 1) (thomasvandoren, 2014-02-10)
-        $examples = 1;
-        $localeModelSuite = 1;
     } elsif ($flag eq "-performance") {
         $performance = 1;
     } elsif ($flag eq "-performance-description") {
@@ -150,6 +144,8 @@ while (@ARGV) {
         $llvm = 1;
     } elsif ($flag eq "-junit-xml") {
         $junit_xml = 1;
+    } elsif ($flag eq "-asserts") {
+        $asserts = 1;
     } else {
         $printusage = 1;
         last;
@@ -201,9 +197,8 @@ if ($printusage == 1) {
     print "\t-hellos                        : run the release/examples/hello*.chpl tests only\n";
     print "\t-junit-xml                     : create jUnit XML style report (default is \"on\" in Jenkins environment)\n";
     print "\t-llvm                          : run tests using --llvm\n";
-    print "\t-localeModel                   : run localeModel suite only\n";
     print "\t-memleaks <log>                : run memleaks tests\n";
-    print "\t-multilocale                   : run multilocale suite only\n";
+    print "\t-multilocale                   : run multilocale tests only\n";
     print "\t-no-buildcheck                 : do not run `make check` before running tests\n";
     print "\t-no-futures                    : do not run future tests\n";
     print "\t-no-local                      : run tests using --no-local\n";
@@ -281,7 +276,8 @@ if ($basetmpdir eq "") {
 
 # Number of logical processes on current system. Will be used as number of jobs
 # when calling make with parallel execution.
-$num_procs = `python -c "import multiprocessing; print(multiprocessing.cpu_count())"`;
+$here = dirname(__FILE__);
+$num_procs = `$here/../buildRelease/chpl-make-cpu_count`;
 chomp($num_procs);
 
 $cronlogdir = $ENV{'CHPL_NIGHTLY_CRON_LOGDIR'};
@@ -480,7 +476,7 @@ if ($hostplatform =~ "cygwin") {
 $hostcompiler = `$utildir/chplenv/chpl_compiler.py --host`; chomp($hostcompiler);
 
 # Setup variables to pass to all make calls.
-$make_vars_no_opt = "DEBUG=0 WARNINGS=1";
+$make_vars_no_opt = "DEBUG=0 WARNINGS=1 ASSERTS=$asserts";
 
 # Add OPTIMIZE=1 for most environments. If using the cray programming
 # environment, disable optimizations when building the compiler. This is an
@@ -578,6 +574,9 @@ if (exists($ENV{'CHPL_NIGHTLY_TEST_DIRS'})) {
     $testdirs .= " $env_test_dirs";
 }
 
+if ($multilocale == 1) {
+    $testflags = "$testflags -multilocale-only";
+}
 
 #
 # don't bother making the spec tests if we're only testing hello, world programs;
@@ -588,16 +587,6 @@ if ($examples == 1) {
     print "Making spectests\n";
     mysystem("cd $chplhomedir && $make spectests", "making spec tests", 0, 1);
     $testdirs .= " release/examples";
-    if ($multilocale == 1) {
-        $testdirs .= " multilocale distributions";
-    }
-    if ($localeModelSuite == 1) {
-        if ($multilocale == 1) {
-            $testdirs .= " localeModels memory";
-        } else {
-            $testdirs .= " localeModels memory distributions/robust/arithmetic";
-        }
-    }
     if ($parnodefile ne "") {
         mysystem("cd $testdir && find $testdirs -wholename \"*.svn\" -prune -o -type d > DIRFILE",
                  "making directory file", 1, 1);
@@ -744,7 +733,7 @@ if ($runtests == 0) {
         print "Executing $testcommand\n";
         $status = mysystem($testcommand, "running standard tests", 0, 0);
         print "Moving the log and summary files\n";
-        mysystem("cd $testdir && cp -v $rawlog $permlog && rm $rawlog && cp -v $rawsummary $permsum && rm $rawsummary", "moving the log files", 0, 0);
+        mysystem("cd $testdir && cp -v $rawlog $permlog && rm $rawlog && cp -v $rawsummary $permsum && rm $rawsummary", "moving the log files", 1, 1);
         $rawlog = $permlog;
         $rawsummary = $permsum;
     } else {
@@ -842,7 +831,7 @@ if ($runtests == 0) {
 # analyze memory leaks tests
 #
     if (!($memleaks eq "")) {
-        mysystem("$chplhomedir/util/devel/analyzeMemLeaksLog -show_strings $basetmpdir/$memleaks > $memleaksdir/$memleaks");
+        mysystem("$chplhomedir/util/devel/analyzeMemLeaksLog $basetmpdir/$memleaks > $memleaksdir/$memleaks");
 
         # Update the memory leaks status for performance testing runs to
         #  generate graphs for the memory leaks data

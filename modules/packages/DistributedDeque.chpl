@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2018 Cray Inc.
+ * Copyright 2004-2019 Cray Inc.
  * Other additional copyright holders may be indicated within.
  *
  * The entirety of this work is licensed under the Apache License,
@@ -73,19 +73,18 @@
 
   .. note::
 
-    This package module is new in 1.16 and may contain bugs. The interface may
-    change.  The documentation is being incrementally revised and improved
+    This module is a work in progress and may change in future releases.
 
   Usage
   _____
 
-  First, the :record:`DistDeque` must be initialized before use by calling its constructor.
+  First, the :record:`DistDeque` must be initialized before use by calling its initializer.
 
   .. code-block:: chapel
 
     var deque = new DistDeque(int, cap=maxElem, targetLocales=ourLocales);
 
-  The deque can be used as a queue by using the :proc:`enqueue` and :proc:`dequeue` convenience
+  The deque can be used as a queue by using the :proc:`DistributedDequeImpl.enqueue` and :proc:`DistributedDequeImpl.dequeue` convenience
   methods or inserting from one end to remove from another...
 
   .. code-block:: chapel
@@ -93,7 +92,7 @@
     deque.enqueue(1);
     var (hasElem, elem) = deque.dequeue();
 
-  The deque can be used as a stack by using the :proc:`push` and :proc:`pop` convenience methods,
+  The deque can be used as a stack by using the :proc:`DistributedDequeImpl.push` and :proc:`DistributedDequeImpl.pop` convenience methods,
   or insertion and removing from the same ends...
 
   .. code-block:: chapel
@@ -101,8 +100,8 @@
     deque.push(1);
     var (hasElem, elem) = deque.pop();
 
-  The deque can be used as a list by using the :proc:`pushBack`, :proc:`pushFront`, :proc:`popBack`,
-  and :proc:`popFront` methods. While the deque is not indexable, the ability to `append` or `prepend`
+  The deque can be used as a list by using the :proc:`DistributedDequeImpl.pushBack`, :proc:`DistributedDequeImpl.pushFront`, :proc:`DistributedDequeImpl.popBack`,
+  and :proc:`DistributedDequeImpl.popFront` methods. While the deque is not indexable, the ability to `append` or `prepend`
   is powerful enough to allow a total ordering, allowing the user to define the order by letting them
   insert and remove at whichever ends they so choose.
 
@@ -152,8 +151,8 @@
       atomic operations should be provided.
 
   4.  The ordered serial iterators currently do not work when the ``globalHead`` or ``globalTail`` are negative, which is a
-      result of iteration being an after-thought. This will be improved upon soon, but for now if you use :proc:`pushBack`
-      or :proc:`pushFront` methods, I would advise against using them for now.
+      result of iteration being an after-thought. This will be improved upon soon, but for now if you use :proc:`DistributedDequeImpl.pushBack`
+      or :proc:`DistributedDequeImpl.pushFront` methods, I would advise against using them for now.
 
   Planned Improvements
   ____________________
@@ -168,7 +167,6 @@
 module DistributedDeque {
 
   use Collection;
-  use SharedObject;
 
   /*
     Size of each unroll block for each local deque node.
@@ -191,9 +189,9 @@ module DistributedDeque {
     var _pid : int;
 
     proc deinit() {
-      chpl_getPrivatizedCopy(DistributedDequeImpl(eltType), _pid).Destroy();
+      chpl_getPrivatizedCopy(unmanaged DistributedDequeImpl(eltType), _pid).Destroy();
       coforall loc in Locales do on loc {
-        delete chpl_getPrivatizedCopy(DistributedDequeImpl(eltType), _pid);
+        delete chpl_getPrivatizedCopy(unmanaged DistributedDequeImpl(eltType), _pid);
       }
 
     }
@@ -211,19 +209,19 @@ module DistributedDeque {
       documentation.
     */
     // This is unused, and merely for documentation purposes. See '_value'.
-    var _impl : DistributedDequeImpl(eltType);
+    var _impl : unmanaged DistributedDequeImpl(eltType)?;
 
     // Privatization id
     pragma "no doc"
     var _pid : int;
     // Reference counting
     pragma "no doc"
-    var _rc : Shared(DistributedDequeRC(eltType));
+    var _rc : shared DistributedDequeRC(eltType);
 
     proc init(type eltType, cap = -1, targetLocales = Locales) {
       this.eltType = eltType;
-      this._pid = (new DistributedDequeImpl(eltType, cap, targetLocales)).pid;
-      this._rc = new Shared(new DistributedDequeRC(eltType, _pid = _pid));
+      this._pid = (new unmanaged DistributedDequeImpl(eltType, cap, targetLocales)).pid;
+      this._rc = new shared DistributedDequeRC(eltType, _pid = _pid);
     }
 
     pragma "no doc"
@@ -231,21 +229,7 @@ module DistributedDeque {
       if _pid == -1 {
         halt("DistDeque is uninitialized...");
       }
-      return chpl_getPrivatizedCopy(DistributedDequeImpl(eltType), _pid);
-    }
-
-    pragma "no doc"
-    pragma "fn returns iterator"
-    inline proc these(param order : Ordering = Ordering.NONE) {
-      return _value.these(order);
-    }
-
-    pragma "no doc"
-    pragma "fn returns iterator"
-    inline proc these(param order : Ordering = Ordering.NONE, param tag) where
-        (tag == iterKind.leader || tag == iterKind.standalone)
-        && __primitive("method call resolves", _value, "these", tag=tag) {
-      return _value.these(order, tag=tag);
+      return chpl_getPrivatizedCopy(unmanaged DistributedDequeImpl(eltType), _pid);
     }
 
     forwarding _value;
@@ -284,13 +268,13 @@ module DistributedDeque {
 
     // Keeps track of which slot we are on...
     pragma "no doc"
-    var globalHead : DistributedDequeCounter;
+    var globalHead : unmanaged DistributedDequeCounter?;
 
     pragma "no doc"
-    var globalTail : DistributedDequeCounter;
+    var globalTail : unmanaged DistributedDequeCounter?;
 
     pragma "no doc"
-    var queueSize : DistributedDequeCounter;
+    var queueSize : unmanaged DistributedDequeCounter?;
 
     // We maintain an array of slots, wherein each slot is a pointer into a node's
     // address space. To maximize parallelism, we maintain numLocales * maxTaskPar
@@ -302,7 +286,7 @@ module DistributedDeque {
     var slotSpace = {0..-1};
 
     pragma "no doc"
-    var slots : [slotSpace] LocalDeque(eltType);
+    var slots : [slotSpace] unmanaged LocalDeque(eltType);
 
     proc init(type eltType,
               cap : int = -1,
@@ -315,14 +299,14 @@ module DistributedDeque {
       this.nSlots        = here.maxTaskPar * targetLocales.size;
       this.slotSpace     = {0..#this.nSlots};
 
-      initDone();
+      complete();
 
       // Initialize each slot. We use a round-robin algorithm.
       var idx : atomic int;
       for 0 .. #here.maxTaskPar {
         for loc in targetLocales do on loc {
           var i = idx.fetchAdd(1);
-          slots[i] = new LocalDeque(eltType);
+          slots[i] = new unmanaged LocalDeque(eltType);
         }
       }
 
@@ -331,9 +315,9 @@ module DistributedDeque {
       while countersLeftToAlloc > 0 {
         for loc in targetLocales do on loc {
           select countersLeftToAlloc {
-            when 3 do globalHead = new DistributedDequeCounter();
-            when 2 do globalTail = new DistributedDequeCounter();
-            when 1 do queueSize = new DistributedDequeCounter();
+            when 3 do globalHead = new unmanaged DistributedDequeCounter();
+            when 2 do globalTail = new unmanaged DistributedDequeCounter();
+            when 1 do queueSize = new unmanaged DistributedDequeCounter();
           }
 
           countersLeftToAlloc -= 1;
@@ -358,12 +342,12 @@ module DistributedDeque {
       this.slotSpace = {0..#this.nSlots};
       slots = other.slots;
 
-      initDone();
+      complete();
     }
 
     pragma "no doc"
     proc dsiPrivatize(privData) {
-        return new DistributedDequeImpl(this, privData);
+        return new unmanaged DistributedDequeImpl(this, privData);
     }
 
     pragma "no doc"
@@ -390,16 +374,16 @@ module DistributedDeque {
       // enqueue operation has over committed, we consequentially help them as well
       // during the fetch-sub loop.
       while true {
-        var size = queueSize.fetchSub(1);
+        var size = queueSize!.fetchSub(1);
 
         // Negative, fix before returning...
         if size <= 0 {
           on queueSize {
-            var readSize = queueSize.read();
+            var readSize = queueSize!.read();
             // Attempt to fix, but yield to reduce potential contention and CPU hogging.
-            while readSize < 0 && !queueSize.compareExchangeWeak(readSize, 0) {
+            while readSize < 0 && !queueSize!.compareAndSwap(readSize, 0) {
               chpl_task_yield();
-              readSize = queueSize.read();
+              readSize = queueSize!.read();
             }
           }
 
@@ -435,16 +419,16 @@ module DistributedDeque {
       // has over committed, we consequentially help them as well during the fetch-add loop.
       if cap > 0 {
         while true {
-          var size = queueSize.fetchAdd(1);
+          var size = queueSize!.fetchAdd(1);
 
           // Over capacity, fix before returning...
           if size >= cap {
             on queueSize {
-              var readSize = queueSize.read();
+              var readSize = queueSize!.read();
               // Attempt to fix, but yield to reduce potential contention and CPU hogging.
-              while readSize > this.cap && !queueSize.compareExchangeWeak(readSize, this.cap) {
+              while readSize > this.cap && !queueSize!.compareAndSwap(readSize, this.cap) {
                 chpl_task_yield();
-                readSize = queueSize.read();
+                readSize = queueSize!.read();
               }
             }
 
@@ -465,7 +449,7 @@ module DistributedDeque {
       // infinite amount; this gives us a more optimized code path.
       else {
         while true {
-          var size = queueSize.fetchAdd(1);
+          var size = queueSize!.fetchAdd(1);
 
           // We have reserved a spot for our operation.
           if size >= 0 {
@@ -482,14 +466,14 @@ module DistributedDeque {
     /*
       Syntactic sugar for `pushBack`.
     */
-    proc add(elt : eltType) : bool {
+    override proc add(elt : eltType) : bool {
       return pushBack(elt);
     }
 
     /*
       Syntactic sugar for `popFront`.
     */
-    proc remove() : (bool, eltType) {
+    override proc remove() : (bool, eltType) {
       return popFront();
     }
 
@@ -532,7 +516,7 @@ module DistributedDeque {
 
       // At this point, we know we have a space for us. We find our slot based on another
       // fetch-add counter, making this wait-free as well.
-      var tail = globalTail.fetchAdd(1) % nSlots;
+      var tail = globalTail!.fetchAdd(1) % nSlots;
       slots[abs(tail)].pushBack(elt);
       return true;
     }
@@ -543,11 +527,12 @@ module DistributedDeque {
     proc popBack() : (bool, eltType) {
       // Test for if we can continue...
       if enterRemoveBarrier() == false {
-        return (false, _defaultOf(eltType));
+        var default: eltType;
+        return (false, default);
       }
 
       // We find our slot based on another fetch-add counter, making this wait-free as well.
-      var tail = (globalTail.fetchSub(1) - 1) % nSlots;
+      var tail = (globalTail!.fetchSub(1) - 1) % nSlots;
       var elt = slots[abs(tail)].popBack();
       var retval = (true, elt);
       return retval;
@@ -563,7 +548,7 @@ module DistributedDeque {
       }
 
       // We find our slot based on another fetch-add counter, making this wait-free as well.
-      var head = (globalHead.fetchSub(1) - 1) % nSlots;
+      var head = (globalHead!.fetchSub(1) - 1) % nSlots;
       slots[abs(head)].pushFront(elt);
       return true;
     }
@@ -574,11 +559,12 @@ module DistributedDeque {
     proc popFront() : (bool, eltType) {
       // Test for if we can continue...
       if enterRemoveBarrier() == false {
-        return (false, _defaultOf(eltType));
+        var default: eltType;
+        return (false, default);
       }
 
       // We find our slot based on another fetch-add counter, making this wait-free as well.
-      var head = globalHead.fetchAdd(1) % nSlots;
+      var head = globalHead!.fetchAdd(1) % nSlots;
       var elt = slots[abs(head)].popFront();
       var retval = (true, elt);
       return retval;
@@ -587,14 +573,14 @@ module DistributedDeque {
     /*
       Obtains the number of elements held by this queue.
     */
-    proc getSize() : int {
-      return queueSize.read();
+    override proc getSize() : int {
+      return queueSize!.read();
     }
 
     /*
       Performs a lookup for the element in the data structure.
     */
-    proc contains(elt : eltType) : bool {
+    override proc contains(elt : eltType) : bool {
       var containsElem : atomic bool;
       forall elem in this {
         if elem == elt {
@@ -613,16 +599,16 @@ module DistributedDeque {
         var node = slot.head;
 
         while node != nil {
-          var headIdx = node.headIdx;
-          for 1 .. node.size {
-            yield node.elements[headIdx];
+          var headIdx = node!.headIdx;
+          for 1 .. node!.size {
+            yield node!.elements[headIdx];
 
             headIdx += 1;
             if headIdx > distributedDequeBlockSize {
               headIdx = 1;
             }
           }
-          node = node.next;
+          node = node!.next;
         }
 
         slot.lock$;
@@ -631,9 +617,9 @@ module DistributedDeque {
 
     iter these(param order : Ordering = Ordering.NONE) : eltType where order == Ordering.FIFO {
       // Fill our slots to visit in FIFO order.
-      var head = globalHead.read();
-      var tail = globalTail.read();
-      var size = queueSize.read();
+      var head = globalHead!.read();
+      var tail = globalTail!.read();
+      var size = queueSize!.read();
 
       // Check if empty...
       if size == 0 {
@@ -644,13 +630,13 @@ module DistributedDeque {
       for slot in slots do slot.lock$ = true;
 
       // We iterate directly over the heads of each slot, so we capture them in advance.
-      var nodes : [{0..#nSlots}] (int, int, LocalDequeNode(eltType));
+      var nodes : [{0..#nSlots}] (int, int, unmanaged LocalDequeNode(eltType)?);
       for i in 0 .. #nSlots {
         var node = slots[i].head;
         if node == nil {
           nodes[i] = (-1, -1, node);
         } else {
-          nodes[i] = (node.size, node.headIdx, node);
+          nodes[i] = (node!.size, node!.headIdx, node);
         }
       }
 
@@ -665,7 +651,7 @@ module DistributedDeque {
         if node == nil || headIdx == -1 || size == -1 {
           halt("DistributedDeque Internal Error: Iterating over nil nodes, head: ", head, ", tail: ", tail, ", idx: ", i);
         }
-        yield node.elements[headIdx];
+        yield node!.elements[headIdx];
 
         // Update state...
         size -= 1;
@@ -676,9 +662,9 @@ module DistributedDeque {
 
         // Advance...
         if size == 0 {
-          node = node.next;
+          node = node!.next;
           if node != nil {
-            nodes[idx] = (node.size, node.headIdx, node);
+            nodes[idx] = (node!.size, node!.headIdx, node);
           } else {
             nodes[idx] = (-1, -1, node);
           }
@@ -694,9 +680,9 @@ module DistributedDeque {
 
     iter these(param order : Ordering = Ordering.NONE) : eltType where order == Ordering.LIFO {
       // Fill our slots to visit in FIFO order.
-      var head = globalHead.read();
-      var tail = globalTail.read();
-      var size = queueSize.read();
+      var head = globalHead!.read();
+      var tail = globalTail!.read();
+      var size = queueSize!.read();
 
       // Check if empty...
       if size == 0 {
@@ -707,10 +693,10 @@ module DistributedDeque {
       for slot in slots do slot.lock$ = true;
 
       // We iterate directly over the heads of each slot, so we capture them in advance.
-      var nodes : [{0..#nSlots}] (int, int, LocalDequeNode(eltType));
+      var nodes : [{0..#nSlots}] (int, int, unmanaged LocalDequeNode(eltType)?);
       for i in 0 .. #nSlots {
         var node = slots[i].tail;
-        nodes[i] = (node.size, node.tailIdx, node);
+        nodes[i] = (node!.size, node!.tailIdx, node);
       }
 
       // Iterate over captured head nodes; each time we read them we advance them
@@ -729,16 +715,16 @@ module DistributedDeque {
         if tailIdx == 0 {
           tailIdx = distributedDequeBlockSize;
         }
-        yield node.elements[tailIdx];
+        yield node!.elements[tailIdx];
 
         // Update state...
         size -= 1;
 
         // Advance...
         if size == 0 {
-          node = node.prev;
+          node = node!.prev;
           if node != nil {
-            nodes[idx] = (node.size, node.tailIdx, node);
+            nodes[idx] = (node!.size, node!.tailIdx, node);
           } else {
             nodes[idx] = (-1, -1, node);
           }
@@ -770,16 +756,16 @@ module DistributedDeque {
       var node = followThis.head;
 
       while node != nil {
-        var headIdx = node.headIdx;
-        for 1 .. node.size {
-          yield node.elements[headIdx];
+        var headIdx = node!.headIdx;
+        for 1 .. node!.size {
+          yield node!.elements[headIdx];
 
           headIdx += 1;
           if headIdx > distributedDequeBlockSize {
             headIdx = 1;
           }
         }
-        node = node.next;
+        node = node!.next;
       }
 
       followThis.lock$;
@@ -804,8 +790,8 @@ module DistributedDeque {
     var headIdx : int = 1;
     var tailIdx : int = 1;
     var size : int;
-    var next : LocalDequeNode(eltType);
-    var prev : LocalDequeNode(eltType);
+    var next : unmanaged LocalDequeNode(eltType)?;
+    var prev : unmanaged LocalDequeNode(eltType)?;
 
     inline proc isFull {
       return size == distributedDequeBlockSize;
@@ -870,11 +856,11 @@ module DistributedDeque {
 
     var lock$ : sync bool;
 
-    var head : LocalDequeNode(eltType);
-    var tail : LocalDequeNode(eltType);
+    var head : unmanaged LocalDequeNode(eltType)?;
+    var tail : unmanaged LocalDequeNode(eltType)?;
 
     // We cache the last deleted node to handle cases where we have rapid mixed push/pop
-    var cached : LocalDequeNode(eltType);
+    var cached : unmanaged LocalDequeNode(eltType)?;
 
     // The size of a segment. This is used as both a means of knowing when an element
     // gets added, as well as a barrier to prevent the head and tail from being cached.
@@ -883,7 +869,7 @@ module DistributedDeque {
     inline proc recycleNode() {
       // If we have cached a previous used node, reuse it here...
       if cached != nil {
-        var tmp = cached;
+        var tmp = cached!;
         cached = nil;
 
         // Clean...
@@ -897,10 +883,10 @@ module DistributedDeque {
       }
 
       // Create a new one...
-      return  new LocalDequeNode(eltType);
+      return new unmanaged LocalDequeNode(eltType);
     }
 
-    inline proc retireNode(node) {
+    inline proc retireNode(node:unmanaged) {
       if cached != nil {
         delete cached;
       }
@@ -921,14 +907,14 @@ module DistributedDeque {
           }
 
           // Its full...
-          if tail.isFull {
-            tail.next = recycleNode();
-            tail.next.prev = tail;
-            tail = tail.next;
+          if tail!.isFull {
+            tail!.next = recycleNode();
+            tail!.next!.prev = tail;
+            tail = tail!.next;
           }
 
           // Push...
-          tail.pushBack(_elt);
+          tail!.pushBack(_elt);
           size.add(1);
 
           lock$;
@@ -958,15 +944,15 @@ module DistributedDeque {
             }
 
             // Pop...
-            _elt = tail.popBack();
-            if tail.isEmpty {
+            _elt = tail!.popBack();
+            if tail!.isEmpty {
               var node = tail;
-              tail = tail.prev;
+              tail = tail!.prev;
 
               // If not empty, remove reference to retired node...
               // If it is empty, fix the head...
               if tail != nil {
-                tail.next = nil;
+                tail!.next = nil;
               } else {
                 head = nil;
               }
@@ -998,14 +984,14 @@ module DistributedDeque {
           }
 
           // Its full...
-          if head.isFull {
-            head.prev = recycleNode();
-            head.prev.next = head;
-            head = head.prev;
+          if head!.isFull {
+            head!.prev = recycleNode();
+            head!.prev!.next = head;
+            head = head!.prev;
           }
 
           // Push...
-          head.pushFront(_elt);
+          head!.pushFront(_elt);
           size.add(1);
 
           lock$;
@@ -1035,15 +1021,15 @@ module DistributedDeque {
             }
 
             // Pop...
-            _elt = head.popFront();
-            if head.isEmpty {
+            _elt = head!.popFront();
+            if head!.isEmpty {
               var node = head;
-              head = head.next;
+              head = head!.next;
 
               // If not empty, remove reference to retired node...
               // If it is empty, fix the tail...
               if head != nil {
-                head.prev = nil;
+                head!.prev = nil;
               } else {
                 tail = nil;
               }
@@ -1066,7 +1052,7 @@ module DistributedDeque {
       var curr = head;
 
       while curr != nil {
-        var tmp = curr.next;
+        var tmp = curr!.next;
         delete curr;
         curr = tmp;
       }

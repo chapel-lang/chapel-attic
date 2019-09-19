@@ -3,11 +3,11 @@ class C {
 }
 
 proc main {
-  var c = new C("a string");
+  var c = new borrowed C("a string");
   var b: int;
   writeln(c);
   on Locales(1) {
-    b = ascii(c.s);
+    b = c.s.byte(1);
     c.s = "another string";
   }
   writeln(b);

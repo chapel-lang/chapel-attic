@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2018 Cray Inc.
+ * Copyright 2004-2019 Cray Inc.
  * Other additional copyright holders may be indicated within.
  *
  * The entirety of this work is licensed under the Apache License,
@@ -43,6 +43,7 @@ static bool        exit_immediately = true;
 static bool        exit_eventually  = false;
 static bool        exit_end_of_pass = false;
 
+static const char* err_subdir       = NULL;
 static const char* err_filename     = NULL;
 
 static int         err_lineno       =    0;
@@ -52,6 +53,7 @@ static int         err_print        =    0;
 static int         err_ignore       =    0;
 
 static FnSymbol*   err_fn           = NULL;
+static bool        err_fn_header_printed = false;
 
 static bool forceWidePtrs();
 
@@ -60,7 +62,8 @@ void gdbShouldBreakHere() {
 
 }
 
-void setupError(const char* filename, int lineno, int tag) {
+void setupError(const char* subdir, const char* filename, int lineno, int tag) {
+  err_subdir        = subdir;
   err_filename      = filename;
   err_lineno        = lineno;
   err_fatal         = tag == 1 || tag == 2 || tag == 3;
@@ -139,10 +142,18 @@ static bool forceWidePtrs() {
 }
 
 static void print_user_internal_error() {
-  static char error[8];
+  char error[20];
 
   const char* filename_start = strrchr(err_filename, '/');
+  const char* filename_end = NULL;
+  const char* directory_start = err_subdir;
   char        version[128]   = { '\0' };
+
+  // Fill error with _
+  for (int i = 0; i < (int)sizeof(error) - 1; i++) {
+    error[i] = ' ';
+  }
+  error[sizeof(error)-1] = '\0';
 
   if (filename_start) {
     filename_start++;
@@ -150,11 +161,37 @@ static void print_user_internal_error() {
     filename_start = err_filename;
   }
 
-  strncpy(error, filename_start, 3);
+  filename_end = strrchr(filename_start, '.');
+  if (filename_end - filename_start >= 6)
+    filename_end = filename_end - 3;
+  else
+    filename_end = NULL;
 
-  sprintf(error + 3, "%04d", err_lineno);
+  int idx = 0;
+  // first 3 characters are from directory
+  if (directory_start && strlen(directory_start) >= 3) {
+    strncpy(&error[idx], directory_start, 3);
+    idx += 3;
+    error[idx++] = '-';
+  }
 
-  for (int i = 0; i < 7; i++) {
+  // next 3 characters are start of filename
+  strncpy(&error[idx], filename_start, 3);
+  idx += 3;
+
+  // next 3 characters are end of the filename
+  if (filename_end) {
+    error[idx++] = '-';
+    strncpy(&error[idx], filename_end, 3);
+    idx += 3;
+  }
+
+  error[idx++] = '-';
+  // next 4 characters are the line number
+  sprintf(&error[idx], "%04d", err_lineno);
+
+  // now make the error string upper case
+  for (int i = 0; i < (int)sizeof(error) && error[i]; i++) {
     if (error[i] >= 'a' && error[i] <= 'z') {
       error[i] += 'A' - 'a';
     }
@@ -206,6 +243,58 @@ static FnSymbol* findNonTaskCaller(FnSymbol* fn) {
   return retval;
 }
 
+// Print instantiation information for err_fn.
+// Should be called at USR_STOP or just before the next
+// error changing err_fn is printed.
+static void printInstantiationNoteForLastError() {
+  if (err_fn_header_printed && err_fn && err_fn->instantiatedFrom) {
+
+    // Find the first call to the function within the instantiation point,
+    // so that we can have a better error message line number.
+    BlockStmt* instantiationPoint = err_fn->instantiationPoint();
+    Expr* bestPoint = instantiationPoint;
+
+    if (instantiationPoint != NULL) {
+      std::vector<CallExpr*> calls;
+      collectFnCalls(instantiationPoint, calls);
+      for_vector(CallExpr, call, calls) {
+        if (FnSymbol* fn = call->resolvedOrVirtualFunction()) {
+          if (fn == err_fn) {
+            bestPoint = call;
+            break;
+          }
+        }
+      }
+
+      const char* subsDesc = err_fn->substitutionsToString(", ");
+
+      const char* intro = "";
+      if (strcmp(err_fn->name, "init") == 0)
+        intro = "Initializer";
+      else if (err_fn->isIterator())
+        intro = astr("Iterator ", "'", err_fn->name, "'");
+      else
+        intro = astr("Function ", "'", err_fn->name, "'");
+
+      if (subsDesc == NULL || subsDesc[0] == '\0') {
+        fprintf(stderr,
+                "%s:%d: %s instantiated here\n",
+                cleanFilename(bestPoint),
+                bestPoint->linenum(),
+                intro);
+      } else {
+        fprintf(stderr,
+                "%s:%d: %s instantiated as: %s(%s)\n",
+                cleanFilename(bestPoint),
+                bestPoint->linenum(),
+                intro,
+                err_fn->name,
+                subsDesc);
+      }
+    }
+  }
+}
+
 static bool printErrorHeader(const BaseAST* ast) {
   if (!err_print) {
     if (const Expr* expr = toConstExpr(ast)) {
@@ -219,6 +308,8 @@ static bool printErrorHeader(const BaseAST* ast) {
       fn = findNonTaskCaller(fn);
 
       if (fn && fn != err_fn) {
+        printInstantiationNoteForLastError();
+        err_fn_header_printed = false;
         err_fn = fn;
 
         while ((fn = toFnSymbol(err_fn->defPoint->parentSymbol))) {
@@ -241,16 +332,18 @@ static bool printErrorHeader(const BaseAST* ast) {
             suppress = (strcmp(err_fn->name, "init") != 0) ? true : false;
           }
 
+          // Suppress internal function names
+          if (!developer && strncmp(err_fn->name, "chpl_", 5) == 0) {
+            suppress = true;
+          }
+
           if (suppress == false) {
             fprintf(stderr,
                     "%s:%d: In ",
                     cleanFilename(err_fn),
                     err_fn->linenum());
 
-            if (strncmp(err_fn->name, "_construct_", 11) == 0) {
-              fprintf(stderr, "initializer '%s':\n", err_fn->name+11);
-
-            } else if (strcmp(err_fn->name, "init") == 0) {
+            if (strcmp(err_fn->name, "init") == 0) {
               fprintf(stderr, "initializer:\n");
 
             } else {
@@ -259,6 +352,8 @@ static bool printErrorHeader(const BaseAST* ast) {
                       (err_fn->isIterator() ? "iterator" : "function"),
                       err_fn->name);
             }
+            // We printed the header, so can print instantiation notes.
+            err_fn_header_printed = true;
           }
         }
       }
@@ -320,7 +415,7 @@ static void printErrorFooter(bool guess) {
   // internal error was generated.
   //
   if (developer && !err_user)
-    fprintf(stderr, " [%s:%d]", err_filename, err_lineno);
+    fprintf(stderr, " [%s/%s:%d]", err_subdir, err_filename, err_lineno);
 
   //
   // For users and developers, if the source line was a guess (i.e., an
@@ -345,7 +440,8 @@ static void printErrorFooter(bool guess) {
     //
     // and exit if it's fatal (isn't it always?)
     //
-    if (err_fatal) {
+    if (err_fatal && !(err_user && ignore_user_errors)) {
+      printInstantiationNoteForLastError();
       clean_exit(1);
     }
   }
@@ -446,7 +542,8 @@ void handleError(const char* fmt, ...) {
   if (exit_immediately) {
     if (ignore_errors_for_pass) {
       exit_end_of_pass = true;
-    } else if (!ignore_errors) {
+    } else if (!ignore_errors && !(ignore_user_errors && err_user)) {
+      printInstantiationNoteForLastError();
       clean_exit(1);
     }
   }
@@ -522,7 +619,8 @@ static void vhandleError(FILE*          file,
   if (exit_immediately) {
     if (ignore_errors_for_pass) {
       exit_end_of_pass = true;
-    } else if (!ignore_errors) {
+    } else if (!ignore_errors && !(ignore_user_errors && err_user)) {
+      printInstantiationNoteForLastError();
       clean_exit(1);
     }
   }
@@ -530,10 +628,12 @@ static void vhandleError(FILE*          file,
 
 
 void exitIfFatalErrorsEncountered() {
+  printInstantiationNoteForLastError();
+
   if (exit_eventually) {
     if (ignore_errors_for_pass) {
       exit_end_of_pass = true;
-    } else if (!ignore_errors) {
+    } else if (!ignore_errors && !(ignore_user_errors && err_user)) {
       clean_exit(1);
     }
   }
@@ -542,12 +642,20 @@ void exitIfFatalErrorsEncountered() {
 
 void considerExitingEndOfPass() {
   if (exit_end_of_pass) {
-    if (!ignore_errors) {
+    if (!ignore_errors && !(ignore_user_errors && err_user)) {
       clean_exit(1);
     }
   }
 }
 
+bool fatalErrorsEncountered() {
+  return exit_eventually || exit_end_of_pass;
+}
+
+void clearFatalErrors() {
+  exit_eventually = false;
+  exit_end_of_pass = false;
+}
 
 static void handleInterrupt(int sig) {
   stopCatchingSignals();

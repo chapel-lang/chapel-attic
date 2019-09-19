@@ -1,0 +1,7 @@
+dist-assoc-bulkadd.chpl:7: error: unresolved call 'unmanaged UserMapAssocDom(true,real(64),DefaultMapper).rank'
+$CHPL_HOME/modules/internal/ArrayViewSlice.chpl:88: note: this candidate did not match: ArrayViewSliceArr.rankparam 
+$CHPL_HOME/modules/internal/ChapelArray.chpl:1477: note: because method call receiver with type unmanaged UserMapAssocDom(true,real(64),DefaultMapper)
+$CHPL_HOME/modules/internal/ArrayViewSlice.chpl:47: note: is passed to formal 'this: ArrayViewSliceArr'
+$CHPL_HOME/modules/internal/ArrayViewRankChange.chpl:498: note: candidates are: ArrayViewRankChangeArr.rankparam 
+$CHPL_HOME/modules/internal/ArrayViewReindex.chpl:397: note:                 ArrayViewReindexArr.rankparam 
+note: and 18 other candidates, use --print-all-candidates to see them

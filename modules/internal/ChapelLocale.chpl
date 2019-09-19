@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2018 Cray Inc.
+ * Copyright 2004-2019 Cray Inc.
  * Other additional copyright holders may be indicated within.
  *
  * The entirety of this work is licensed under the Apache License,
@@ -67,6 +67,7 @@
 module ChapelLocale {
 
   use LocaleModel;
+  private use HaltWrappers only;
 
   //
   // Node and sublocale types and special sublocale values.
@@ -95,13 +96,13 @@ module ChapelLocale {
     and implements part of it, but requires the rest to be provided
     by the corresponding concrete classes.
    */
-  class locale {
+  class _locale {
     //- Constructor
     pragma "no doc"
     proc init() { }
 
     pragma "no doc"
-    proc init(parent: locale) {
+    proc init(parent: locale?) {
       this.parent = parent;
     }
 
@@ -112,7 +113,7 @@ module ChapelLocale {
     // Every locale has a parent, except for the root locale.
     // The parent of the root locale is nil (by definition).
     pragma "no doc"
-    const parent : locale;
+    const parent : locale?;
 
     pragma "no doc" var nPUsLogAcc: int;     // HW threads, accessible
     pragma "no doc" var nPUsLogAll: int;     // HW threads, all
@@ -179,10 +180,10 @@ module ChapelLocale {
       :returns: locale number, in the range ``0..numLocales-1``
       :rtype: int
      */
-    proc id : int return chpl_id();  // just the node part
+    proc id : int return chpl_nodeFromLocaleID(__primitive("_wide_get_locale", this));
 
     pragma "no doc"
-    proc localeid : chpl_localeID_t return chpl_localeid(); // full locale id
+    proc localeid : chpl_localeID_t return __primitive("_wide_get_locale", this);
 
     /*
       Get the name of this locale.
@@ -214,22 +215,22 @@ module ChapelLocale {
 
     pragma "no doc"
     inline proc runningTaskCntSet(val : int) {
-      runningTaskCounter.write(val, memory_order_relaxed);
+      runningTaskCounter.write(val, memoryOrder.relaxed);
     }
 
     pragma "no doc"
     inline proc runningTaskCntAdd(val : int) {
-      runningTaskCounter.add(val, memory_order_relaxed);
+      runningTaskCounter.add(val, memoryOrder.relaxed);
     }
 
     pragma "no doc"
     inline proc runningTaskCntSub(val : int) {
-      runningTaskCounter.sub(val, memory_order_relaxed);
+      runningTaskCounter.sub(val, memoryOrder.relaxed);
     }
 
     pragma "no doc"
     inline proc runningTaskCnt() {
-      var rtc = runningTaskCounter.read(memory_order_relaxed);
+      var rtc = runningTaskCounter.read(memoryOrder.relaxed);
       return if (rtc <= 0) then 1 else rtc;
     }
     //------------------------------------------------------------------------}
@@ -242,19 +243,19 @@ module ChapelLocale {
     // concrete classes.
     pragma "no doc"
     proc chpl_id() : int {
-      _throwPVFCError();
+      HaltWrappers.pureVirtualMethodHalt();
       return -1;
     }
 
     pragma "no doc"
     proc chpl_localeid() : chpl_localeID_t {
-      _throwPVFCError();
+      HaltWrappers.pureVirtualMethodHalt();
       return chpl_buildLocaleID(-1:chpl_nodeID_t, c_sublocid_none);
     }
 
     pragma "no doc"
     proc chpl_name() : string {
-      _throwPVFCError();
+      HaltWrappers.pureVirtualMethodHalt();
       return "";
     }
 
@@ -264,37 +265,37 @@ module ChapelLocale {
     //
     pragma "no doc"
     proc defaultMemory() : locale {
-      _throwPVFCError();
+      HaltWrappers.pureVirtualMethodHalt();
       return this;
     }
 
     pragma "no doc"
     proc largeMemory() : locale {
-      _throwPVFCError();
+      HaltWrappers.pureVirtualMethodHalt();
       return this;
     }
 
     pragma "no doc"
     proc lowLatencyMemory() : locale {
-      _throwPVFCError();
+      HaltWrappers.pureVirtualMethodHalt();
       return this;
     }
 
     pragma "no doc"
     proc highBandwidthMemory() : locale {
-      _throwPVFCError();
+      HaltWrappers.pureVirtualMethodHalt();
       return this;
     }
 
     // A useful default definition is provided (not pure virtual).
     pragma "no doc"
-    proc writeThis(f) {
+    override proc writeThis(f) {
       f <~> name;
     }
 
     pragma "no doc"
     proc getChildCount() : int {
-      _throwPVFCError();
+      HaltWrappers.pureVirtualMethodHalt();
       return 0;
     }
   
@@ -308,19 +309,19 @@ module ChapelLocale {
     pragma "no doc"
     proc addChild(loc:locale)
     {
-      _throwPVFCError();
+      HaltWrappers.pureVirtualMethodHalt();
     }
   
     pragma "no doc"
     proc getChild(idx:int) : locale {
-      _throwPVFCError();
+      HaltWrappers.pureVirtualMethodHalt();
       return this;
     }
 
 // Part of the required locale interface.
 // Commented out because presently iterators are statically bound.
 //    iter getChildren() : locale  {
-//    _throwPVFCError();
+//    HaltWrappers.pureVirtualMethodHalt();
 //      yield 0;
 //    }
 
@@ -334,22 +335,22 @@ module ChapelLocale {
   class DummyLocale : locale {
     proc init() { }
 
-    proc chpl_id() : int {
+    override proc chpl_id() : int {
       return -1;
     }
-    proc chpl_localeid() : chpl_localeID_t {
+    override proc chpl_localeid() : chpl_localeID_t {
       return chpl_buildLocaleID(-1:chpl_nodeID_t, c_sublocid_none);
     }
-    proc chpl_name() : string {
+    override proc chpl_name() : string {
       return "dummy-locale";
     }
-    proc getChildCount() : int {
+    override proc getChildCount() : int {
       return 0;
     }
-    proc getChild(idx:int) : locale {
+    override proc getChild(idx:int) : locale {
       return this;
     }
-    proc addChild(loc:locale)
+    override proc addChild(loc:locale)
     {
       halt("addChild on DummyLocale");
     }
@@ -378,7 +379,8 @@ module ChapelLocale {
   // initialized until LocaleModel is initialized.  To disable this
   // replication, set replicateRootLocale to false.
   pragma "no doc"
-  pragma "locale private" var rootLocale : locale = nil;
+  pragma "locale private" var rootLocale : unmanaged locale? = nil;
+  pragma "no doc"
   pragma "locale private" var rootLocaleInitialized = false;
 
   pragma "no doc"
@@ -396,13 +398,13 @@ module ChapelLocale {
   // module.
   //
   pragma "no doc"
-  var origRootLocale : locale = nil;
+  var origRootLocale : unmanaged locale? = nil;
 
   pragma "no doc"
   class AbstractRootLocale : locale {
     proc init() { }
 
-    proc init(parent_loc : locale) {
+    proc init(parent_loc : locale?) {
       super.init(parent_loc);
     }
 
@@ -411,17 +413,17 @@ module ChapelLocale {
     // which are used as the default set of targetLocales in many
     // distributions.
     proc getDefaultLocaleSpace() const ref {
-      _throwPVFCError();
+      HaltWrappers.pureVirtualMethodHalt();
       return chpl_emptyLocaleSpace;
     }
 
     proc getDefaultLocaleArray() const ref {
-      _throwPVFCError();
+      HaltWrappers.pureVirtualMethodHalt();
       return chpl_emptyLocales;
     }
 
     proc localeIDtoLocale(id : chpl_localeID_t) : locale {
-      _throwPVFCError();
+      HaltWrappers.pureVirtualMethodHalt();
       return this;
     }
 
@@ -432,7 +434,7 @@ module ChapelLocale {
     iter chpl_initOnLocales() {
       if numLocales > 1 then
         halt("The locales must be initialized in parallel");
-      for locIdx in (origRootLocale:RootLocale).getDefaultLocaleSpace() {
+      for locIdx in (origRootLocale:borrowed RootLocale?)!.getDefaultLocaleSpace() {
         yield locIdx;
         rootLocale = origRootLocale;
         rootLocaleInitialized = true;
@@ -447,7 +449,7 @@ module ChapelLocale {
       where tag==iterKind.standalone {
       // Simple locales barrier, see implementation below for notes
       var b: localesBarrier;
-      var flags: [1..#numLocales-1] localesSignal;
+      var flags: [1..#numLocales-1] unmanaged localesSignal;
       coforall locIdx in 0..#numLocales /*ref(b)*/ {
         on __primitive("chpl_on_locale_num",
                        chpl_buildLocaleID(locIdx:chpl_nodeID_t,
@@ -493,7 +495,7 @@ module ChapelLocale {
           // have some risk of getting part of a wide pointer).
           // Without this fence, there is a race condition on
           // a weakly-ordered architecture.
-          atomic_fence();
+          atomicFence();
           var count = 0;
           for f in flags do
             if f then count += 1;
@@ -504,9 +506,9 @@ module ChapelLocale {
         }
         // Let the others go
         for f in flags do
-          f.s.testAndSet();
+          f!.s.testAndSet();
       } else {
-        var f = new localesSignal();
+        var f = new unmanaged localesSignal();
         // expose my flag to locale 0
         flags[locIdx] = f;
         // wait (locally) for locale 0 to set my flag
@@ -527,8 +529,11 @@ module ChapelLocale {
   // object.
   pragma "no doc"
   proc chpl_init_rootLocale() {
-    origRootLocale = new RootLocale();
-    (origRootLocale:RootLocale).setup();
+    if numLocales > 1 && _local then
+      halt("Cannot run a program compiled with --local in more than 1 locale");
+
+    origRootLocale = new unmanaged RootLocale();
+    (origRootLocale:borrowed RootLocale?)!.setup();
   }
 
   // This function sets up a private copy of rootLocale by replicating
@@ -543,12 +548,12 @@ module ChapelLocale {
     rootLocale = origRootLocale;
     if replicateRootLocale && locIdx!=0 {
       // Create a new local rootLocale
-      var newRootLocale = new RootLocale();
+      var newRootLocale = new unmanaged RootLocale();
       // We don't want to be doing unnecessary ref count updates here
       // as they require additional tasks.  We know we don't need them
       // so tell the compiler to not insert them.
       pragma "no copy" pragma "no auto destroy"
-      const ref origLocales = (origRootLocale:RootLocale).getDefaultLocaleArray();
+      const ref origLocales = (origRootLocale:borrowed RootLocale?)!.getDefaultLocaleArray();
       var origRL = origLocales._value.theData;
       var newRL = newRootLocale.getDefaultLocaleArray()._value.theData;
       // We must directly implement a bulk copy here, as the mechanisms
@@ -566,7 +571,7 @@ module ChapelLocale {
       // We mimic a private Locales array alias by using the move
       // primitive.
       pragma "no auto destroy"
-      const ref tmp = (rootLocale:RootLocale).getDefaultLocaleArray();
+      const ref tmp = (rootLocale:borrowed RootLocale?)!.getDefaultLocaleArray();
       __primitive("move", Locales, tmp);
     }
     rootLocaleInitialized = true;
@@ -579,8 +584,9 @@ module ChapelLocale {
   // representative.
   // The dummy locale provides system-default tasking and memory management.
   pragma "no doc"
-  const dummyLocale = new DummyLocale();
+  const dummyLocale = new unmanaged DummyLocale();
 
+  pragma "fn synchronization free"
   pragma "no doc"
   extern proc chpl_task_getRequestedSubloc(): chpl_sublocID_t;
 
@@ -615,18 +621,26 @@ module ChapelLocale {
   pragma "fn returns infinite lifetime"
   proc chpl_localeID_to_locale(id : chpl_localeID_t) : locale {
     if rootLocale then
-      return (rootLocale:AbstractRootLocale).localeIDtoLocale(id);
+      return (rootLocale:borrowed AbstractRootLocale?)!.localeIDtoLocale(id);
     else
       // For code prior to rootLocale initialization
       return dummyLocale;
   }
 
+  // the type of elements in chpl_privateObjects.
+  extern record chpl_privateObject_t {
+    var obj:c_void_ptr;
+  }
+  extern var chpl_privateObjects:c_ptr(chpl_privateObject_t);
+
   pragma "no doc"
-  pragma "unsafe"
   pragma "fn returns infinite lifetime"
-  proc chpl_getPrivatizedCopy(type objectType, objectPid:int): objectType
-    return __primitive("chpl_getPrivatizedClass", nil:objectType, objectPid);
-  
+  // should this use pragma "local args"?
+  // Why is the compiler making the objectType argument wide?
+  inline
+  proc chpl_getPrivatizedCopy(type objectType, objectPid:int): objectType {
+    return __primitive("cast", objectType, chpl_privateObjects[objectPid].obj);
+  }
 
 //########################################################################{
 //# Locale diagnostics
@@ -655,7 +669,8 @@ module ChapelLocale {
     on this do queuedTasks = chpl_task_getNumQueuedTasks();
     return queuedTasks;
   }
-  
+
+  pragma "fn synchronization free"
   pragma "no doc"
   proc locale.runningTasks() {
     return this.runningTaskCnt();

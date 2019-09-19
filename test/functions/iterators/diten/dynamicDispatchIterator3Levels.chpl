@@ -10,7 +10,7 @@ class Parent {
 }
 
 class Child: Parent {
-  iter myit() {
+  override iter myit() {
     var low = 1;
     var high = 8;
     var stride = 2;
@@ -22,7 +22,7 @@ class Child: Parent {
 }
 
 class Grandchild: Child {
-  iter myit() {
+  override iter myit() {
     var low = 2;
     var high = 8;
     var stride = 2;
@@ -34,8 +34,8 @@ class Grandchild: Child {
   }
 }
 
-var p1: Parent = new Child();
-var p2: Parent = new Grandchild();
+var p1: borrowed Parent = new borrowed Child();
+var p2: borrowed Parent = new borrowed Grandchild();
 
 for i in p1.myit() {
   writeln(i);

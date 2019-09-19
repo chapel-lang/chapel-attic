@@ -1,8 +1,8 @@
-use List;
+use LinkedLists;
 
 module M1 {
   class C {
-    var s: list(int);
+    var s: LinkedList(int);
 
     proc deinit() {
       s.destroy();
@@ -17,7 +17,7 @@ class D: C {
 }
 
 proc main() {
-  var d = new D();
+  var d = new unmanaged D();
 
   d.s.append(4);
   d.s.append(5);

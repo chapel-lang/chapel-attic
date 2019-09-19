@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2018 Cray Inc.
+ * Copyright 2004-2019 Cray Inc.
  * Other additional copyright holders may be indicated within.
  * 
  * The entirety of this work is licensed under the Apache License,
@@ -425,7 +425,7 @@ qioerr qio_channel_print_imag(const int threadsafe, qio_channel_t* restrict ch, 
 qioerr qio_channel_scan_complex(const int threadsafe, qio_channel_t* restrict ch, void* restrict re_out, void* restrict im_out, size_t len);
 qioerr qio_channel_print_complex(const int threadsafe, qio_channel_t* restrict ch, const void* restrict re_ptr, const void* im_ptr, size_t len);
 
-// These methods read or write UTF-8 characters (code points).
+// These methods read or write UTF-8 characters (codepoints).
 
 #include "utf8-decoder.h"
 
@@ -435,10 +435,6 @@ static inline
 qioerr qio_channel_read_char(const int threadsafe, qio_channel_t* restrict ch, int32_t* restrict chr) {
   qioerr err;
   uint32_t codepoint=0, state;
-  
-  if( qio_glocale_utf8 == 0 ) {
-    qio_set_glocale();
-  }
 
   if( threadsafe ) {
     err = qio_lock(&ch->lock);
@@ -514,10 +510,13 @@ int qio_nbytes_char(int32_t chr)
     }
   } else {
 #ifdef HAS_WCTYPE_H
+    char buf[MB_CUR_MAX];
     mbstate_t ps;
     size_t got;
     memset(&ps, 0, sizeof(mbstate_t));
-    got = wcrtomb(NULL, chr, &ps);
+    // The buf argument is never used, but if we put NULL there,
+    // wcrtomb ignores chr and assumes L'\0' per the C standard.
+    got = wcrtomb(buf, chr, &ps);
     if( got == (size_t) -1 ) {
       return 0;
     } else {
@@ -670,10 +669,6 @@ qioerr qio_channel_write_char(const int threadsafe, qio_channel_t* restrict ch, 
 {
   qioerr err;
 
-  if( qio_glocale_utf8 == 0 ) {
-    qio_set_glocale();
-  }
-
   if( threadsafe ) {
     err = qio_lock(&ch->lock);
     if( err ) return err;
@@ -728,10 +723,6 @@ qioerr qio_channel_write_char(const int threadsafe, qio_channel_t* restrict ch, 
 
 static inline
 int qio_unicode_supported(void) {
-  if( qio_glocale_utf8 == 0 ) {
-    qio_set_glocale();
-  }
-
   return qio_glocale_utf8 == QIO_GLOCALE_UTF8;
 }
 
@@ -740,6 +731,8 @@ qioerr qio_channel_skip_past_newline(const int threadsafe, qio_channel_t* restri
 qioerr qio_channel_write_newline(const int threadsafe, qio_channel_t* restrict ch);
 
 qioerr qio_channel_scan_string(const int threadsafe, qio_channel_t* restrict ch, const char* restrict * restrict out, int64_t* restrict len_out, ssize_t maxlen_bytes);
+
+qioerr qio_channel_scan_bytes(const int threadsafe, qio_channel_t* restrict ch, const char* restrict * restrict out, int64_t* restrict len_out, ssize_t maxlen_bytes);
 
 // reads match exactly - skipping whitespace before it if skipwsbefore is set.
 // returns 0 if it matched, or EFORMAT if it did not.
@@ -765,6 +758,10 @@ qioerr qio_quote_string(uint8_t string_start, uint8_t string_end, uint8_t string
 // like qio_quote_string, but only get length information.
 qioerr qio_quote_string_length(uint8_t string_start, uint8_t string_end, uint8_t string_format, const char* restrict ptr, ssize_t len, qio_truncate_info_t* ti);
 
+qioerr qio_quote_bytes_length(uint8_t string_start, uint8_t string_end, uint8_t string_format, const char* restrict ptr, ssize_t len, qio_truncate_info_t* ti);
+
+// Prints a bytes according to the style.
+qioerr qio_channel_print_bytes(const int threadsafe, qio_channel_t* restrict ch, const char* restrict ptr, ssize_t len);
 // Prints a string according to the style.
 qioerr qio_channel_print_string(const int threadsafe, qio_channel_t* restrict ch, const char* restrict ptr, ssize_t len);
 
@@ -796,6 +793,7 @@ enum {
   QIO_CONV_ARG_TYPE_BINARY_COMPLEX,
   QIO_CONV_ARG_TYPE_CHAR,
   QIO_CONV_ARG_TYPE_STRING,
+  QIO_CONV_ARG_TYPE_BINARY_STRING,
   QIO_CONV_ARG_TYPE_REPR,
   QIO_CONV_ARG_TYPE_REGEXP, // argument contains a regexp
   QIO_CONV_ARG_TYPE_NONE_REGEXP_LITERAL, // literal regexp in string

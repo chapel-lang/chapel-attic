@@ -1,4 +1,4 @@
-.TH "hwlocality_diff" 3 "Thu Jan 18 2018" "Version 1.11.9" "Hardware Locality (hwloc)" \" -*- nroff -*-
+.TH "hwlocality_diff" 3 "Mon Jun 3 2019" "Version 1.11.13" "Hardware Locality (hwloc)" \" -*- nroff -*-
 .ad l
 .nh
 .SH NAME
@@ -73,7 +73,7 @@ Applications that manipulate many similar topologies, for instance one for each 
 .PP
 This file offers a way to manipulate the difference between topologies and export/import it to/from XML\&. Compression may therefore be achieved by storing one topology entirely while the others are only described by their differences with the former\&. The actual topology can be reconstructed when actually needed by applying the precomputed difference to the reference topology\&.
 .PP
-This interface targets very similar nodes\&. Only very simple differences between topologies are actually supported, for instance a change in the memory size, the name of the object, or some info attribute\&. More complex differences such as adding or removing objects cannot be represented in the difference structures and therefore return errors\&.
+This interface targets very similar nodes\&. Only very simple differences between topologies are actually supported, for instance a change in the memory size, the name of the object, or some info attribute\&. More complex differences such as adding or removing objects cannot be represented in the difference structures and therefore return errors\&. Differences between object sets cannot be represented either\&.
 .PP
 It means that there is no need to apply the difference when looking at the tree organization (how many levels, how many objects per level, what kind of objects, CPU and node sets, etc) and when binding to objects\&. However the difference must be applied when looking at object attributes such as the name, the memory size or info attributes\&. 
 .SH "Typedef Documentation"
@@ -206,6 +206,8 @@ The \fCtopology\fP parameter must be a valid topology but it is not required tha
 
 .PP
 Export a list of topology differences to a XML buffer\&. If not \fCNULL\fP, \fCrefname\fP defines an identifier string for the reference topology which was used as a base when computing this difference\&. This identifier is usually the name of the other XML file that contains the reference topology\&. This attribute is given back when reading the diff from XML\&.
+.PP
+The returned buffer ends with a \\0 that is included in the returned length\&.
 .PP
 \fBNote:\fP
 .RS 4

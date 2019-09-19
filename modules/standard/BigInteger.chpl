@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2018 Cray Inc.
+ * Copyright 2004-2019 Cray Inc.
  * Other additional copyright holders may be indicated within.
  *
  * The entirety of this work is licensed under the Apache License,
@@ -36,7 +36,9 @@ The primary benefits of ``bigint`` over ``mpz_t`` are
   3) automatic memory management of GMP data structures
 
 In addition to the expected set of operations, this record provides
-a number of methods that wrap GMP functions in a natural way::
+a number of methods that wrap GMP functions in a natural way:
+
+.. code-block:: chapel
 
  use BigInteger;
 
@@ -49,6 +51,36 @@ a number of methods that wrap GMP functions in a natural way::
  c.fac(100);
  writeln(c);
 
+Casting and declarations can be used to create ``bigint`` records as
+well:
+
+.. code-block:: chapel
+
+ use BigInteger;
+
+ var   a = 234958444: bigint;
+ const b = "4847382292989382987395534934347": bigint;
+ var   c: bigint;
+
+.. warning::
+
+  Creating a ``bigint`` from an integer literal that is larger than
+  ``max(uint(64))`` would cause integer overflow before the
+  ``bigint`` is created, and so results in a compile-time error.
+  Strings should be used instead of integer literals for cases
+  like this:
+
+  .. code-block:: chapel
+
+    // These would result in integer overflow and cause compile-time errors
+    var bad1 = 4847382292989382987395534934347: bigint;
+    var bad2 = new bigint(4847382292989382987395534934347);
+
+    // These give the desired result
+    var good1 = "4847382292989382987395534934347": bigint;
+    var good2 = new bigint("4847382292989382987395534934347");
+
+
 Wrapping an ``mpz_t`` in a ``bigint`` record may introduce a
 measurable overhead in some cases.
 
@@ -59,13 +91,17 @@ than using many values of short duration.
 
 Matching this style using ``bigint`` records and the compound
 assignment operators is likely to provide comparable performance to an
-implementation based on ``mpz_t``.  So, for example::
+implementation based on ``mpz_t``.  So, for example:
+
+.. code-block:: chapel
 
   x  = b
   x *= c;
   x += a;
 
-is likely to achieve better performance than::
+is likely to achieve better performance than:
+
+.. code-block:: chapel
 
   x = a + b * c;
 
@@ -75,11 +111,15 @@ temporaries for the intermediate results of the binary operators.
 
 If peak performance is required, perhaps in a critical loop, then it
 is always possible to invoke the GMP functions directly.  For example
-one might express::
+one might express:
+
+.. code-block:: chapel
 
   a = a + b * c;
 
-as::
+as:
+
+.. code-block:: chapel
 
   mpz_addmul(a.mpz, b.mpz, c.mpz);
 
@@ -88,7 +128,9 @@ As usual the details are application specific and it is best to
 measure when peak performance is required.
 
 The operators on ``bigint`` include variations that accept Chapel
-integers e.g.::
+integers e.g.:
+
+.. code-block:: chapel
 
   var a = new bigint("9738639463465935");
   var b = 9395739153 * a;
@@ -104,12 +146,26 @@ cannot be represented using the GMP scalar type.
 The checks are controlled by the compiler options ``--[no-]cast-checks``,
 ``--fast``, etc.
 
+Casting from ``bigint`` to ``integral`` and ``real`` types is also
+supported.  Values that are too large for the resultant type are
+truncated.  GMP primitives are used to first cast to platform-specific C
+types, which are then cast to Chapel types.  As a result, casting to
+64-bit types on 32-bit platforms may result in additional truncation.
+Additionally, casting a negative ``bigint`` to a ``uint`` will result in
+the absolute value truncated to fit within the type.:
+
+.. code-block:: chapel
+
+  var a = new bigint(-1);
+  writeln(a:uint);        // prints "1"
+
 See :mod:`GMP` for more information on how to use GMP with Chapel.
 
 */
 
 module BigInteger {
   use GMP;
+  private use HaltWrappers;
 
   enum Round {
     DOWN = -1,
@@ -126,14 +182,14 @@ module BigInteger {
     var localeId : chpl_nodeID_t;      // The locale id for the GMP state
 
     proc init() {
-      this.initDone();
+      this.complete();
       mpz_init(this.mpz);
 
       this.localeId = chpl_nodeID;
     }
 
     proc init(const ref num: bigint) {
-      this.initDone();
+      this.complete();
       if _local || num.localeId == chpl_nodeID {
         mpz_init_set(this.mpz, num.mpz);
       } else {
@@ -147,36 +203,44 @@ module BigInteger {
       this.localeId = chpl_nodeID;
     }
 
+    proc init=(const ref num: bigint) {
+      this.init(num);
+    }
+
     proc init(num: int) {
-      this.initDone();
+      this.complete();
       mpz_init_set_si(this.mpz, num.safeCast(c_long));
 
       this.localeId = chpl_nodeID;
     }
 
     proc init(num: uint) {
-      this.initDone();
+      this.complete();
       mpz_init_set_ui(this.mpz, num.safeCast(c_ulong));
 
       this.localeId = chpl_nodeID;
     }
 
+    proc init=(num : integral) {
+      this.init(num);
+    }
+
     proc init(str: string, base: int = 0) {
-      this.initDone();
+      this.complete();
       const str_  = str.localize().c_str();
       const base_ = base.safeCast(c_int);
 
       if mpz_init_set_str(this.mpz, str_, base_) != 0 {
         mpz_clear(this.mpz);
 
-        halt("Error initializing big integer: bad format");
+        HaltWrappers.initHalt("Error initializing big integer: bad format");
       }
 
       this.localeId = chpl_nodeID;
     }
 
     proc init(str: string, base: int = 0, out error: syserr) {
-      this.initDone();
+      this.complete();
       const str_  = str.localize().c_str();
       const base_ = base.safeCast(c_int);
 
@@ -246,30 +310,27 @@ module BigInteger {
     }
 
     proc numLimbs : uint {
-      var mpz_struct = this.mpz[1];
-
-      return chpl_gmp_mpz_nlimbs(mpz_struct).safeCast(uint);
+      return chpl_gmp_mpz_nlimbs(this.mpz);
     }
 
-    proc get_limbn(n: uint) : uint {
-      const n_ = n.safeCast(mp_size_t);
-      var   ret: mp_limb_t;
+    proc get_limbn(n: integral) : uint {
+      var   ret: uint;
 
       if _local {
-        ret = mpz_getlimbn(this.mpz, n_);
+        ret = chpl_gmp_mpz_getlimbn(this.mpz, n);
 
       } else if this.localeId == chpl_nodeID {
-        ret = mpz_getlimbn(this.mpz, n_);
+        ret = chpl_gmp_mpz_getlimbn(this.mpz, n);
 
       } else {
         const thisLoc = chpl_buildLocaleID(this.localeId, c_sublocid_any);
 
         on __primitive("chpl_on_locale_num", thisLoc) {
-          ret = mpz_getlimbn(this.mpz, n_);
+          ret = chpl_gmp_mpz_getlimbn(this.mpz, n);
         }
       }
 
-      return ret.safeCast(uint);
+      return ret;
     }
 
     proc mpzStruct() : __mpz_struct {
@@ -329,12 +390,12 @@ module BigInteger {
       if _local {
         var tmpvar = chpl_gmp_mpz_get_str(base_, this.mpz);
 
-        ret = new string(tmpvar, owned = true, needToCopy = false);
+        ret = createStringWithOwnedBuffer(tmpvar);
 
       } else if this.localeId == chpl_nodeID {
         var tmpvar = chpl_gmp_mpz_get_str(base_, this.mpz);
 
-        ret = new string(tmpvar, owned = true, needToCopy = false);
+        ret = createStringWithOwnedBuffer(tmpvar);
 
       } else {
         const thisLoc = chpl_buildLocaleID(this.localeId, c_sublocid_any);
@@ -342,7 +403,7 @@ module BigInteger {
         on __primitive("chpl_on_locale_num", thisLoc) {
           var tmpvar = chpl_gmp_mpz_get_str(base_, this.mpz);
 
-          ret = new string(tmpvar, owned = true, needToCopy = false);
+          ret = createStringWithOwnedBuffer(tmpvar);
         }
       }
 
@@ -373,6 +434,15 @@ module BigInteger {
   //
   // Cast operators
   //
+  pragma "no doc"
+  inline proc _cast(type toType: bigint, src: integral): bigint {
+    return new bigint(src);
+  }
+
+  pragma "no doc"
+  inline proc _cast(type toType: bigint, src: string): bigint {
+    return new bigint(src);
+  }
 
   pragma "no doc"
   inline proc _cast(type t, const ref x: bigint) where isIntType(t) {
@@ -392,33 +462,28 @@ module BigInteger {
       }
     }
 
-    return ret.safeCast(int);
+    return ret:t;
   }
 
   pragma "no doc"
   inline proc _cast(type t, const ref x: bigint) where isUintType(t) {
     var ret: c_ulong;
 
-    if (mpz_cmp_ui(x.mpz, 0) >= 0) {
-      if _local {
-        ret = mpz_get_ui(x.mpz);
+    if _local {
+      ret = mpz_get_ui(x.mpz);
 
-      } else if x.localeId == chpl_nodeID {
-        ret = mpz_get_ui(x.mpz);
-
-      } else {
-        const xLoc = chpl_buildLocaleID(x.localeId, c_sublocid_any);
-
-        on __primitive("chpl_on_locale_num", xLoc) {
-          ret = mpz_get_ui(x.mpz);
-        }
-      }
+    } else if x.localeId == chpl_nodeID {
+      ret = mpz_get_ui(x.mpz);
 
     } else {
-      halt("unable to convert a negative bigint to a uint(?w)");
+      const xLoc = chpl_buildLocaleID(x.localeId, c_sublocid_any);
+
+      on __primitive("chpl_on_locale_num", xLoc) {
+        ret = mpz_get_ui(x.mpz);
+      }
     }
 
-    return ret.safeCast(uint);
+    return ret:t;
   }
 
   pragma "no doc"
@@ -439,7 +504,7 @@ module BigInteger {
       }
     }
 
-    return ret : real;
+    return ret:t;
   }
 
   //
@@ -712,7 +777,7 @@ module BigInteger {
     return c;
   }
 
-  proc -(const ref a: bigint, const ref b: int) {
+  proc -(const ref a: bigint, b: int) {
     var c = new bigint();
 
     if b >= 0 {
@@ -1429,7 +1494,7 @@ module BigInteger {
     return cmp(a, b) > 0;
   }
 
-  proc >(b: int, const ref a: bigint) {
+  proc >(a: int, const ref b: bigint) {
     return cmp(a, b) > 0;
   }
 
@@ -1437,7 +1502,7 @@ module BigInteger {
     return cmp(a, b) > 0;
   }
 
-  proc >(b: uint, const ref a: bigint) {
+  proc >(a: uint, const ref b: bigint) {
     return cmp(a, b) > 0;
   }
 
@@ -1452,7 +1517,7 @@ module BigInteger {
     return cmp(a, b) < 0;
   }
 
-  proc <(b: int, const ref a: bigint) {
+  proc <(a: int, const ref b: bigint) {
     return cmp(a, b) < 0;
   }
 
@@ -1460,7 +1525,7 @@ module BigInteger {
     return cmp(a, b) < 0;
   }
 
-  proc <(b: uint, const ref a: bigint) {
+  proc <(a: uint, const ref b: bigint) {
     return cmp(a, b) < 0;
   }
 
@@ -1474,7 +1539,7 @@ module BigInteger {
     return cmp(a, b) >= 0;
   }
 
-  proc >=(b: int, const ref a: bigint) {
+  proc >=(a: int, const ref b: bigint) {
     return cmp(a, b) >= 0;
   }
 
@@ -1482,7 +1547,7 @@ module BigInteger {
     return cmp(a, b) >= 0;
   }
 
-  proc >=(b: uint, const ref a: bigint) {
+  proc >=(a: uint, const ref b: bigint) {
     return cmp(a, b) >= 0;
   }
 
@@ -1497,7 +1562,7 @@ module BigInteger {
     return cmp(a, b) <= 0;
   }
 
-  proc <=(b: int, const ref a: bigint) {
+  proc <=(a: int, const ref b: bigint) {
     return cmp(a, b) <= 0;
   }
 
@@ -1505,7 +1570,7 @@ module BigInteger {
     return cmp(a, b) <= 0;
   }
 
-  proc <=(b: uint, const ref a: bigint) {
+  proc <=(a: uint, const ref b: bigint) {
     return cmp(a, b) <= 0;
   }
 
@@ -2215,6 +2280,23 @@ module BigInteger {
 
 
   // divexact
+
+/*
+Computes ``n/d`` and stores the result in ``bigint`` instance.
+
+``divexact`` is optimized to handle cases where ``n/d`` results in an integer.
+When ``n/d`` does not produce an integer, this method may produce incorrect results.
+
+:arg n: numerator
+
+:type n: bigint
+
+:arg d: denominator
+
+:type d: bigint
+*/
+
+
   proc bigint.divexact(const ref n: bigint, const ref d: bigint) {
     if _local {
       mpz_divexact(this.mpz, n.mpz, d.mpz);

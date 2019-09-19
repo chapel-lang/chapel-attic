@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2018 Cray Inc.
+ * Copyright 2004-2019 Cray Inc.
  * Other additional copyright holders may be indicated within.
  *
  * The entirety of this work is licensed under the Apache License,
@@ -135,12 +135,6 @@ bool CollapseBlocks::enterBlockStmt(BlockStmt* node)
   return false;
 }
 
-void CollapseBlocks::visitForallIntents(ForallIntents* clause) {
-  // Need to define this so CollapseBlocks is not abstract.
-  // However, it should not be invoked.
-  INT_ASSERT(false);
-}
-
 bool CollapseBlocks::enterForallStmt(ForallStmt* node) {
   return enterBlockStmt(node->loopBody());
 }
@@ -210,6 +204,16 @@ bool CollapseBlocks::enterAggrType(AggregateType* node)
 }
 
 void CollapseBlocks::exitAggrType(AggregateType* node)
+{
+
+}
+
+bool CollapseBlocks::enterDecoratedClassType(DecoratedClassType* node)
+{
+  return false;
+}
+
+void CollapseBlocks::exitDecoratedClassType(DecoratedClassType* node)
 {
 
 }
@@ -322,12 +326,32 @@ void CollapseBlocks::exitNamedExpr(NamedExpr* node)
 
 }
 
+bool CollapseBlocks::enterIfExpr(IfExpr* node)
+{
+  return true;
+}
+
+void CollapseBlocks::exitIfExpr(IfExpr* node)
+{
+
+}
+
 void CollapseBlocks::visitSymExpr(SymExpr* node)
 {
 
 }
 
 void CollapseBlocks::visitUsymExpr(UnresolvedSymExpr* node)
+{
+
+}
+
+bool CollapseBlocks::enterLoopExpr(LoopExpr* node)
+{
+  return true;
+}
+
+void CollapseBlocks::exitLoopExpr(LoopExpr* node)
 {
 
 }

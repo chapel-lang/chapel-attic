@@ -9,12 +9,11 @@ class C {
 
   proc init() {
     t = new R();
-    this.initDone();
+    this.complete();
     v = new R();
   }
 }
 
 proc main() {
-  var c = new C();
-  delete c;
+  var c = new owned C();
 }

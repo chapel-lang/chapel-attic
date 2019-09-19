@@ -44,3 +44,33 @@ extern proc hasReturnTypeCommentless(): int;
 extern proc hasReturnTypeAndArg(val: int): int;
 
 extern proc hasReturnTypeAndArgCommentless(val: int): int;
+
+/* Commenting withExternCNameComment */
+extern "test_name" proc withExternCNameComment();
+
+extern "test_name" proc withExternCName();
+
+/* test param method for withParamExternCName */
+proc getName() param {
+  return "name";
+}
+
+extern "test"+getName() proc withParamExternCName();
+
+extern record externRecordNoComment { }
+
+/* Commenting externRecordComment */
+extern record externRecordComment {
+  /* Commenting a field */
+  var field:int;
+}
+
+extern "c_name1" record externRecordRenamedNoComment { }
+
+/* Commenting externRecordRenamedComment */
+extern "c_name2" record externRecordRenamedComment {
+  /* Commenting a field */
+  var field:int;
+}
+
+proc end() { }

@@ -15,13 +15,13 @@
   background-color: #2f95d8;
 }
 
-/* Orange */
+/* Red */
 .oldVersion {
-  background-color: #f49542;
+  background-color: #ff0000;
   color: white;
 }
 .oldVersion:hover, .oldVersion:focus {
-  background-color: #d68137;
+  background-color: #ff0000;
 }
 
 /* Yellow */
@@ -48,7 +48,6 @@
   overflow: auto;
   box-shadow: 0px 8px 16px 0px rgba(0,0,0,0.2);
   z-index: 1;
-  height: 150px;
   right: 0;
 }
 
@@ -82,34 +81,31 @@ function toggleDropDown() {
 
 var chplTitle = "<?php echo "$chplTitle";?>";
 
-// Note: assumes second element is most-recent release
-var chplVersions = [
-  "1.17 pre-release",
-  "1.16",
-  "1.15",
-  "1.14",
-  "1.13",
-  "1.12",
-  "1.11"
-];
-
 var pagePath = "<?php echo "$pagename";?>";
 if (pagePath == "") {
   // If no path is given, default to root of other docs
-  pagePath = "index.html";
+  pagePath = "index";
 }
 function dropSetup() {
+  var currentRelease = "1.19"; // what does the public have?
+  var stagedRelease = "1.20";  // is there a release staged but not yet public?
+  var nextRelease = "1.21";    // what's the next release? (on docs/master)
   var button = document.getElementById("versionButton");
   // Uses unicode down-pointing triangle
-  button.innerHTML = chplTitle + " &#9660;";
+  var arrow = " &#9660;";
+  button.innerHTML = "version " + chplTitle + arrow;
 
   // Choose button color
-  if (chplTitle.includes("pre-release")) {
+  if (chplTitle == stagedRelease || chplTitle == nextRelease) {
+    // add pre-release label using a non-breaking hyphen
+    button.innerHTML = "version " + chplTitle + " (pre&#8209;release)" + arrow;
     button.classList.add("preRelease");
-  } else if (chplTitle != chplVersions[1]) {
-    button.classList.add("oldVersion");
-  } else {
+  } else if (chplTitle == currentRelease) {
     button.classList.add("currentVersion");
+  } else {
+    // add old release label using a non-blocking space
+    button.innerHTML = "version " + chplTitle + " (old&nbsp;release)" + arrow;
+    button.classList.add("oldVersion");
   }
 
   // Clear old links (if any)
@@ -117,18 +113,20 @@ function dropSetup() {
     dropDiv.removeChild(dropDiv.firstChild);
   }
 
-  // Add links to chapel-lang.org/docs/###/
-  for (var i = 0; i < chplVersions.length; i++) {
-    var ver = chplVersions[i];
-    if (ver != chplTitle) {
-      var link = document.createElement("a");
-      link.innerHTML = ver;
-      if (ver.includes("pre-release")) {
-        ver = "master";
-      }
-      link.href = "http://chapel-lang.org/docs/" + ver + "/" + pagePath + ".html";
-      dropDiv.append(link);
-    }
+  if (chplTitle != currentRelease) {
+    // Add links to current version of docs
+    var link = document.createElement("a");
+    link.innerHTML = "version "+currentRelease+"<br>(latest release)";
+    link.href = "https://chapel-lang.org/docs/" + pagePath + ".html";
+    dropDiv.append(link);
+  }
+
+  if (!chplTitle.includes(nextRelease)) {
+    // Add links to master version of docs
+    var link = document.createElement("a");
+    link.innerHTML = "version " + nextRelease + "<br>(pre-release)";
+    link.href = "https://chapel-lang.org/docs/master/" + pagePath + ".html";
+    dropDiv.append(link);
   }
 }
 dropSetup();

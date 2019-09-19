@@ -1,21 +1,21 @@
 class Parent {
-  proc clone() : Parent {
+  proc clone() : unmanaged Parent? {
     writeln("in Parent.clone()");
     return nil;
   }
 }
 
 class Child : Parent {
-  proc clone() : Parent {
+  override proc clone() : unmanaged Parent? {
     writeln("in Child.clone()");
-    return new Child();
+    return new unmanaged Child();
   }
 }
 
 
 
 record R {
-  var obj:Parent = nil;
+  var obj:unmanaged Parent? = nil;
   proc deinit() {
     delete obj;
   }
@@ -23,7 +23,6 @@ record R {
 
 /* user record's can't write their own
    autoCopy after PR #5164
-pragma "donor fn"
 pragma "auto copy fn"
 proc chpl__autoCopy(arg: R) {
 
@@ -49,7 +48,7 @@ proc chpl__initCopy(arg: R) {
 
   writeln("initCopy");
 
-  ret.obj = arg.obj.clone();
+  ret.obj = arg.obj!.clone();
 
   return ret;
 }
@@ -59,7 +58,7 @@ proc doAutoCopyIt(x)
   return x;
 }
 proc main() {
-  var r = new R(new Child());
+  var r = new R(new unmanaged Child());
   writeln(doAutoCopyIt(r));
 }
 

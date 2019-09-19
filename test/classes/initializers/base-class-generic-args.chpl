@@ -1,5 +1,3 @@
-// Modified from
-// test/classes/constructors/base-class-generic-args.chpl
 
 // Contributed by Rafael Larrosa Jimenez (rlarrosa@uma.es)
 
@@ -26,11 +24,11 @@ class Oval: Circle{
   }
 }
 
-proc Oval.area() return 3.14159*r2;
+override proc Oval.area() return 3.14159*r2;
 
 
 
-var c = new Circle(h=(4,));
+var c = new unmanaged Circle(h=(4,));
 
 writeln("circle area:",c.area());
 
@@ -38,7 +36,7 @@ delete c;
 
 
 
-var o = new Oval(h1=(1,),h2=2.0);
+var o = new unmanaged Oval(h1=(1,),h2=2.0);
 
 writeln(o.area()," r:",o.r," r2:",o.r2);
 

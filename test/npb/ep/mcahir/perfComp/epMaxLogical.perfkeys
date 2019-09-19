@@ -1,5 +1,1 @@
- Time in seconds =
- Mop/s total     =
- Mop/s/process   =
- Verification    =
-verify:-1: ^ Verification .*SUCCESSFUL$
+../ep.perfkeys

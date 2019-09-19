@@ -9,20 +9,15 @@ class AssocC {
   var x: [assocDom] [1..3] real;
 }
 
-class OpaqueC {
-  var opaqueDom: domain(opaque);
-  var x: [opaqueDom] [1..3] real;
-}
-
 class SparseC {
   var sparseDom: sparse subdomain({1..3});
   var x: [sparseDom] [1..3] real;
 }
 
-enum probClass {S, W, A, B, C};
+enum probClass {S=1, W, A, B, C};
 
 class EnumC {
-  var enumDom: domain(probClass);
+  var enumDom: domain(probClass) = probClass.S..probClass.C;
   var x: [enumDom] [1..3] real;
 }
 
@@ -36,11 +31,10 @@ proc foo(C) {
 
 // declare class instances
 
-var myArithC = new ArithC();
-var myAssocC = new AssocC();
-var myOpaqueC = new OpaqueC();
-var mySparseC = new SparseC();
-var myEnumC = new EnumC();
+var myArithC = new unmanaged ArithC();
+var myAssocC = new unmanaged AssocC();
+var mySparseC = new unmanaged SparseC();
+var myEnumC = new unmanaged EnumC();
 
 // initialize class instances
 
@@ -48,9 +42,6 @@ var myEnumC = new EnumC();
 
 myAssocC.assocDom += "two";
 [j in 1..3] myAssocC.x("two")(j) = 2 + j/10.0;
-
-const newInd = myOpaqueC.opaqueDom.create();
-[j in 1..3] myOpaqueC.x(newInd)(j) = 2 + j/10.0;
 
 mySparseC.sparseDom += 2;
 [j in 1..3] mySparseC.x(2)(j) = 2 + j/10.0;
@@ -61,13 +52,11 @@ mySparseC.sparseDom += 2;
 
 foo(myArithC);
 foo(myAssocC);
-foo(myOpaqueC);
 foo(mySparseC);
 foo(myEnumC);
 
 delete myArithC;
 delete myAssocC;
-delete myOpaqueC;
 delete mySparseC;
 delete myEnumC;
 

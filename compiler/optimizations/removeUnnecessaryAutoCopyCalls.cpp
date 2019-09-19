@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2018 Cray Inc.
+ * Copyright 2004-2019 Cray Inc.
  * Other additional copyright holders may be indicated within.
  *
  * The entirety of this work is licensed under the Apache License,
@@ -34,8 +34,8 @@ static void removePODinitDestroy()
   forv_Vec(FnSymbol, fn, gFnSymbols) {
     if (fn->hasFlag(FLAG_INIT_COPY_FN) || fn->hasFlag(FLAG_AUTO_COPY_FN))
     {
-      if (fn->retType == dtVoid)
-        // initCopy(void) and autoCopy(void) will have had their void
+      if (fn->retType == dtNothing)
+        // initCopy(none) and autoCopy(none) will have had their nothing
         // argument removed
         continue;
 

@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2018 Cray Inc.
+ * Copyright 2004-2019 Cray Inc.
  * Other additional copyright holders may be indicated within.
  *
  * The entirety of this work is licensed under the Apache License,
@@ -66,21 +66,6 @@ void AstToText::appendName(FnSymbol* fn)
 
     mText += "top-level module statements for ";
     mText += (fn->name + 11);
-  }
-
-  else if (fn->hasFlag(FLAG_TYPE_CONSTRUCTOR))
-  {
-    INT_ASSERT(strncmp(fn->name, "_type_construct_", 16) == 0);
-
-    mText += (fn->name + 16);
-  }
-
-  else if (fn->hasFlag(FLAG_CONSTRUCTOR))
-  {
-    INT_ASSERT(strncmp(fn->name, "_construct_",      11) == 0);
-
-    mText += (fn->name + 11);
-    // todo: should this also include ".init" ?
   }
 
   else if (fn->isMethod() == true)
@@ -196,22 +181,17 @@ void AstToText::appendFormals(FnSymbol* fn)
 
   for (int index = 1; index <= count; index++)
   {
-    ArgSymbol* arg = formalGet(fn, index);
-
-    if (arg->hasFlag(FLAG_IS_MEME) == false)
+    if (first == true)
     {
-      if (first == true)
-      {
-        if (skip == true)
-          mText += " ";
+      if (skip == true)
+        mText += " ";
 
-        first = false;
-      }
-      else
-        mText += ", ";
-
-      appendFormal(fn, index);
+      first = false;
     }
+    else
+      mText += ", ";
+
+    appendFormal(fn, index);
   }
 
   if (skip == false)
@@ -223,9 +203,6 @@ bool AstToText::skipParens(FnSymbol* fn) const
   bool retval = false;
 
   if (fn->hasFlag(FLAG_NO_PARENS))
-    retval = true;
-
-  else if (fn->hasFlag(FLAG_TYPE_CONSTRUCTOR) && fn->numFormals() == 0)
     retval = true;
 
   else if (fn->hasFlag(FLAG_MODULE_INIT)      && developer        == false)
@@ -559,11 +536,8 @@ void AstToText::appendFormalVariableExpr(ArgSymbol* arg)
         {
           if (VarSymbol* sym = toVarSymbol(sel->sym))
           {
-            if (strncmp(sym->name, "chpl__query", 11) != 0)
-            {
-              mText += "?";
-              mText += sym->name;
-            }
+            mText += "?";
+            mText += sym->name;
           }
           else
           {
@@ -575,7 +549,12 @@ void AstToText::appendFormalVariableExpr(ArgSymbol* arg)
 
         else
         {
-          appendExpr(expr, false);
+          SymExpr* se = toSymExpr(expr);
+          bool unnamed = se && se->symbol() == gUninstantiated;
+
+          if (!unnamed) {
+            appendExpr(expr, false);
+          }
         }
       }
       else
@@ -740,7 +719,17 @@ void AstToText::appendExpr(Expr* expr, bool printingType)
 
 void AstToText::appendExpr(UnresolvedSymExpr* expr)
 {
-  appendExpr(expr->unresolved);
+  if (strcmp(expr->unresolved, "_shared") == 0) {
+    mText += "shared";
+  } else if (strcmp(expr->unresolved, "_owned") == 0) {
+    mText += "owned";
+  } else if (strcmp(expr->unresolved, "_borrowed") == 0) {
+    mText += "borrowed";
+  } else if (strcmp(expr->unresolved, "_unmanaged") == 0) {
+    mText += "unmanaged";
+  } else {
+    appendExpr(expr->unresolved);
+  }
 }
 
 void AstToText::appendExpr(SymExpr* expr, bool printingType, bool quoteStrings)
@@ -771,6 +760,8 @@ void AstToText::appendExpr(SymExpr* expr, bool printingType, bool quoteStrings)
 
           if (var->immediate->string_kind == STRING_KIND_C_STRING)
             *ptr++ = 'c';
+          else if (var->immediate->string_kind == STRING_KIND_BYTES)
+            *ptr++ = 'b';
           *ptr++ = '"';
           strcpy(ptr, var->immediate->v_string);
           ptr = strchr(ptr, '\0');
@@ -1031,6 +1022,18 @@ void AstToText::appendExpr(CallExpr* expr, bool printingType)
         mText += "..";
       }
 
+      else if (strcmp(fnName, "_owned") == 0)
+      {
+        mText += "owned ";
+        appendExpr(expr->get(1), printingType);
+      }
+
+      else if (strcmp(fnName, "_shared") == 0)
+      {
+        mText += "shared ";
+        appendExpr(expr->get(1), printingType);
+      }
+
       else if ((fnName != astrSdot)                          == 0)
       {
         SymExpr* symExpr1 = toSymExpr(expr->get(1));
@@ -1190,6 +1193,29 @@ void AstToText::appendExpr(CallExpr* expr, bool printingType)
     else if (expr->isPrimitive(PRIM_NEW))
     {
       mText += "new ";
+      appendExpr(expr->get(1), printingType);
+    }
+    else if (expr->isPrimitive(PRIM_TO_UNMANAGED_CLASS) ||
+             expr->isPrimitive(PRIM_TO_UNMANAGED_CLASS_CHECKED))
+    {
+      mText += "unmanaged ";
+      appendExpr(expr->get(1), printingType);
+    }
+    else if (expr->isPrimitive(PRIM_TO_BORROWED_CLASS) ||
+             expr->isPrimitive(PRIM_TO_BORROWED_CLASS_CHECKED))
+    {
+      mText += "borrowed ";
+      appendExpr(expr->get(1), printingType);
+    }
+    else if (expr->isPrimitive(PRIM_TO_NILABLE_CLASS) ||
+             expr->isPrimitive(PRIM_TO_NILABLE_CLASS_CHECKED))
+    {
+      mText += "nilable ";
+      appendExpr(expr->get(1), printingType);
+    }
+    else if (expr->isPrimitive(PRIM_TO_NON_NILABLE_CLASS))
+    {
+      mText += "nonnilable ";
       appendExpr(expr->get(1), printingType);
     }
     else

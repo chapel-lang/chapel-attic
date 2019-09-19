@@ -5,18 +5,18 @@ class Parent {
 }
 
 class Child : Parent {
-  proc foo(param x) where x == 1 || x == 2 {
+  override proc foo(param x) where x == 1 || x == 2 {
     writeln("Child ", x);
   }
 }
 
 class ChildSub : Child {
-  proc foo(param x) where x == 2 {
+  override proc foo(param x) where x == 2 {
     writeln("ChildSub ", x);
   }
 }
 
-var x1 = new Parent();
+var x1 = new unmanaged Parent();
 
 x1.foo(1);
 x1.foo(2);
@@ -31,7 +31,7 @@ writeln();
 
 
 
-var x2 = new Child();
+var x2 = new unmanaged Child();
 
 x2.foo(1);
 x2.foo(2);
@@ -47,7 +47,7 @@ writeln();
 
 
 
-var x3 = new ChildSub();
+var x3 = new unmanaged ChildSub();
 
 x3.foo(1);
 x3.foo(2);

@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2018 Cray Inc.
+ * Copyright 2004-2019 Cray Inc.
  * Other additional copyright holders may be indicated within.
  * 
  * The entirety of this work is licensed under the Apache License,
@@ -40,7 +40,7 @@ void chpl_gen_comm_get_ctl(void *dst_addr,
                            c_nodeid_t src_node, void *src_addr,
                            uintptr_t n, int64_t ctl)
 {
-  chpl_gen_comm_get(dst_addr, src_node, src_addr, sizeof(uint8_t)*n, CHPL_TYPE_uint8_t, CHPL_COMM_UNKNOWN_ID, -1, 0);
+  chpl_gen_comm_get(dst_addr, src_node, src_addr, sizeof(uint8_t)*n, CHPL_COMM_UNKNOWN_ID, -1, 0);
 }
 
 static inline
@@ -48,10 +48,10 @@ void chpl_gen_comm_put_ctl(c_nodeid_t dst_node, void* dst_addr,
                            void *src_addr,
                            uintptr_t n, int64_t ctl)
 {
-  chpl_gen_comm_put(src_addr, dst_node, dst_addr, sizeof(uint8_t)*n, CHPL_TYPE_uint8_t, CHPL_COMM_UNKNOWN_ID, -1, 0);
+  chpl_gen_comm_put(src_addr, dst_node, dst_addr, sizeof(uint8_t)*n, CHPL_COMM_UNKNOWN_ID, -1, 0);
 }
 
-// This function implements memcpy/memmove when both the source and destination
+// This function implements memmove when both the source and destination
 // are possibly remote. The Chapel compiler does not normally generate
 // such code, but it could appear during optimization. Note that the
 // dst and src regions could overlap.

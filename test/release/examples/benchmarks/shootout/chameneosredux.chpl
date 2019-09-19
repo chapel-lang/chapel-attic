@@ -1,5 +1,5 @@
 /* The Computer Language Benchmarks Game
-   http://benchmarksgame.alioth.debian.org/
+   https://salsa.debian.org/benchmarksgame-team/benchmarksgame/
 
    contributed by Hannah Hemmaplardh, Lydia Duncan, and Brad Chamberlain
    derived in part from the GNU C version by Dmitry Vyukov
@@ -64,8 +64,8 @@ record Population {
   // an array of chameneos objects representing the population
   //
   var chameneos = [i in 1..size]
-                    new Chameneos(i, if size == 10 then colors10[i]
-                                                   else ((i-1)%3): Color);
+                    new owned Chameneos(i, if size == 10 then colors10[i]
+                                                         else ((i-1)%3): Color);
 
   //
   // Print the colors of the current population.
@@ -85,8 +85,6 @@ record Population {
 
     coforall c in chameneos do           // create a task per chameneos
       c.haveMeetings(place, chameneos);
-
-    delete place;
   }
 
   //
@@ -103,14 +101,6 @@ record Population {
     
     spellInt(+ reduce chameneos.meetings);
     writeln();
-  }
-
-  //
-  // Delete the chameneos objects.
-  //
-  proc deinit() {
-    for c in chameneos do
-      delete c;
   }
 }
 
@@ -243,8 +233,7 @@ class MeetingPlace {
   // Initialize the number of meetings that should take place
   //
   proc init(numMeetings) {
-    this.initDone();
-    state.write(numMeetings << bitsPerChameneosID);
+    state = numMeetings << bitsPerChameneosID;
   }
 
   //
@@ -269,7 +258,7 @@ class MeetingPlace {
   //
   proc attemptToStore(prevState, numMeetings, chameneosID) {
     const newState = (numMeetings << bitsPerChameneosID) | chameneosID;
-    return state.compareExchangeStrong(prevState, newState);
+    return state.compareAndSwap(prevState, newState);
   }
 }
 

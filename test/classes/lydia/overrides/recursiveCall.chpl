@@ -7,7 +7,7 @@ class A {
 }
 
 class B: A {
-  proc foo(x) {
+  override proc foo(x) {
     if (x > 5) {
       super.foo(x);
     } else {
@@ -17,11 +17,8 @@ class B: A {
   }
 }
 
-var a = new A();
-var b = new B();
+var a = new borrowed A();
+var b = new borrowed B();
 
 a.foo(3);
 b.foo(2);
-
-delete b;
-delete a;

@@ -1,18 +1,28 @@
 module LCALSDataTypes {
   use LCALSParams;
   use LCALSEnums;
+  use List;
 
+  //
+  // This is a vector wrapper that uses 0-based indexing.
+  //
   class vector {
     type eltType;
-    var A: [0..-1] eltType;
+    var A: list(eltType);
+
+    //
+    // Previously, this vector used an array with a domain that started at 0,
+    // but list indexes starting at 1. So we should add 1 to the index to
+    // prevent a logical error.
+    //
     proc this(i: int) ref {
-      return A[i];
+      return A[i + 1];
     }
     proc push_back(e: eltType) {
-      A.push_back(e);
+      A.append(e);
     }
     proc numElements {
-      return A.numElements;
+      return A.size;
     }
     iter these() {
       for a in A do yield a;
@@ -22,10 +32,10 @@ module LCALSDataTypes {
   class LoopSuiteRunInfo {
     var host_name: string;
 
-    const loop_kernel_dom: domain(LoopKernelID);
-    const loop_length_dom: domain(LoopLength);
-    const loop_variant_dom: domain(LoopVariantID);
-    const weight_group_dom: domain(WeightGroup);
+    const loop_kernel_dom = {LoopKernelID.REF_LOOP..LoopKernelID.FIND_FIRST_MIN};
+    const loop_length_dom = {LoopLength.LONG..LoopLength.SHORT};
+    const loop_variant_dom = {LoopVariantID.RAW..LoopVariantID.FORALL_HYBRID_LAMBDA_TYPEFIX};
+    const weight_group_dom = {WeightGroup.DATA_PARALLEL..WeightGroup.NUM_WEIGHT_GROUPS};;
 
     var loop_names: [loop_kernel_dom] string;
 
@@ -35,7 +45,7 @@ module LCALSDataTypes {
     var num_suite_passes: int;
     var loop_samp_frac: real;
 
-    var ref_loop_stat: LoopStat;
+    var ref_loop_stat: owned LoopStat?;
 
     var loop_weights: [weight_group_dom] real;
 
@@ -44,28 +54,19 @@ module LCALSDataTypes {
     var cache_flush_data: [cache_flush_data_dom] real;
     var cache_flush_data_sum: real;
 
-    var loop_test_stats: [loop_variant_dom] [loop_kernel_dom] LoopStat;
+    var loop_test_stats: [loop_variant_dom] [loop_kernel_dom] owned LoopStat;
 
     proc getLoopStats(loop_variant: LoopVariantID) ref {
       return loop_test_stats[loop_variant];
-    }
-
-    proc deinit() {
-      if ref_loop_stat != nil then delete ref_loop_stat;
-
-      for idx in loop_variant_dom {
-        for stat in loop_test_stats[idx] do
-          if stat != nil then delete stat;
-      }
     }
   }
 
   class LoopStat {
     var loop_is_run: bool;
     var loop_weight: real;
-    var loop_length_dom: domain(LoopLength);
+    var loop_length_dom = {LoopLength.LONG..LoopLength.SHORT};
 
-    var loop_run_time: [loop_length_dom] vector(real);
+    var loop_run_time: [loop_length_dom] owned vector(real);
     var loop_run_count: [loop_length_dom] int;
     var mean: [loop_length_dom] real;
     var std_dev: [loop_length_dom] real;
@@ -80,14 +81,7 @@ module LCALSDataTypes {
     var loop_chksum: [loop_length_dom] real;
 
     proc init() {
-      this.initDone();
-      for i in loop_length_dom do
-        loop_run_time[i] = new vector(real);
-    }
-
-    proc deinit() {
-      for lrt in loop_run_time do
-        if lrt != nil then delete lrt;
+      loop_run_time = for i in loop_length_dom do new owned vector(real);
     }
   }
 
@@ -122,7 +116,6 @@ module LCALSDataTypes {
     var n_real_zones: int;
 
     proc init(ilen: LoopLength, ndims: int) {
-      this.initDone();
       var rzmax: int;
       this.ndims = ndims;
       NPNL = 2;
@@ -181,7 +174,7 @@ module LCALSDataTypes {
       lpz = lrn;
 
       zoneDom = {0..#nnalls};
-      for i in 0..#nnalls do real_zones[i] = -1;
+      real_zones = -1;
 
       n_real_zones = 0;
 
@@ -266,12 +259,9 @@ module LCALSDataTypes {
     // class implements the same pattern used in the LCALS reference.
     //
     // var RealArray_3D_2xNx4: [0..#s_num_3D_2xNx4_Real_arrays][0..#2, 0..#aligned_chunksize, 0..#4] real;
-    var RealArray_3D_2xNx4: [0..#s_num_3D_2xNx4_Real_arrays] LCALS_Overlapping_Array_3D(real) = [i in 0..s_num_3D_2xNx4_Real_arrays] new LCALS_Overlapping_Array_3D(real, 2*4*aligned_chunksize); // 2 X loop_length X 4 array size
+    var RealArray_3D_2xNx4: [0..#s_num_3D_2xNx4_Real_arrays] owned LCALS_Overlapping_Array_3D(real) = [i in 0..#s_num_3D_2xNx4_Real_arrays] new owned LCALS_Overlapping_Array_3D(real, 2*4*aligned_chunksize); // 2 X loop_length X 4 array size
 
     var RealArray_scalars: [0..#s_num_Real_scalars] real;
-    proc deinit() {
-      for arr in RealArray_3D_2xNx4 do delete arr;
-    }
   }
 
   /* Mimic the strange, self-overlapping 3D array in the LCALS

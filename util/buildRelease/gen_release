@@ -50,7 +50,7 @@ chomp($user);
 $tmpdir = tempdir("chapel-release.$user.deleteme.XXXXX", DIR => $basetmpdir, CLEANUP => 1);
 $archive_dir = "$tmpdir/$reldir";
 SystemOrDie("rm -rf $tmpdir");
-SystemOrDie("mkdir -pv $archive_dir");
+SystemOrDie("mkdir -pv $tmpdir");
 $rootdir = "$tmpdir/chpl_home";
 
 # If CHPL_GEN_RELEASE_NO_CLONE is set in environment, do not clone the repo
@@ -59,11 +59,12 @@ $rootdir = "$tmpdir/chpl_home";
 if (exists($ENV{"CHPL_GEN_RELEASE_NO_CLONE"})) {
 
     # copy the current CHPL_HOME into the directory where chapel will be built
-    print "[gen_release] CHPL_GEN_RELEASE_NO_CLONE: Creating build workspace with tar...\n";
-    SystemOrDie("cd $chplhome && tar -cf - . | (cd $archive_dir && tar -xf -)");
+    print "[gen_release] CHPL_GEN_RELEASE_NO_CLONE: Creating build workspace with cp --archive ...\n";
+    SystemOrDie("cp --archive $chplhome $archive_dir");
 
     $resultdir = "$chplhome/tar";
 } else {
+    SystemOrDie("mkdir -pv $archive_dir");
 
     # check out a clean copy of the sources into the directory where chapel will be built
     $git_url = $ENV{'CHPL_HOME_REPOSITORY'};
@@ -88,8 +89,18 @@ if (exists($ENV{"CHPL_GEN_RELEASE_NO_CLONE"})) {
     print "[gen_release] Confirm final Git source version used.\n";
     SystemOrDie("cd $rootdir && git status && git log -1");
 
+    if ($version eq "" or $version eq "developer") {
+      print "[gen_release] Create BUILD_VERSION file.\n";
+      SystemOrDie("cd $rootdir/compiler && make main/BUILD_VERSION");
+    }
+
     print "[gen_release] Creating build workspace with git archive...\n";
     SystemOrDie("cd $rootdir && git archive --format=tar HEAD | (cd $archive_dir && tar -xf -)");
+
+    if ($version eq "" or $version eq "developer") {
+      print "[gen_release] Copying BUILD_VERSION file.\n";
+      SystemOrDie("cp $rootdir/compiler/main/BUILD_VERSION $archive_dir/compiler/main/BUILD_VERSION");
+    }
 
     if (defined($ENV{"CHPL_HOME"})) {
         $resultdir = $ENV{"CHPL_HOME"};
@@ -116,8 +127,9 @@ if (exists($ENV{"CHPL_GEN_RELEASE_NO_CLONE"})) {
        "configure",
        "highlight/README.md",
        "util/README",
-       "util/build_configs.py",
+       "util/buildRelease/chpl-make-cpu_count",
        "util/buildRelease/install.sh",
+       "util/chpl-completion.bash",
        "util/printchplenv",
        "util/setchplenv.bash",
        "util/setchplenv.csh",
@@ -146,6 +158,7 @@ if (exists($ENV{"CHPL_GEN_RELEASE_NO_CLONE"})) {
     "modules",
     "runtime",
     "third-party",
+    "util/build_configs",
     "util/chplenv",
     "util/config",
     "util/quickstart",

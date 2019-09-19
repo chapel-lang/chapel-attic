@@ -9,8 +9,8 @@ proc insertPrivatized(o: object, pid: int) {
   __primitive("chpl_newPrivatizedClass", o, pid);
 }
 
-proc getPrivatized(pid:int): C {
-  return __primitive("chpl_getPrivatizedClass", nil:C, pid);
+proc getPrivatized(pid:int): unmanaged C {
+  return chpl_getPrivatizedCopy(unmanaged C, pid);
 }
 
 proc clearPrivatized(pid:int) {

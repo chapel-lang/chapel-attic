@@ -1,5 +1,5 @@
 /*
- * Copyright © 2013-2016 Inria.  All rights reserved.
+ * Copyright © 2013-2019 Inria.  All rights reserved.
  * See COPYING in top-level directory.
  */
 
@@ -72,7 +72,7 @@ int main(int argc, char *argv[])
 	char *callname, *input, *inputdiff, *output = NULL, *refname = NULL;
 	int err;
 
-	putenv("HWLOC_XML_VERBOSE=1");
+	putenv((char *) "HWLOC_XML_VERBOSE=1");
 	callname = argv[0];
 	/* skip argv[0], handle options */
 	argc--;
@@ -142,7 +142,11 @@ int main(int argc, char *argv[])
 		}
 	}
 
-	hwloc_topology_load(topo);
+	err = hwloc_topology_load(topo);
+	if (err < 0) {
+		fprintf(stderr, "Failed to load topology\n");
+		goto out_with_topo;
+	}
 
 	err = hwloc_topology_diff_apply(topo, firstdiff, patchflags);
 	if (err < 0) {

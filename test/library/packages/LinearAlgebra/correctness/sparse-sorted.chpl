@@ -20,7 +20,7 @@ config const debug = false;
 proc main() {
   const R = 1..n;
   const parent = {R,R};
-  var D : sparse subdomain(parent) dmapped CS();
+  var D : sparse subdomain(parent) dmapped CS(sortedIndices=false);
 
   for i in R {
     const s = 1 + i % 10;
@@ -33,7 +33,7 @@ proc main() {
 
   var fails = 0;
   forall bb in B.domain with (+ reduce fails) {
-    if B.domain.member(bb) == false {
+    if B.domain.contains(bb) == false {
       fails += 1;
       if debug then writeln("NOT FOUND: ", bb);
     }

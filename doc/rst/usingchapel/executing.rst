@@ -287,10 +287,12 @@ Controlling the Call Stack Size
 The main Chapel program requires space for its call stack, as does any
 task created by it.  This stack space has a fixed size.  It is created
 automatically when the program or task starts executing, and remains in
-existence until it completes.  The default call stack size is 8 MiB on
+existence until it completes.  The default call stack size is ~8 MiB on
 Linux-based systems, since this is a common value for the process stack
 limit on such systems.  On Cygwin systems the default call stack size is
-2 MiB.
+~2 MiB. Note that up to 4 system pages of each stack may be reserved for
+use by the tasking layer. Up to 2 pages for runtime data structures and
+up to 2 additional pages if guard pages (--stack-checks) are enabled.
 
 The default call stack size may not be appropriate in all cases.  For
 programs in which some tasks have large stack frames or deep call trees
@@ -344,6 +346,36 @@ executable.
                    starts executing there.
     -q, --quiet    Print less information. For example, suppress run-time
                    warnings that are printed by default.
+
+
+.. _oversubscribed-execution:
+
+----------------
+Oversubscription
+----------------
+
+In multi-locale Chapel executions programs can run "oversubscribed",
+with more than one Chapel locale per system compute node.  Both the
+``gasnet`` and ``ofi`` communication layers support this.  However,
+oversubscription can cause serious performance degradation due to
+resource contention, when multiple Chapel locales (program instances)
+all proceed as if the resources of the entire compute node are theirs
+to use.  As a result, on a single system node, a program will almost
+always run faster with just a single locale than it will with multiple
+locales.  Nevertheless, sometimes oversubscription is useful, such as
+for testing multilocale Chapel functionality when multiple system
+nodes are not actually available.
+
+As a partial workaround for the resource contention problem, setting
+the following environment variable often improves performance when
+running oversubscribed:
+
+    .. code-block:: sh
+
+        export CHPL_RT_OVERSUBSCRIBED=yes
+
+This causes various software components, from launchers to the
+runtime, to be more considerate in how they use node resources.
 
 
 ----------------

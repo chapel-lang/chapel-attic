@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2018 Cray Inc.
+ * Copyright 2004-2019 Cray Inc.
  * Other additional copyright holders may be indicated within.
  *
  * The entirety of this work is licensed under the Apache License,
@@ -25,13 +25,10 @@
 #include <stdint.h>
 #include "chplcgfns.h"
 #include "chpltypes.h"
+#include "chpl-tasks-impl.h"
 #include "chpl-tasks-prvdata.h"
 
-#ifdef CHPL_TASKS_MODEL_H
-#include CHPL_TASKS_MODEL_H
-#endif
-
-// CHPL_TASKS_MODEL_H must define the task bundle header type,
+// chpl-tasks-impl.h must define the task bundle header type,
 // chpl_task_bundle_t.
 typedef chpl_task_bundle_t* chpl_task_bundle_p;
 
@@ -222,6 +219,17 @@ void chpl_task_setSubloc(c_sublocid_t);
 c_sublocid_t chpl_task_getRequestedSubloc(void);
 #endif
 
+// For tasking layers that support task affinity/placement, this
+// resets any automatic placement order
+#ifndef CHPL_TASK_IMPL_RESET_SPAWN_ORDER
+#define CHPL_TASK_IMPL_RESET_SPAWN_ORDER()
+#endif
+static inline
+void chpl_task_reset_spawn_order(void) {
+  CHPL_TASK_IMPL_RESET_SPAWN_ORDER();
+}
+
+
 //
 // Get ID.
 //
@@ -243,10 +251,7 @@ char* chpl_task_idToString(
                chpl_taskID_t); //Task ID
 
 //
-// Yields the current thread to another task. Will conditionally invoke
-// a QSBR checkpoint periodically via a thread-local counter. As a checkpoint
-// is invoked, it is not safe to access QSBR-protected data obtained prior to
-// calling this function. 
+// Yield.
 //
 void chpl_task_yield(void);
 
@@ -254,19 +259,6 @@ void chpl_task_yield(void);
 // Suspend.
 //
 void chpl_task_sleep(double);
-
-//
-// (Optional) Invoked by a thread that may be idle for an
-// indefinite amount of time. Currently used by tasking layers
-// which detect that the work queue has been depleted for a while.
-//
-void chpl_task_threadOnPark(void);
-
-//
-// (Optional) Invoked by a thread that invoked 'chpl_task_threadOnPark' 
-// after they are no longer idle.
-//
-void chpl_task_threadOnUnpark(void);
 
 // The type for task private data, chpl_task_prvData_t,
 // is defined in chpl-tasks-prvdata.h in order to support
@@ -301,20 +293,6 @@ chpl_task_ChapelData_t* chpl_task_getChapelData(void)
   return chpl_task_getBundleChapelData(prv);
 }
 
-
-//
-// Can this tasking layer support remote caching?
-//
-// (In practice this answers: "Are tasks bound to specific pthreads
-// or, if not, does the tasking layer make memory consistency calls
-// whenever it might move a task from one pthread to another?"  Remote
-// caching uses pthread-specific data (TLS) extensively, so it turns
-// itself off when it's used with a tasking layer that can't support
-// that.)
-//
-#ifndef CHPL_TASK_SUPPORTS_REMOTE_CACHE_IMPL_DECL
-int chpl_task_supportsRemoteCache(void);
-#endif
 
 //
 // Returns the maximum width of parallelism the tasking layer expects
@@ -356,6 +334,50 @@ int32_t chpl_task_getNumBlockedTasks(void);
 
 
 // Threads
+
+//
+// If the tasking layer runs tasks on a fixed number of threads, this
+// returns the number of such threads.  Otherwise it returns 0 (zero).
+// As examples, for CHPL_TASKS=qthreads it returns the number of worker
+// threads, while for CHPL_TASKS=fifo it returns 0.  If this is called
+// prior to tasking layer initialization the result is unpredictable.
+//
+#ifndef CHPL_TASK_IMPL_GET_FIXED_NUM_THREADS
+#define CHPL_TASK_IMPL_GET_FIXED_NUM_THREADS() 0
+#endif
+static inline
+uint32_t chpl_task_getFixedNumThreads(void) {
+  return CHPL_TASK_IMPL_GET_FIXED_NUM_THREADS();
+}
+
+//
+// If the tasking layer runs tasks on a fixed number of threads and
+// the calling thread is one of those, this returns true.  Otherwise,
+// it returns false.
+//
+#ifndef CHPL_TASK_IMPL_IS_FIXED_THREAD
+#define CHPL_TASK_IMPL_IS_FIXED_THREAD() 0
+#endif
+static inline
+uint32_t chpl_task_isFixedThread(void) {
+  return CHPL_TASK_IMPL_IS_FIXED_THREAD();
+}
+
+//
+// If the tasking layer will always execute tasks on the same thread
+// they started on, this returns true.  Otherwise, it returns false.
+// For example CHPL_TASKS=fifo a task is a thread, so tasks can't
+// migrate.  For CHPL_TASKS=qthreads some schedulers support
+// work-stealing where tasks can be stolen and moved to a different
+// thread than they started on.
+//
+#ifndef CHPL_TASK_IMPL_CAN_MIGRATE_THREADS
+#define CHPL_TASK_IMPL_CAN_MIGRATE_THREADS() 1
+#endif
+static inline
+uint32_t chpl_task_canMigrateThreads(void) {
+  return CHPL_TASK_IMPL_CAN_MIGRATE_THREADS();
+}
 
 //
 // returns the total number of threads that currently exist, whether running,

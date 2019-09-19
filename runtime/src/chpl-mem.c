@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2018 Cray Inc.
+ * Copyright 2004-2019 Cray Inc.
  * Other additional copyright holders may be indicated within.
  * 
  * The entirety of this work is licensed under the Apache License,
@@ -21,6 +21,7 @@
 // Shared code for different mem implementations in mem-*/chpl_*_mem.c
 //
 #include "chplrt.h"
+
 #include "chpl-mem.h"
 #include "chpltypes.h"
 #include "error.h"

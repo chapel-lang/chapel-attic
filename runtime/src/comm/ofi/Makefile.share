@@ -1,4 +1,4 @@
-# Copyright 2004-2018 Cray Inc.
+# Copyright 2004-2019 Cray Inc.
 # Other additional copyright holders may be indicated within.
 # 
 # The entirety of this work is licensed under the Apache License,
@@ -16,15 +16,35 @@
 # limitations under the License.
 
 COMM_LAUNCHER_SRCS = \
+        comm-ofi-launch.c \
         comm-ofi-locales.c \
 
 COMM_SRCS = \
 	$(COMM_LAUNCHER_SRCS) \
-	comm-ofi.c \
-	comm-ofi-am.c \
-	comm-ofi-diagnostics.c \
-	comm-ofi-oob.c \
-	comm-ofi-put-get.c \
+	comm-ofi.c
+
+#
+# By default, use PMI out-of-band support on Cray X* systems, else MPI
+# on other Cray systems or with an MPI-based launcher, else "sockets".
+# Use hugepages only on Cray X* systems.
+#
+ifneq (, $(findstring $(CHPL_COMM_OFI_OOB), mpi pmi sockets))
+  COMM_SRCS += comm-ofi-oob-$(CHPL_COMM_OFI_OOB).c
+else ifneq (, $(findstring cray-x,$(CHPL_MAKE_TARGET_PLATFORM)))
+  COMM_SRCS += comm-ofi-oob-pmi.c
+else ifneq (, $(findstring cray-,$(CHPL_MAKE_TARGET_PLATFORM)))
+  COMM_SRCS += comm-ofi-oob-mpi.c
+else ifneq (, $(findstring mpi,$(CHPL_MAKE_LAUNCHER)))
+  COMM_SRCS += comm-ofi-oob-mpi.c
+else
+  COMM_SRCS += comm-ofi-oob-sockets.c
+endif
+
+ifneq (, $(findstring cray-x,$(CHPL_MAKE_TARGET_PLATFORM)))
+  COMM_SRCS += comm-ofi-hugepages.c
+else
+  COMM_SRCS += comm-ofi-no-hugepages.c
+endif
 
 SRCS = $(COMM_SRCS)
 

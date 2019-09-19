@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2018 Cray Inc.
+ * Copyright 2004-2019 Cray Inc.
  * Other additional copyright holders may be indicated within.
  *
  * The entirety of this work is licensed under the Apache License,
@@ -39,10 +39,10 @@ proceed if it is a single variable.
 */
 
 module ChapelSyncvar {
-  use ChapelStandard;
+  private use ChapelStandard;
 
   use AlignedTSupport;
-  use MemConsistency;
+  private use MemConsistency;
   use SyncVarRuntimeSupport;
 
   /************************************ | *************************************
@@ -66,7 +66,7 @@ module ChapelSyncvar {
   //
 
   private proc isSupported(type t) param
-    return isVoidType(t)          ||
+    return isNothingType(t)       ||
            isBoolType(t)          ||
            isIntegralType(t)      ||
            isRealType(t)          ||
@@ -78,7 +78,13 @@ module ChapelSyncvar {
 
   private proc ensureFEType(type t) {
     if isSupported(t) == false then
-      compilerError("sync/single types cannot be of type '", t : string, "'");
+      compilerError("sync/single types cannot contain type '", t : string, "'");
+
+    if !chpl_legacyClasses && isNonNilableClass(t) then
+      compilerError("sync/single types cannot contain non-nilable classes");
+
+    if isGenericType(t) then
+      compilerError("sync/single types cannot contain generic types");
   }
 
   pragma "no doc"
@@ -87,9 +93,9 @@ module ChapelSyncvar {
   // use native sync vars if they're enabled and supported for the valType
   private proc getSyncClassType(type valType) type {
     if useNativeSyncVar && supportsNativeSyncVar(valType) {
-      return _qthreads_synccls(valType);
+      return unmanaged _qthreads_synccls(valType);
     } else {
-      return _synccls(valType);
+      return unmanaged _synccls(valType);
     }
   }
 
@@ -108,13 +114,14 @@ module ChapelSyncvar {
   record _syncvar {
     type valType;                              // The compiler knows this name
 
-    var  wrapped : getSyncClassType(valType) = nil;
+    var  wrapped : getSyncClassType(valType);
     var  isOwned : bool                      = true;
 
+    pragma "dont disable remote value forwarding"
     proc init(type valType) {
       ensureFEType(valType);
       this.valType = valType;
-      this.wrapped = new (getSyncClassType(valType))(valType);
+      this.wrapped = new (getSyncClassType(valType))();
     }
 
     //
@@ -128,12 +135,21 @@ module ChapelSyncvar {
     //
     // ``a`` needs to be a ``valType``, not a sync.
     //
+    pragma "dont disable remote value forwarding"
     proc init(const other : _syncvar) {
       this.valType = other.valType;
       this.wrapped = other.wrapped;
       this.isOwned = false;
     }
 
+    pragma "dont disable remote value forwarding"
+    proc init=(const other : this.valType) {
+      this.init(other.type);
+      // TODO: initialize the sync class impl with 'other'
+      this.writeEF(other);
+    }
+
+    pragma "dont disable remote value forwarding"
     proc deinit() {
       if isOwned == true then
         delete wrapped;
@@ -158,7 +174,7 @@ module ChapelSyncvar {
   */
 
   pragma "no doc"
-  proc isSyncType(type t) param where t : _syncvar {
+  proc isSyncType(type t:_syncvar) param {
     return true;
   }
 
@@ -194,6 +210,8 @@ module ChapelSyncvar {
     :returns: The value of the sync variable.
   */
   proc _syncvar.readXX() {
+    // Yield to allow readXX in a loop to make progress
+    chpl_task_yield();
     return wrapped.readXX();
   }
 
@@ -298,7 +316,6 @@ module ChapelSyncvar {
     return sv.readFE();
   }
 
-  pragma "donor fn"
   pragma "auto copy fn"
   pragma "no doc"
   proc chpl__autoCopy(const ref rhs : _syncvar) {
@@ -315,7 +332,7 @@ module ChapelSyncvar {
   }
 
   pragma "no doc"
-  proc chpl__readXX(x : _syncvar(?)) return x.readXX();
+  proc chpl__readXX(const ref x : _syncvar(?)) return x.readXX();
 
   proc <=>(lhs : _syncvar, ref rhs) {
     const tmp = lhs;
@@ -354,12 +371,14 @@ module ChapelSyncvar {
     var  value   : valType;
     var  syncAux : chpl_sync_aux_t;      // Locking, signaling, ...
 
+    pragma "dont disable remote value forwarding"
     proc init(type valType) {
       this.valType = valType;
-      this.initDone();
+      this.complete();
       chpl_sync_initAux(syncAux);
     }
 
+    pragma "dont disable remote value forwarding"
     proc deinit() {
       chpl_sync_destroyAux(syncAux);
     }
@@ -424,7 +443,7 @@ module ChapelSyncvar {
       return ret;
     }
 
-    proc writeEF(val : valType) {
+    proc writeEF(val : valType) lifetime this < val {
       on this {
         chpl_rmem_consist_release();
         chpl_sync_waitEmptyAndLock(syncAux);
@@ -436,7 +455,7 @@ module ChapelSyncvar {
       }
     }
 
-    proc writeFF(val : valType) {
+    proc writeFF(val : valType) lifetime this < val {
       on this {
         chpl_rmem_consist_release();
         chpl_sync_waitFullAndLock(syncAux);
@@ -448,7 +467,7 @@ module ChapelSyncvar {
       }
     }
 
-    proc writeXF(val : valType) {
+    proc writeXF(val : valType) lifetime this < val {
       on this {
         chpl_rmem_consist_release();
         chpl_sync_lock(syncAux);
@@ -493,12 +512,14 @@ module ChapelSyncvar {
 
     var  alignedValue : aligned_t;
 
+    pragma "dont disable remote value forwarding"
     proc init(type valType) {
       this.valType = valType;
-      this.initDone();
+      this.complete();
       qthread_purge_to(alignedValue, defaultOfAlignedT(valType));
     }
 
+    pragma "dont disable remote value forwarding"
     proc deinit() {
       // There's no explicit destroy function, but qthreads reclaims memory
       // for full variables that have no pending operations
@@ -544,9 +565,6 @@ module ChapelSyncvar {
         var alignedLocalRet : aligned_t;
 
         chpl_rmem_consist_release();
-        // currently have to yield to allow readXX in a loop to make progress
-        // TODO only yield every X accesses?
-        chpl_task_yield();
         qthread_readXX(alignedLocalRet, alignedValue);
         chpl_rmem_consist_acquire();
 
@@ -556,7 +574,7 @@ module ChapelSyncvar {
       return ret;
     }
 
-    proc writeEF(val : valType) {
+    proc writeEF(val : valType) lifetime this < val {
       on this {
         chpl_rmem_consist_release();
         qthread_writeEF(alignedValue, val : aligned_t);
@@ -564,7 +582,7 @@ module ChapelSyncvar {
       }
     }
 
-    proc writeFF(val : valType) {
+    proc writeFF(val : valType) lifetime this < val {
       on this {
         chpl_rmem_consist_release();
         qthread_writeFF(alignedValue, val : aligned_t);
@@ -572,7 +590,7 @@ module ChapelSyncvar {
       }
     }
 
-    proc writeXF(val : valType) {
+    proc writeXF(val : valType) lifetime this < val {
       on this {
         chpl_rmem_consist_release();
         qthread_writeF(alignedValue, val : aligned_t);
@@ -623,13 +641,13 @@ module ChapelSyncvar {
   record _singlevar {
     type valType;                              // The compiler knows this name
 
-    var  wrapped : _singlecls(valType) = nil;
+    var  wrapped : unmanaged _singlecls(valType);
     var  isOwned : bool                = true;
 
     proc init(type valType) {
       ensureFEType(valType);
       this.valType = valType;
-      wrapped = new _singlecls(valType);
+      wrapped = new unmanaged _singlecls(valType);
     }
 
     //
@@ -643,12 +661,20 @@ module ChapelSyncvar {
     //
     // ``a`` needs to be a ``valType``, not a single.
     //
+    pragma "dont disable remote value forwarding"
     proc init(const other : _singlevar) {
       this.valType = other.valType;
       wrapped = other.wrapped;
       isOwned = false;
     }
 
+    pragma "dont disable remote value forwarding"
+    proc init=(const other : this.type.valType) {
+      this.init(other.type);
+      this.writeEF(other);
+    }
+
+    pragma "dont disable remote value forwarding"
     proc deinit() {
       if isOwned == true then
         delete wrapped;
@@ -673,7 +699,7 @@ module ChapelSyncvar {
   */
 
   pragma "no doc"
-  proc isSingleType(type t) param where t : _singlevar {
+  proc isSingleType(type t:_singlevar) param {
     return true;
   }
 
@@ -699,6 +725,8 @@ module ChapelSyncvar {
     :returns: The value of the single variable.
   */
   proc _singlevar.readXX() {
+    // Yield to allow readXX in a loop to make progress
+    chpl_task_yield();
     return wrapped.readXX();
   }
 
@@ -731,7 +759,6 @@ module ChapelSyncvar {
     return sv.readFF();
   }
 
-  pragma "donor fn"
   pragma "auto copy fn"
   pragma "no doc"
   proc chpl__autoCopy(const ref rhs : _singlevar) {
@@ -748,7 +775,7 @@ module ChapelSyncvar {
   }
 
   pragma "no doc"
-  proc chpl__readXX(x : _singlevar(?)) return x.readXX();
+  proc chpl__readXX(const ref x : _singlevar(?)) return x.readXX();
 
   /************************************ | *************************************
   *                                                                           *
@@ -770,7 +797,7 @@ module ChapelSyncvar {
 
     proc init(type valType) {
       this.valType = valType;
-      this.initDone();
+      this.complete();
       chpl_single_initAux(singleAux);
     }
 
@@ -825,7 +852,7 @@ module ChapelSyncvar {
       return ret;
     }
 
-    proc writeEF(val : valType) {
+    proc writeEF(val : valType) lifetime this < val {
       on this {
         chpl_rmem_consist_release();
         chpl_single_lock(singleAux);
@@ -955,13 +982,17 @@ private module AlignedTSupport {
   proc castableToAlignedT(type t) param {
     return isIntegralType(t) || isBoolType(t);
   }
-  inline proc _cast(type t, x : integral) where t : aligned_t {
+
+  inline proc _cast(type t:aligned_t, x : integral) {
     return __primitive("cast", t, x);
   }
-  inline proc _cast(type t, x : bool) where t : aligned_t {
+  inline proc _cast(type t:aligned_t, x : bool) {
     return __primitive("cast", t, x);
   }
-  inline proc _cast(type t, x : aligned_t) where castableToAlignedT(t) {
+  inline proc _cast(type t:chpl_anybool, x : aligned_t) {
+    return __primitive("cast", t, x);
+  }
+  inline proc _cast(type t:integral, x : aligned_t) {
     return __primitive("cast", t, x);
   }
 

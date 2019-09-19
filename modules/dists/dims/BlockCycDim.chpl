@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2018 Cray Inc.
+ * Copyright 2004-2019 Cray Inc.
  * Other additional copyright holders may be indicated within.
  * 
  * The entirety of this work is licensed under the Apache License,
@@ -21,8 +21,8 @@
 // Block-cyclic dimension specifier - for use with DimensionalDist2D.
 //
 
-use DimensionalDist2D;
-use RangeChunk only ;
+private use DimensionalDist2D;
+private use RangeChunk only ;
 
 config const BlockCyclicDim_allowParLeader = true;
 config param BlockCyclicDim_enableArrayIterWarning = false;  // 'false' for testing
@@ -46,13 +46,13 @@ This Block-Cyclic dimension specifier is for use with the
 It specifies the mapping of indices in its dimension
 that would be produced by a 1D :class:`~BlockCycDist.BlockCyclic` distribution.
 
-**Constructor Arguments**
+**Initializer Arguments**
 
-The ``BlockCyclicDim`` class constructor is defined as follows:
+The ``BlockCyclicDim`` class initializer is defined as follows:
 
   .. code-block:: chapel
 
-    proc BlockCyclicDim(
+    proc init(
       numLocales:   int,
       lowIdx:       int,
       blockSize:    int,
@@ -85,7 +85,7 @@ class BlockCyclicDim {
   // tell the compiler these are positive
   proc blockSizePos   return blockSize: bcdPosInt;
   proc numLocalesPos  return numLocales: bcdPosInt;
-  const cycleSizePos: bcdPosInt = blockSizePos * numLocalesPos;
+  const cycleSizePos: bcdPosInt = (blockSize:bcdPosInt) * (numLocales:bcdPosInt);
 }
 
 class BlockCyclic1dom {
@@ -100,7 +100,7 @@ class BlockCyclic1dom {
   proc rangeT type  return range(idxType, BoundedRangeType.bounded, stridable);
 
   // our range, normalized; its absolute stride
-  var wholeR: rangeT;
+  var wholeR: range(idxType, BoundedRangeType.bounded, stridable);
   var wholeRstrideAbs: idxType;
 
   // a copy of BlockCyclicDim constants
@@ -130,7 +130,7 @@ proc BlockCyclicDim.dsiGetPrivatizeData1d() {
 }
 
 proc BlockCyclicDim.dsiPrivatize1d(privatizeData) {
-  return new BlockCyclicDim(lowIdx = privatizeData(1),
+  return new unmanaged BlockCyclicDim(lowIdx = privatizeData(1),
                    blockSize = privatizeData(2),
                    numLocales = privatizeData(3),
                    name = privatizeData(4));
@@ -146,7 +146,7 @@ proc BlockCyclic1dom.dsiGetPrivatizeData1d() {
 
 proc BlockCyclic1dom.dsiPrivatize1d(privDist, privatizeData) {
   assert(privDist.locale == here); // sanity check
-  return new BlockCyclic1dom(idxType   = this.idxType,
+  return new unmanaged BlockCyclic1dom(idxType   = this.idxType,
                   stoIndexT = this.stoIndexT,
                   stridable = this.stridable,
                   name            = privatizeData(5),
@@ -183,7 +183,7 @@ proc BlockCyclic1dom.dsiLocalDescUsesPrivatizedGlobalDesc1d() param return false
 
 
 // Check all restrictions/assumptions that must be satisfied by the user
-// when constructing a 1-d BlockCyclic distribution.
+// when initializing a 1-d BlockCyclic distribution.
 inline proc BlockCyclicDim.checkInvariants() {
   assert(blockSize > 0, "BlockCyclic1d-blockSize");
   assert(numLocales > 0, "BlockCyclic1d-numLocales");
@@ -259,7 +259,7 @@ proc BlockCyclicDim.dsiNewRectangularDom1d(type idxType, param stridable: bool,
 
   _checkFitsWithin(adjLowIdx, idxType);
 
-  const result = new BlockCyclic1dom(idxType = idxType,
+  const result = new unmanaged BlockCyclic1dom(idxType = idxType,
                   stoIndexT = stoIndexT,
                   stridable = stridable,
                   adjLowIdx = adjLowIdx: idxType,
@@ -274,7 +274,7 @@ proc BlockCyclicDim.dsiNewRectangularDom1d(type idxType, param stridable: bool,
 proc BlockCyclic1dom.dsiIsReplicated1d() param return false;
 
 proc BlockCyclic1dom.dsiNewLocalDom1d(type stoIndexT, locId: locIdT) {
-  const result = new BlockCyclic1locdom(idxType = this.idxType,
+  const result = new unmanaged BlockCyclic1locdom(idxType = this.idxType,
                              stoIndexT = stoIndexT,
                              locId = locId);
   return result;
@@ -377,7 +377,7 @@ where storagePerCycle is determined to ensure uniqueness of storageIdx(i)
 
  storagePerCycle
    = 1 + max(locOff(i) div |wSt|) for any i s.t.
-                                  whole.member(i)==true and locNo(i) is fixed
+                                  whole.contains(i)==true and locNo(i) is fixed
    approximated as: 1 + ( (max locOff(i) for any i) div |wSt| )
    = 1 + ((blockSize-1) div |wSt|)
 

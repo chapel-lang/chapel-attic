@@ -3,23 +3,23 @@ class Impl {
 }
 
 record R {
-  var ptr:Impl;
+  var ptr:unmanaged Impl;
 }
 
 proc R.init() {
-  this.ptr = new Impl(0);
+  this.ptr = new unmanaged Impl(0);
 }
 
 proc R.deinit() {
   delete this.ptr;
 }
 
-proc R.init(from:R) {
-  this.ptr = new Impl(from.ptr.x);
+proc R.init=(from:R) {
+  this.ptr = new unmanaged Impl(from.ptr.x);
 }
 
 proc =(ref lhs:R, rhs:R) {
-  lhs.ptr = new Impl(rhs.ptr.x);
+  lhs.ptr = new unmanaged Impl(rhs.ptr.x);
 }
 
 proc R.increment() {

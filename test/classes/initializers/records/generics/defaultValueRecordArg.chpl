@@ -1,7 +1,7 @@
 record Foo {
   var x;
 
-  proc init(xVal) where !xVal: Foo {
+  proc init(xVal) where !isSubtype(xVal.type, Foo) {
     x = xVal;
   }
 }
@@ -14,6 +14,6 @@ class DefaultArg {
   }
 }
 
-var c = new DefaultArg();
+var c = new unmanaged DefaultArg();
 writeln(c);
 delete c;

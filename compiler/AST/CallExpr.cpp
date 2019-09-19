@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2018 Cray Inc.
+ * Copyright 2004-2019 Cray Inc.
  * Other additional copyright holders may be indicated within.
  *
  * The entirety of this work is licensed under the Apache License,
@@ -384,8 +384,11 @@ FnSymbol* CallExpr::resolvedFunction() const {
       }
 
     } else if (CallExpr* subCall = toCallExpr(baseExpr)) {
-      // Confirm that this is a partial call
-      INT_ASSERT(subCall->partialTag == true);
+      // Confirm that this is a partial call, but only if the call is not
+      // within a DefExpr (indicated by not having a stmt-expr)
+      if (subCall->getStmtExpr() != NULL) {
+        INT_ASSERT(subCall->partialTag == true);
+      }
 
     } else {
       INT_ASSERT(false);
@@ -551,6 +554,21 @@ QualifiedType CallExpr::qualType(void) {
     }
 
     retval = QualifiedType(q, fn->retType);
+  } else if (SymExpr* se = toSymExpr(baseExpr)) {
+    // Handle type constructor calls
+    Type* retType = dtUnknown;
+    if (se->symbol()->hasFlag(FLAG_TYPE_VARIABLE)) {
+      AggregateType* at = toAggregateType(se->typeInfo());
+      if (at && at->isGeneric() == false) {
+        retType = at;
+      } else if (isPrimitiveType(se->typeInfo()) && numActuals() == 0) {
+        // (call uint(64) 8) represents 'uint(8)', so we don't want to return
+        // a ``uint(64)`` unless there are zero arguments
+        retType = se->typeInfo();
+      }
+    }
+
+    retval = QualifiedType(QUAL_UNKNOWN, retType);
 
   } else {
     retval = QualifiedType(dtUnknown);
@@ -624,8 +642,7 @@ void CallExpr::prettyPrint(std::ostream* o) {
     }
 
   } else if (primitive != NULL) {
-    if (primitive->tag == PRIM_INIT ||
-      primitive->tag == PRIM_TYPE_INIT) {
+    if (primitive->tag == PRIM_TYPE_INIT) {
       unusual = true;
       argList.head->prettyPrint(o);
     }
@@ -726,7 +743,8 @@ CallExpr* callChplHereAlloc(Type* type, VarSymbol* md) {
 
   // Since the type is not necessarily known, resolution will fix up
   // this sizeof() call to take the resolved type of s as an argument
-  CallExpr*  sizeExpr  = new CallExpr(PRIM_SIZEOF, new SymExpr(type->symbol));
+  CallExpr*  sizeExpr  = new CallExpr(PRIM_SIZEOF_BUNDLE,
+                                      new SymExpr(type->symbol));
   VarSymbol* mdExpr    = (md != NULL) ? md : newMemDesc(type);
   CallExpr*  allocExpr = new CallExpr("chpl_here_alloc", sizeExpr, mdExpr);
 
@@ -750,7 +768,7 @@ void insertChplHereAlloc(Expr*      call,
   Symbol*        sizeTmp   = newTemp("chpl_here_alloc_size", SIZE_TYPE);
   CallExpr*      sizeExpr  = new CallExpr(PRIM_MOVE,
                                           sizeTmp,
-                                          new CallExpr(PRIM_SIZEOF,
+                                          new CallExpr(PRIM_SIZEOF_BUNDLE,
                                                        (ct != NULL) ?
                                                        ct->symbol   :
                                                        t->symbol));

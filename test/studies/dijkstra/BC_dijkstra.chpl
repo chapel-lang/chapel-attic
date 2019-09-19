@@ -8,17 +8,17 @@ module BC_dijkstra {
 
     // Initialize records
     var D1 = {0..(nNodes-1)};
-    var Records: [D1] Record;
+    var Records: [D1] unmanaged Record;
 
     for i in D1 {
       // onStack = next record on stack; -1 EOS; -2 not on stack
       // inHeap = location of this record in heap
-      Records[i]         = new Record(distance = INFINITY, onStack = -2, inHeap = -1);
-      Records[i].preEdge = new PreEdge(edge = -1, next = nil);
+      Records[i]         = new unmanaged Record(distance = INFINITY, onStack = -2, inHeap = -1);
+      Records[i].preEdge = new unmanaged PreEdge(edge = -1, next = nil);
     }
 
     // Initialize heap
-    var heap = new Heap(leafLevel = nNodes/2, IdsD = {0..(nNodes-1)});
+    var heap = new unmanaged Heap(leafLevel = nNodes/2, IdsD = {0..(nNodes-1)});
 
     for i in D1 do heap.Ids[i] = -1;
 
@@ -65,34 +65,34 @@ module BC_dijkstra {
           Records[neighbor].sigma = sigma;
           InsertNode(neighbor, heap, Records);
 
-          Records[neighbor].preEdge.edge = edgeIndex;
-          Records[neighbor].preEdge.next = nil;
+          Records[neighbor].preEdge!.edge = edgeIndex;
+          Records[neighbor].preEdge!.next = nil;
 
         // A shorter path from S to neighbor is found
         //     reset neighbor's distance and sigma and adjust record's
         //     position in heap node is the pre node of neighbor
         } else if (neighborDistance > newDistance) {
 
-          var ptr: PreEdge = Records[neighbor].preEdge.next;
+          var ptr: unmanaged PreEdge? = Records[neighbor].preEdge!.next;
 
           Records[neighbor].distance = newDistance;
           Records[neighbor].sigma = sigma;
           HeapUp(Records[neighbor].inHeap, heap, Records);
 
-          Records[neighbor].preEdge.edge = edgeIndex;
-          Records[neighbor].preEdge.next = nil;
+          Records[neighbor].preEdge!.edge = edgeIndex;
+          Records[neighbor].preEdge!.next = nil;
 
         // Another shortest path from S to neighbor is found
         //     increment neighbor's sigma
         //     add node as a pre node of neighbor
         } else if (neighborDistance == newDistance) {
 
-          var ptr: PreEdge = new PreEdge(edge = -1, next = nil);
+          var ptr: unmanaged PreEdge = new unmanaged PreEdge(edge = -1, next = nil);
           Records[neighbor].sigma += sigma;
 
           ptr.edge = edgeIndex;
-          ptr.next = Records[neighbor].preEdge.next;
-          Records[neighbor].preEdge.next = ptr;
+          ptr.next = Records[neighbor].preEdge!.next;
+          Records[neighbor].preEdge!.next = ptr;
         }
       }
     }
@@ -105,11 +105,11 @@ module BC_dijkstra {
 //      Nodes[node].vb += Records[node].delta;
       Nodes[node].vb$ += Records[node].delta;
 
-      var ptr: PreEdge = Records[node].preEdge;
+      var ptr: unmanaged PreEdge? = Records[node].preEdge;
 
       while (ptr != nil) {
-        var edge: int = ptr.edge;
-        ptr = ptr.next;
+        var edge: int = ptr!.edge;
+        ptr = ptr!.next;
 
         var predecessor: int = Edges[edge].n1;
         if (predecessor == node) then predecessor = Edges[edge].n2;

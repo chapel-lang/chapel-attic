@@ -1,4 +1,4 @@
-// modified from test/classes/stonea/constAndParamInConstructor.chpl
+
 
 class Foo {
     var value : int;
@@ -16,8 +16,8 @@ class Bar {
     }
 }
 
-var objA = new Foo();
-var objB = new Bar();
+var objA = new shared Foo();
+var objB = new shared Bar();
 
 writeln(objA.value);
 writeln(objB.value);

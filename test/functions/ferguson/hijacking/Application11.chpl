@@ -16,14 +16,13 @@
     use LibraryZ4;
 
     class Widget : Base {
-      proc helpSetup(x:real) {
+      override proc helpSetup(x:real) {
         writeln("In Application.Widget.helpSetup");
       }
     }
 
     proc main() {
-      var instance = new Widget();
+      var instance = new borrowed Widget();
       instance.setup(); // calls Base.setup() and that runs Widget.helpSetup
-      delete instance;
     }
   }

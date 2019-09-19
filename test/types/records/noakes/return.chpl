@@ -22,13 +22,13 @@ record Rec
     copy         = false;
     freed        = false;
 
-    this.initDone();
+    this.complete();
 
     if (sDebug == true) then
       writeln("Constructing Rec       id:  ", id);
   }
 
-  proc init(other: Rec) {
+  proc init=(other: Rec) {
     sID          = sID + 1;
     sAllocated   = sAllocated + 1;
 
@@ -37,7 +37,7 @@ record Rec
     copy   = true;
     freed  = false;
 
-    this.initDone();
+    this.complete();
 
     if (sDebug == true) then
       writeln("copying Rec other: ", other.id);

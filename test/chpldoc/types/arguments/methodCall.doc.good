@@ -1,0 +1,21 @@
+.. default-domain:: chpl
+
+.. module:: methodCall.doc
+
+methodCall.doc
+==============
+**Usage**
+
+.. code-block:: chapel
+
+   use methodCall.doc;
+
+.. function:: proc nada() type
+
+   This proc specifies the type of the next function's argument 
+
+.. function:: proc needsAType(val: nada())
+
+   This proc takes an argument whose type is determined by
+   another function 
+

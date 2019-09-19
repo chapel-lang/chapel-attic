@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2018 Cray Inc.
+ * Copyright 2004-2019 Cray Inc.
  * Other additional copyright holders may be indicated within.
  *
  * The entirety of this work is licensed under the Apache License,
@@ -24,21 +24,19 @@ module ChapelStandard {
   use startInitCommDiags;  // Internal, but uses standard/CommDiagnostics
 
   // Internal modules.
-  use CPtr;
   use CString;
+  use Bytes;
   use String;
-  use ChapelDebugPrint;
+  use OwnedObject;
+  use SharedObject;
   use ChapelEnv;
   use ChapelBase;
-  use MemConsistency;
   use Atomics;
   use NetworkAtomics;
   use NetworkAtomicTypes;
   use AtomicsCommon;
   use ChapelIteratorSupport;
   use ChapelThreads;
-  use ChapelThreadsInternal;
-  use ChapelTasksInternal;
   use ChapelTuple;
   use ChapelRange;
   use ChapelReduce;
@@ -60,9 +58,9 @@ module ChapelStandard {
   use MemTracking;
   use ChapelUtil;
   use ChapelError;
-  use ChapelDynDispHack;
   use ChapelTaskData;
   use ChapelSerializedBroadcast;
+  use ExternalString;
 
   // Standard modules.
   use Assert;

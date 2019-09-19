@@ -1,0 +1,23 @@
+.. default-domain:: chpl
+
+.. module:: typevar.doc
+
+typevar.doc
+===========
+**Usage**
+
+.. code-block:: chapel
+
+   use typevar.doc;
+
+.. class:: Foo
+
+   This class has type fields 
+
+
+   .. attribute:: type t1
+
+   .. attribute:: type t2
+
+      This field has a comment 
+

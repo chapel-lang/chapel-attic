@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2018 Cray Inc.
+ * Copyright 2004-2019 Cray Inc.
  * Other additional copyright holders may be indicated within.
  *
  * The entirety of this work is licensed under the Apache License,
@@ -23,6 +23,7 @@
 #include "AstVisitor.h"
 #include "build.h"
 #include "DeferStmt.h"
+#include "driver.h"
 
 #include <algorithm>
 
@@ -75,6 +76,8 @@
  */
 static void tryToReplaceWithDirectRangeIterator(Expr* iteratorExpr)
 {
+  if (fNoOptimizeRangeIteration)
+    return;
   if (CallExpr* call = toCallExpr(iteratorExpr))
   {
     CallExpr* range = NULL;
@@ -447,9 +450,6 @@ void ForLoop::verify()
 
   if (byrefVars != 0)
     INT_FATAL(this, "ForLoop::verify. byrefVars is not NULL");
-
-  if (forallIntents != 0)
-    INT_FATAL(this, "ForLoop::verify. forallIntents is not NULL");
 }
 
 GenRet ForLoop::codegen()

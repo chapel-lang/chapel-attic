@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2018 Cray Inc.
+ * Copyright 2004-2019 Cray Inc.
  * Other additional copyright holders may be indicated within.
  *
  * The entirety of this work is licensed under the Apache License,
@@ -57,6 +57,8 @@ void denormalize(Expr* def, SymExpr* use, Type* castTo);
 void denormalizeOrDeferCandidates(UseDefCastMap& candidates,
     std::set<Symbol*>& deferredSyms);
 
+int maxDenormalizesPerFunction = 1000;
+
 /*
  * This function tries to remove temporary variables in function `fn`
  *
@@ -101,6 +103,7 @@ void denormalize(void) {
           findCandidatesInFuncOnlySym(fn, deferredSyms, candidates,
               analysisData);
         }
+
         denormalizeOrDeferCandidates(candidates, deferredSyms);
 
         isFirstRound = false;
@@ -177,6 +180,11 @@ void findCandidatesInFuncOnlySym(FnSymbol* fn, std::set<Symbol*> symVec,
   bool cachedGlobalManip = analysisData.isRegisteredGlobalManip(fn);
   bool cachedExternManip = analysisData.isRegisteredExternManip(fn);
 
+  // Limit the denormalization candidates to avoid
+  // too much recursion in code generation
+  int limit = maxDenormalizesPerFunction;
+  int found = 0;
+
   for_set(Symbol, sym, symVec) {
 
     SymExpr *use = NULL;
@@ -225,9 +233,15 @@ void findCandidatesInFuncOnlySym(FnSymbol* fn, std::set<Symbol*> symVec,
           DefCastPair defCastPair(def, castTo);
           udcMap.insert(std::pair<SymExpr*, DefCastPair>
               (use, defCastPair));
+          found++;
         }
       }
     }
+
+    // Stop if we've found too many.
+    if (found >= limit)
+      break;
+
   } // end loop for symbol
   if(!cachedGlobalManip) {
     analysisData.registerGlobalManip(fn, false);
@@ -270,6 +284,58 @@ static bool isBadMove(CallExpr* ce) {
   }
 
   return ret;
+}
+
+static ArgSymbol* formalForActual(FnSymbol* fn, Expr* firstActual,
+                                  Expr* actualToMatch)
+{
+  Expr* formalDef = fn->formals.head;
+  Expr* actual    = firstActual;
+
+  while (formalDef != NULL && actual != NULL)
+  {
+    if (actual == actualToMatch)
+      return toArgSymbol(toDefExpr(formalDef)->sym);
+
+    formalDef = formalDef->next;
+    actual = actual->next;
+  }
+
+  INT_ASSERT(false); // should have matched the actual
+  return NULL;
+}
+
+// Return true when 'se' is passed by reference
+// and we wouldn't know it just by looking at it
+// i.e. se itself is not a ref.
+// TODO are there any primitives where this can occur?
+static bool isValPassedByRef(CallExpr* ce, SymExpr* se)
+{
+  if (se->symbol()->isRef())
+    // It is a reference, not a value.
+    return false;
+
+  // Alas we cannot use for_formals_actuals because of
+  // the extra line/file actuals. Doing it "manually" here.
+
+  Expr* actual = ce->argList.head;
+  FnSymbol* fn = ce->resolvedFunction();
+
+  if (fn == NULL) {
+    if (ce->isPrimitive(PRIM_VIRTUAL_METHOD_CALL)) {
+      fn = toFnSymbol(toSymExpr(actual)->symbol());
+      if (se == actual->next)
+        // The class ID - not passed by ref.
+        return false;
+      actual = actual->next->next;
+    } else {
+      // Do not handle other primitives.
+      return false;
+    }
+  }
+
+  ArgSymbol* arg = formalForActual(fn, actual, se);
+  return arg->isRef();
 }
 
 bool isDenormalizable(Symbol* sym,
@@ -367,9 +433,12 @@ bool isDenormalizable(Symbol* sym,
                   ce->isPrimitive(PRIM_RETURN) ||
                   (ce->isPrimitive(PRIM_ARRAY_SHIFT_BASE_POINTER) && ce->get(1) == se) ||
                   isBadMove(ce) ||
+                  isValPassedByRef(ce, se) ||
                   isFloatComparisonPrimitive(ce))) {
               use = se;
             }
+          } else if (isConditionalInCondStmt(se)) {
+            use = se;
           }
         }
         if(use) {

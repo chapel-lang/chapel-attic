@@ -12,6 +12,10 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 
+#if (GASNETI_PSHM_FILE || GASNETI_PSHM_POSIX) && HAVE_FSTATVFS
+  #include <sys/statvfs.h>
+#endif
+
 #if (PLATFORM_OS_LINUX || PLATFORM_OS_CNL) && !GASNETI_BUG3480_WORKAROUND // Suspect bug 3480
 #define GASNETI_BUG3480_MSG "\nYour system is suspected to be impacted by bug 3480"
 #else
@@ -35,8 +39,12 @@
 
 #if defined(GASNETI_MMAP_OR_PSHM) && defined(GASNETI_USE_HUGETLBFS)
   #define gasneti_mmap_aligndown(sz) gasneti_mmap_aligndown_huge(sz)
+  #define gasneti_mmap_alignup(sz)   gasneti_mmap_alignup_huge(sz)
+  #define gasneti_mmap_pagesize()    gasneti_mmap_pagesize_huge()
 #else
   #define gasneti_mmap_aligndown(sz) GASNETI_PAGE_ALIGNDOWN(sz)
+  #define gasneti_mmap_alignup(sz) GASNETI_PAGE_ALIGNUP(sz)
+  #define gasneti_mmap_pagesize()    GASNETI_PAGESIZE
 #endif
 
 #ifdef GASNETI_MMAP_OR_PSHM
@@ -78,27 +86,22 @@
 
  #ifdef GASNETI_USE_HUGETLBFS
   #include <hugetlbfs.h>
-  /* Trim only from top to retain alignment: */
-  #undef GASNETI_USE_HIGHSEGMENT
-  #define GASNETI_USE_HIGHSEGMENT 0
   /* Provide greater alignment than default: */
-  static uintptr_t gasneti_mmap_aligndown_huge(uintptr_t sz) {
+  static uintptr_t gasneti_mmap_pagesize_huge() {
      static long pagesz = 0;
-     if (!pagesz) pagesz = gethugepagesize();
-     return GASNETI_ALIGNDOWN(sz, pagesz);
+     if (!pagesz) {
+       pagesz = gethugepagesize();
+       gasneti_assert_uint(pagesz ,>=, GASNETI_PAGESIZE);
+       gasneti_assert_uint(pagesz % GASNETI_PAGESIZE ,==, 0);
+     }
+     return pagesz;
   }
- #endif
-
- #if GASNET_PSHM && PLATFORM_ARCH_SPARC
-  /* On SPARC, shared mappings must be L1 data-cache color-aligned.
-     The easiest way to ensure that is to trim only from top to preserve
-     the alignment which the O/S gave to the original (untrimmed) mapping.
-   Possible TODO:
-     Since we only support 64-bit SPARC CPUs the alignment will always be MAX(16K, PAGESIZE).
-     So we could just use that for GASNETI_PAGESIZE.
-   */
-  #undef GASNETI_USE_HIGHSEGMENT
-  #define GASNETI_USE_HIGHSEGMENT 0
+  static uintptr_t gasneti_mmap_aligndown_huge(uintptr_t sz) {
+     return GASNETI_ALIGNDOWN(sz, gasneti_mmap_pagesize_huge());
+  }
+  static uintptr_t gasneti_mmap_alignup_huge(uintptr_t sz) {
+     return GASNETI_ALIGNUP(sz, gasneti_mmap_pagesize_huge());
+  }
  #endif
 
 #if !HAVE_MMAP
@@ -155,7 +158,7 @@
 
 #if HAVE_MMAP
 /* ------------------------------------------------------------------------------------ */
-static void *gasneti_mmap_internal(void *segbase, uintptr_t segsize) {
+static void *gasneti_mmap_internal(void *segbase, uintptr_t segsize, int fixed_mayfail) {
   static int gasneti_mmapfd = -1;
   gasneti_tick_t t1, t2;
   int mmap_errno;
@@ -209,12 +212,10 @@ static void *gasneti_mmap_internal(void *segbase, uintptr_t segsize) {
               GASNETI_LADDRSTR(ptr), (unsigned long)GASNET_PAGESIZE, (unsigned long)GASNET_PAGESIZE);
   }
   if (segbase && ptr == MAP_FAILED) {
-    #if GASNETI_BUG3480_WORKAROUND
-      if (mmap_errno == ENOMEM) {
-         errno = ENOMEM;
-         return MAP_FAILED; // Caller will retry
+      if (fixed_mayfail) {
+         errno = mmap_errno;
+         return MAP_FAILED;
       }
-    #endif
       gasneti_fatalerror("mmap fixed failed at "GASNETI_LADDRFMT" for size %"PRIuPTR": %s" GASNETI_BUG3480_MSG,
 	      GASNETI_LADDRSTR(segbase), segsize, strerror(mmap_errno));
   }
@@ -224,11 +225,11 @@ static void *gasneti_mmap_internal(void *segbase, uintptr_t segsize) {
   }
   return ptr;
 }
-extern void *gasneti_mmap_fixed(void *segbase, uintptr_t segsize) {
-  return gasneti_mmap_internal(segbase, segsize);
+extern void *gasneti_mmap_fixed(void *segbase, uintptr_t segsize, int mayfail) {
+  return gasneti_mmap_internal(segbase, segsize, mayfail);
 }
 extern void *gasneti_mmap(uintptr_t segsize) {
-  return gasneti_mmap_internal(NULL, segsize);
+  return gasneti_mmap_internal(NULL, segsize, 0);
 }
 #endif /* HAVE_MMAP */
 
@@ -322,7 +323,7 @@ static const char *gasneti_pshm_makeunique(const char *unique) {
 #endif
   int i;
 
-  gasneti_assert(strlen(prefix) == GASNETI_PSHM_PREFIX_LEN);
+  gasneti_assert_uint(strlen(prefix) ,==, GASNETI_PSHM_PREFIX_LEN);
 
 #if defined(GASNETI_PSHM_FILE) && defined(GASNETI_USE_HUGETLBFS)
   { const char *hugedir = hugetlbfs_find_path();
@@ -361,7 +362,7 @@ static const char *gasneti_pshm_makeunique(const char *unique) {
 
     /* Strip away the tmpdir to yield a unique prefix */
     unique = strrchr(gasneti_pshm_tmpfile, '/');
-    gasneti_assert(strlen(unique) == GASNETI_PSHM_PREFIX_LEN);
+    gasneti_assert_uint(strlen(unique) ,==, GASNETI_PSHM_PREFIX_LEN);
     unique += GASNETI_PSHM_PREFIX_LEN1;
   }
 
@@ -393,7 +394,7 @@ static const char *gasneti_pshm_makeunique(const char *unique) {
 #else
   /* Three base-36 "digits" provide 46,656 unique names, even if case-insensitive. */
  #if GASNETI_PSHM_MAX_NODES > 255
-  gasneti_assert_always(gasneti_pshm_nodes < (36*36*36));
+  gasneti_assert_always_uint(gasneti_pshm_nodes ,<, (36*36*36));
  #endif
 
   /* Note: 'unique' might not be NUL terminated */
@@ -439,7 +440,7 @@ static const char *gasneti_pshm_makeunique(const char *unique) {
 static uintptr_t huge_pagesz(void *addr, uintptr_t size) {
   static long pagesz = 0;
   if (!pagesz) pagesz = gethugepagesize();
-  gasneti_assert((uintptr_t)addr % pagesz == 0); /* alignment check */
+  gasneti_assert_uint((uintptr_t)addr % pagesz ,==, 0); /* alignment check */
   return GASNETI_ALIGNUP(size, pagesz);
 }
 
@@ -554,12 +555,25 @@ static void * gasneti_pshm_mmap(int pshm_rank, void *segbase, size_t segsize) {
     ptr = mmap(segbase, segsize, (PROT_READ|PROT_WRITE), mmap_flags, 0, 0);
   #endif
   } else {
-    gasneti_xpmem_apid_t apid =
-  #if HAVE_XPMEM_MAKE_2
-            xpmem_get_2(gasneti_pshm_segids[pshm_rank], XPMEM_RDWR, XPMEM_PERMIT_MODE, NULL);
-  #else
-              xpmem_get(gasneti_pshm_segids[pshm_rank], XPMEM_RDWR, XPMEM_PERMIT_MODE, NULL);
-  #endif
+    gasneti_xpmem_apid_t apid;
+    // Bounded retry on xpmem_get() failure to tolerate non-fatal signals (see Bug 3815)
+    for (int trial = 1; trial <= 5; ++trial) {
+    #if HAVE_XPMEM_MAKE_2
+      apid =  xpmem_get_2(gasneti_pshm_segids[pshm_rank], XPMEM_RDWR, XPMEM_PERMIT_MODE, NULL);
+    #else
+      apid =    xpmem_get(gasneti_pshm_segids[pshm_rank], XPMEM_RDWR, XPMEM_PERMIT_MODE, NULL);
+    #endif
+      if (apid != (gasneti_xpmem_apid_t)-1) {
+        break; // Success
+      }
+      // Failure with errno == EFAULT has been seen where EINTR was
+      // probably intended.  So, we retry w/o regard to actual errno.
+      int save_errno = errno;
+      GASNETI_TRACE_PRINTF(I, ("xpmem_get() trial %d failed %d(%s)\n",
+                               trial, save_errno, strerror(save_errno)));
+      errno = save_errno;
+    }
+
     if (apid != (gasneti_xpmem_apid_t)-1) {
     #if HAVE_XPMEM_MAKE_2
       ptr = xpmem_attach_2(apid, 0, segsize, segbase);
@@ -608,7 +622,7 @@ static void gasneti_pshm_munmap(void *segbase, uintptr_t segsize) {
   gasneti_pshm_unlink(gasneti_pshm_mynode);
 }
 
-static void gasneti_munmap_remote(gasnet_node_t pshm_rank, void *segbase, uintptr_t segsize) {
+static void gasneti_munmap_remote(gex_Rank_t pshm_rank, void *segbase, uintptr_t segsize) {
   gasneti_assert(segsize > 0);
 
 #if defined(GASNETI_PSHM_SYSV)
@@ -634,8 +648,10 @@ static void gasneti_munmap_remote(gasnet_node_t pshm_rank, void *segbase, uintpt
 }
 
 /* Called collectively */
-GASNETI_INLINE(gasneti_export_segment)
-void gasneti_export_segment(void *segbase, uintptr_t segsize) {
+GASNETI_INLINE(gasneti_publish_segment)
+void gasneti_publish_segment(gasnet_seginfo_t segment) {
+  void *segbase = segment.addr;
+  uintptr_t segsize = segment.size;
 #if defined(GASNETI_PSHM_XPMEM)
   /* Create and supernode-exchange xpmem segment ids */
   gasneti_xpmem_segid_t segid =
@@ -696,8 +712,10 @@ static void gasneti_cleanup_shm(void) {
     for (int i=0; i<gasneti_pshm_nodes+1; ++i) {
       gasneti_pshm_unlink(i);
     }
+  #if 0 // TODO-EX: can't create multiple segments with these, but don't yet mark as leaked
     gasneti_free(gasneti_pshm_sysvkeys);
     gasneti_pshm_sysvkeys = NULL;
+  #endif
   }
 #elif defined(GASNETI_PSHM_FILE) || defined(GASNETI_PSHM_POSIX)
   if (gasneti_pshmname) {
@@ -707,18 +725,24 @@ static void gasneti_cleanup_shm(void) {
     for (i=0; i<gasneti_pshm_nodes+1; ++i) {
       gasneti_pshm_unlink(i);
     }
+  #if 0 // TODO-EX: can't create multiple segments with these, but don't yet mark as leaked
     gasneti_free(gasneti_pshmname[0]);
     gasneti_free(gasneti_pshmname);
     gasneti_pshmname = NULL;
+  #endif
   }
 #elif defined(GASNETI_PSHM_XPMEM)
-  gasneti_free(gasneti_pshm_segids);
-  gasneti_pshm_segids = NULL;
-  gasneti_free(gasneti_pshm_apids);
-  gasneti_pshm_apids = NULL;
+  #if 0 // TODO-EX: can't create multiple segments with these, but don't yet mark as leaked
+    gasneti_free(gasneti_pshm_segids);
+    gasneti_pshm_segids = NULL;
+    gasneti_free(gasneti_pshm_apids);
+    gasneti_pshm_apids = NULL;
+  #endif
 #elif defined(GASNETI_PSHM_GHEAP)
-  gasneti_free(gasneti_pshm_segaddrs);
-  gasneti_pshm_segaddrs = NULL;
+  #if 0 // TODO-EX: can't create multiple segments with these, but don't yet mark as leaked
+    gasneti_free(gasneti_pshm_segaddrs);
+    gasneti_pshm_segaddrs = NULL;
+  #endif
 #else
   #error
 #endif
@@ -762,13 +786,6 @@ static void *gasneti_mmap_shared_internal(int pshmnode, void *segbase, uintptr_t
         (ptr == MAP_FAILED?strerror(mmap_errno):"")));
 
   if ((ptr == MAP_FAILED) && !may_fail) {
-  #if GASNETI_BUG3480_WORKAROUND
-    if (segbase && (mmap_errno == ENOMEM)) {
-      errno = ENOMEM;
-      return MAP_FAILED; // Caller will retry
-    }
-  #endif
-
     gasneti_cleanup_shm();
 
     if (mmap_errno != ENOMEM) {
@@ -806,19 +823,16 @@ static void *gasneti_mmap_shared_internal(int pshmnode, void *segbase, uintptr_t
   return ptr;
 }
 
-static void *gasneti_mmap_remote_shared(void *segbase, uintptr_t segsize, gasnet_node_t pshmnode) {
-  gasneti_assert(pshmnode < gasneti_pshm_nodes);
+static void *gasneti_mmap_remote_shared(void *segbase, uintptr_t segsize, gex_Rank_t pshmnode) {
+  gasneti_assert_uint(pshmnode ,<, gasneti_pshm_nodes);
   return gasneti_mmap_shared_internal(pshmnode, segbase, segsize, 0);
 }
-extern void *gasneti_mmap_shared_fixed(void *segbase, uintptr_t segsize) {
-  return gasneti_mmap_shared_internal(gasneti_pshm_mynode, segbase, segsize, 0);
+extern void *gasneti_mmap_shared_fixed(void *segbase, uintptr_t segsize, int mayfail) {
+  return gasneti_mmap_shared_internal(gasneti_pshm_mynode, segbase, segsize, mayfail);
 }
 extern void *gasneti_mmap_shared(uintptr_t segsize) {
   return gasneti_mmap_shared_internal(gasneti_pshm_mynode, NULL, segsize, 1);
 }
-
-static void* gasneti_vnet_addr;
-static uintptr_t gasneti_vnet_size;
 
 extern void *gasneti_mmap_vnet(uintptr_t size, gasneti_bootstrapBroadcastfn_t snodebcastfn) {
   void *ptr = MAP_FAILED;
@@ -924,9 +938,6 @@ extern void *gasneti_mmap_vnet(uintptr_t size, gasneti_bootstrapBroadcastfn_t sn
   /* restore the pertinent errno, if any */
   errno = save_errno;
 
-  gasneti_vnet_addr = ptr;
-  gasneti_vnet_size = size;
-
   return (ptr == MAP_FAILED) ? NULL : ptr;
 }
 extern void gasneti_unlink_vnet(void) {
@@ -968,27 +979,28 @@ extern void gasneti_munmap(void *segbase, uintptr_t segsize) {
 
 #if GASNETI_BUG3480_WORKAROUND
 // Bounded retry on FIXED mappings
-static void *gasneti_mmap_fixed_with_retry(void *segbase, uintptr_t segsize) {
+static void *gasneti_mmap_fixed_with_retry(void *segbase, uintptr_t segsize, int mayfail) {
   const uint64_t max_delay = 2e7;
   uint64_t delay = 1e3;
   const int max_retries = 100;
   int retries = 0;
 
-  void *ptr = gasneti_do_mmap_fixed(segbase, segsize);
+  void *ptr = gasneti_do_mmap_fixed(segbase, segsize, 1);
 
   while ((ptr == MAP_FAILED) && (errno == ENOMEM) && (retries++ < max_retries)) {
     GASNETI_TRACE_PRINTF(I, ("Bug 3480: retry #%d delay %gs\n", retries, 1e-9*delay));
     (void) gasneti_nsleep(delay);
     delay = MIN(max_delay, delay * 2);
-    ptr = gasneti_do_mmap_fixed(segbase, segsize);
+    ptr = gasneti_do_mmap_fixed(segbase, segsize, 1);
   }
 
-  if (ptr == MAP_FAILED) {
+  if (ptr == MAP_FAILED && !mayfail) {
+    int save_errno = errno;
   #if GASNET_PSHM
     gasneti_cleanup_shm();
   #endif
     gasneti_fatalerror("mmap fixed failed at "GASNETI_LADDRFMT" for size %"PRIuPTR": %s",
-            GASNETI_LADDRSTR(segbase), segsize, strerror(errno));
+            GASNETI_LADDRSTR(segbase), segsize, strerror(save_errno));
   }
 
   return ptr;
@@ -1025,11 +1037,12 @@ static gasnet_seginfo_t gasneti_mmap_binary_segsrch(uintptr_t lowsz, uintptr_t h
 }
 /* descending linear search for segment - returns location mmaped */
 static gasnet_seginfo_t gasneti_mmap_lineardesc_segsrch(uintptr_t highsz) {
+  const uintptr_t pagesize = gasneti_mmap_pagesize();
   gasnet_seginfo_t si;
   si.addr = MAP_FAILED;
   si.size = highsz;
-  while (si.addr == MAP_FAILED && si.size > GASNET_PAGESIZE) {
-    si.size -= GASNET_PAGESIZE;
+  while (si.addr == MAP_FAILED && si.size > pagesize) {
+    si.size -= pagesize;
     si.addr = gasneti_do_mmap(si.size);
   }
   if (si.addr == MAP_FAILED) {
@@ -1040,15 +1053,16 @@ static gasnet_seginfo_t gasneti_mmap_lineardesc_segsrch(uintptr_t highsz) {
 }
 /* ascending linear search for segment - returns location, not mmaped */
 static gasnet_seginfo_t gasneti_mmap_linearasc_segsrch(uintptr_t highsz) {
+  const uintptr_t pagesize = gasneti_mmap_pagesize();
   gasnet_seginfo_t si;
   gasnet_seginfo_t last_si = { NULL, 0 };
-  si.size = GASNET_PAGESIZE;
+  si.size = pagesize;
   si.addr = gasneti_do_mmap(si.size);
 
   while (si.addr != MAP_FAILED && si.size <= highsz) {
     last_si = si;
     gasneti_do_munmap(last_si.addr, last_si.size);
-    si.size += GASNET_PAGESIZE;
+    si.size += pagesize;
     si.addr = gasneti_do_mmap(si.size);
   }
   if (si.addr == MAP_FAILED) return last_si;
@@ -1064,9 +1078,12 @@ static gasnet_seginfo_t gasneti_mmap_linearasc_segsrch(uintptr_t highsz) {
  */
 static gasnet_seginfo_t _gasneti_mmap_segment_search_inner(uintptr_t maxsz) {
   gasnet_seginfo_t si;
+  uintptr_t prevsz = 0;
   int mmaped = 0;
 
-  gasneti_assert(maxsz == GASNETI_PAGE_ALIGNDOWN(maxsz));
+again:
+  gasneti_assert(maxsz);
+  gasneti_assert_uint(maxsz ,==, gasneti_mmap_aligndown(maxsz));
 
   si.addr = gasneti_do_mmap(maxsz);
   if (si.addr != MAP_FAILED) { /* succeeded at max value - done */
@@ -1097,24 +1114,71 @@ static gasnet_seginfo_t _gasneti_mmap_segment_search_inner(uintptr_t maxsz) {
   }
 
   gasneti_assert(si.addr != NULL && si.addr != MAP_FAILED && si.size > 0);
-  gasneti_assert(si.size % GASNET_PAGESIZE == 0);
+  gasneti_assert_uint(si.size % GASNET_PAGESIZE ,==, 0);
   if (mmaped && ((uintptr_t)si.addr) % GASNET_PAGESIZE == 0) {
     /* aligned and mmaped - nothing to do */
   } else { /* need to page-align base */
     if (mmaped) gasneti_do_munmap(si.addr, si.size); 
-    /*  ensure page-alignment of base and size */
+    // ensure alignment of base and size to expected granularity, even if system's page size is smaller
     { uintptr_t begin = (uintptr_t)si.addr;
       uintptr_t end = (uintptr_t)si.addr + si.size;
       begin = GASNETI_PAGE_ALIGNUP(begin);
       end = GASNETI_PAGE_ALIGNDOWN(end);
       si.addr = (void *)begin;
       si.size = end - begin;
+      if (si.size == 0) goto fail;
     }
-    gasneti_do_mmap_fixed(si.addr, si.size);
+    // perform a *fixed* mapping to preserve alignment achieved above
+    void *ptr = gasneti_do_mmap_fixed(si.addr, si.size, 1);
+    if (ptr == MAP_FAILED && errno == ENOMEM) {
+      // Failed to mmap a size at which the probe had once succeeded (bug 3812).
+      // Attempt bounded linear-descending retries.
+      const uintptr_t pagesize = gasneti_mmap_pagesize();
+      for (int i = 1; i <= 4; ++i) {
+        if (si.size <= pagesize) goto fail;
+        si.size -= pagesize;
+        ptr = gasneti_do_mmap_fixed(si.addr, si.size, 1);
+        if (ptr != MAP_FAILED) {
+          GASNETI_TRACE_PRINTF(I, ("Segment search final mmap trimmed by %"PRIuPTR, i * pagesize));
+          break;
+        } else if (errno != ENOMEM) {
+          // unexpected failure - skip to "second chance" or give up
+          break;
+        }
+      }
+    }
+    if (ptr == MAP_FAILED) {
+      if (!prevsz) {
+        // "Second chance" (used at most once)
+        // Restart using the most recent failed size as the new maximum
+        GASNETI_TRACE_PRINTF(I, ("Segment search final mmap failed.  Starting second-chance search."));
+        prevsz = maxsz = si.size;
+        goto again;
+      } else {
+        goto fail;
+      }
+    }
+#if GASNETI_PSHM_MAP_FIXED_IGNORED
+    si.addr = ptr;
+#else
+    gasneti_assert_ptr(si.addr ,==, ptr);
+#endif
   }
 
+  if (prevsz) {
+    GASNETI_TRACE_PRINTF(I, ("Segment search second-chance reduced size by %"PRIuPTR, prevsz - si.size));
+  }
+  GASNETI_TRACE_PRINTF(I, ("Segment search final size: %"PRIuPTR, si.size));
+
   gasneti_assert(si.addr != NULL && si.addr != MAP_FAILED && si.size > 0);
-  gasneti_assert(((uintptr_t)si.addr) % GASNET_PAGESIZE == 0 && si.size % GASNET_PAGESIZE == 0);
+  gasneti_assert_uint(((uintptr_t)si.addr) % GASNET_PAGESIZE ,==, 0);
+  gasneti_assert_uint(si.size % GASNET_PAGESIZE ,==, 0);
+  return si;
+
+fail:
+  GASNETI_TRACE_PRINTF(I, ("Segment search failed (found max size of 0)"));
+  si.addr = NULL;
+  si.size = 0;
   return si;
 }
 
@@ -1142,133 +1206,203 @@ extern gasnet_seginfo_t gasneti_mmap_segment_search(uintptr_t maxsz) {
 /* ------------------------------------------------------------------------------------ */
 #endif /* GASNETI_MMAP_OR_PSHM */
 
-#if defined(GASNETI_MMAP_MAX_SIZE)
-  GASNETI_IDENT(gasneti_IdentString_DefaultMaxSegsize, 
-                "$GASNetDefaultMaxSegsize: " _STRINGIFY(GASNETI_MMAP_MAX_SIZE) " $");
-#elif defined(GASNETI_MALLOCSEGMENT_MAX_SIZE)
-  GASNETI_IDENT(gasneti_IdentString_DefaultMaxSegsize, 
-                "$GASNetDefaultMaxSegsize: " _STRINGIFY(GASNETI_MALLOCSEGMENT_MAX_SIZE) " $");
-#endif
+GASNETI_IDENT(gasneti_IdentString_DefaultMaxSegsizeStr, 
+              "$GASNetDefaultMaxSegsizeStr: " GASNETI_MAX_SEGSIZE_CONFIGURE " $");
 
 /* return user-selected limit for the max segment size, as gleaned from several sources */
-uint64_t gasnet_max_segsize; /* intentional tentative definition, to allow client override */
-uintptr_t _gasneti_max_segsize(uint64_t configure_val) {
+const char *gasnet_max_segsize_str; // intentional tentative definition, to allow client override
+uint64_t gasnet_max_segsize;        // DEPRECATED: intentional tentative definition, to allow client override 
+uintptr_t gasneti_max_segsize() {
   static uintptr_t result = 0;
   uint64_t tmp;
   if (!result) {
-    int is_dflt = 1;
+    uintptr_t auxsegsz = gasneti_auxseg_preinit();
+    uint64_t pph = gasneti_myhost.node_count;
+    gasneti_assert(pph > 0);
     /* start with the configure-selected default */
-    tmp = configure_val;
-    /* next, check the compile-time override */
-    if (gasnet_max_segsize) tmp = gasnet_max_segsize;
-    /* finally, check the environment override */
-    { const char *envstr = gasneti_getenv("GASNET_MAX_SEGSIZE");
-      if (envstr) { tmp = gasneti_parse_int(envstr, 1); is_dflt = 0; }
+    const char *dflt = GASNETI_MAX_SEGSIZE_CONFIGURE;
+    /* next, check the compile-time overrides */
+    if (gasnet_max_segsize) { // lower-priority deprecated override, interpreted as /p
+      static char tmp[80];
+      snprintf(tmp,sizeof(tmp),"%"PRIu64"/p",gasnet_max_segsize);
+      dflt = tmp;
     }
-    #if PLATFORM_ARCH_32
-      /* need to be careful about 32-bit overflow: hard limit is 2^32 - pagesz */
-      result = MIN(tmp,(uint32_t)-1);
+    if (gasnet_max_segsize_str) { // higher-priority string override
+      dflt = gasnet_max_segsize_str;
+    }
+
+    #if PLATFORM_ARCH_32 && !defined(GASNETI_ALLOW_HUGE_32BIT_SEGMENT)
+      /* need to be careful about overflow on 32-bit:
+         can't use a full 4 GB due to sign bit problems 
+         on the int argument to mmap() for some 32-bit systems
+         so use 2GB - pagesz 
+      */
+      uint64_t hardmax = (((uint64_t)1)<<31) - GASNET_PAGESIZE;
     #else
-      result = tmp;
+      uint64_t hardmax = (uint64_t)-1; // unlimited
     #endif
-    result = (uintptr_t)GASNETI_PAGE_ALIGNDOWN(result); /* ensure page alignment */
-    result = MAX(GASNET_PAGESIZE, result); /* ensure at least one page */
-    gasneti_envint_display("GASNET_MAX_SEGSIZE", result, is_dflt, 1);
+
+    // finally, check the environment override, parse the result and factor in min/max/auxseg
+    uint64_t val = gasneti_getenv_memsize_withdefault("GASNET_MAX_SEGSIZE", dflt,
+                                                GASNET_PAGESIZE, hardmax,
+                                                gasneti_getPhysMemSz(1), pph,
+                                                0);
+
+    // round UP to nearest huge page, if needed, to ensure we don't truncate client's MAX_SEGSIZE request
+    val = gasneti_mmap_alignup(val);
+
+    gasneti_assert_uint(val ,==, GASNETI_PAGE_ALIGNDOWN(val));
+    gasneti_assert_uint(val ,>=, GASNET_PAGESIZE);
+    gasneti_assert_uint(val ,<=, hardmax);
+    result = (uintptr_t)val;
+    gasneti_assert_uint(result ,==, val); // overflow check
   }
   return result;
 }
 
-#if !GASNET_SEGMENT_EVERYTHING
-/* mmap-based segment init/attach */
-static gasnet_seginfo_t gasneti_segment = {0,0}; /* local segment info */
-#ifdef GASNETI_MMAP_OR_PSHM
-static uintptr_t gasneti_myheapend = 0; /* top of my malloc heap */
-static uintptr_t gasneti_maxheapend = 0; /* top of max malloc heap */
-static uintptr_t gasneti_maxbase = 0; /* start of segment overlap region */
-#endif /* GASNETI_MMAP_OR_PSHM */
+#if GASNETI_BUG3480_WORKAROUND
+  // Barrier used between unmap and re-map, via 1-byte exchange (a.k.a. GatherAll).
+  // This is a bit of a hack, but is the most expedient way to get a barrier
+  // with compute-node scope, since gasneti_pshmnet_bootstrapBarrier() may
+  // have a narrower scope when env var GASNET_SUPERNODE_MAXSIZE is set.
+  static void gasneti_bug3480_fence(gasneti_bootstrapExchangefn_t exchangefn) {
+    char a = 0; char *b = gasneti_malloc(gasneti_nodes);
+    (*exchangefn)(&a, sizeof(char), b);
+    gasneti_free(b);
+  }
+#else
+  #define gasneti_bug3480_fence(_e) ((void)0)
+#endif
 
-typedef struct {
-  gasnet_seginfo_t seginfo;
-  union {
-    uintptr_t heapend; /* during init only */
-    uintptr_t segsize_request; /* during attach only */
-  } u;
-} gasneti_segexch_t;
-static gasneti_segexch_t *gasneti_segexch = NULL; /* exchanged segment information */
+// gasneti_sharedLimit()
+//
+// Returns the per-host shared memory limit ("the limit") imposed by the active
+// PSHM implementation and current resource utilization.  If PSHM is not
+// enabled, or if there are no limits specific to the implementation, returns
+// gasneti_getPhysMemSz() or (uint64_t)-1 if that call should fail.
+//
+// Limits by PSHM implementation:
+//   FILE:  free space reported by fstatvfs() if available
+//   POSIX: free space reported by fstatvfs() if available
+//   SYSV:  UNIMPLEMENTED (but probably not needed)
+//          We are not yet checking for the "shmall" or "shmmaxpgs" limits,
+//          from which we'd need to subtract the current segments as one
+//          might see with `ipcs`.  HOWEVER, unlike the filesystem limits
+//          for FILE and POSIX, we believe that the segmentLimit() probe
+//          will observe the actual free resources, and NOT overcommit.
+//   XPMEM: NONE - just windows into other proc's address space
+//   GHEAP: NONE - just a removal of protection beteen address spaces
+//
+uint64_t gasneti_sharedLimit(void) {
+  uint64_t sharedLimit;
+  
+  // Start with appropriate system-dependent memory limits
+  {
+  #if defined(GASNETI_HAVE_BGQ_INLINES)
+    const uint64_t hostmem = gasneti_getPhysMemSz(1); /* sysconf() reports phys mem for full node */
+    const uint64_t safemem = (hostmem * 4) / 5; /* 80% as a safety margin (but just a guess) */
+    
+    // Memory is statically partitioned among the configured ppn (even if running fewer)
+    const uint64_t sprg7 = mfspr(SPRN_SPRG7RO);
+    const uint8_t ppn = (sprg7 >> 8) & 0xff; /* Byte 6 is processes per node: 1,2,4,8,16,32 or 64 */
+    const uint64_t procmem = safemem / ppn;
+    
+    // Per host-limit is (80% of) memory per process times local processes
+    // This yields the right localLimit when gasneti_segmentLimit() later
+    // divides the sharedLimit by gasneti_myhost.node_count
+    sharedLimit = procmem * gasneti_myhost.node_count;
+  #else
+    const uint64_t hostmem = gasneti_getPhysMemSz(0);
+    sharedLimit = hostmem ? hostmem : (uint64_t)-1;
+  #endif
+  }
+
+
+#if (GASNETI_PSHM_FILE || GASNETI_PSHM_POSIX) && HAVE_FSTATVFS
+  {
+    // Apply limits appropriate to filesystem-backed allocation
+    const int flags = O_RDWR | O_CREAT | O_EXCL;
+    const mode_t mode = S_IRUSR | S_IWUSR;
+    const char *filename = gasneti_pshmname[gasneti_pshm_mynode];
+    struct statvfs buf;
+
+  #if GASNETI_PSHM_POSIX
+    int fd = shm_open(filename, flags, mode);
+  #else
+    int fd = open(filename, flags, mode);
+  #endif
+
+    if (fd >= 0) {
+      // TODO: for now we ignore any errors here
+      if (0 == fstatvfs(fd, &buf)) {
+        uint64_t free_space = buf.f_bsize * buf.f_bavail;
+        if (free_space) {
+          sharedLimit = MIN(sharedLimit, free_space);
+        }
+      }
+      (void) close(fd);
+    #if GASNETI_PSHM_POSIX
+      (void) shm_unlink(filename);
+    #else
+      (void) unlink(filename);
+    #endif
+    }
+  }
+#endif
+
+  return sharedLimit;
+}
 
 #ifdef GASNETI_MMAP_OR_PSHM
 /* perform a coordinated mmap probe to determine the max memory
     that can be mmap()ed while considering multiple GASNet nodes
     per shared memory node
    localLimit is an optional conduit-specific upper limit per GASNet node
-   sharedLimit is an optional upper limit per shared memory node
+   sharedLimit is an optional upper limit per host
    requires an exchangefn callback function that can be used to exchange data
    and a barrierfn callback to perform a barrier
    returns a value suitable for use as localSegmentLimit in a call
     to gasneti_segmentInit()
    
    for exchangefn and barrierfn: the implementations are only required to
-    perform their functions with respect the peers on a shared-memory
-    node (though exchangefn does require a "full" third argument).
+    perform their functions with respect the peers on a host
+    (though exchangefn does require a "full" third argument).
     however, global implementations are acceptible
  */
-uintptr_t gasneti_mmapLimit(uintptr_t localLimit, uint64_t sharedLimit,
+uintptr_t gasneti_segmentLimit(uintptr_t localLimit, uint64_t sharedLimit,
                             gasneti_bootstrapExchangefn_t exchangefn,
                             gasneti_bootstrapBarrierfn_t barrierfn) {
   int i;
-  uintptr_t maxsz;
-  const gasnet_node_t local_count = gasneti_myhost.node_count;
+  const gex_Rank_t local_count = gasneti_myhost.node_count;
 
 #if GASNET_PSHM
   gasneti_pshm_cs_enter(&gasneti_cleanup_shm);
 #endif
 
+  // This is assumed implictly
+  gasneti_assert_uint(gasneti_mmap_pagesize() ,>=, GASNETI_PAGESIZE);
+
   gasneti_assert(exchangefn);
   gasneti_assert(barrierfn); /* No longer optional */
   gasneti_assert(gasneti_nodemap);
 
-  /* Apply system-dependent defaults, if any */
-#if defined(GASNETI_HAVE_BGQ_INLINES)
-  if ((localLimit == (uintptr_t)-1) || (sharedLimit == (uint64_t)-1)) {
-    const uint64_t nodemem = gasneti_getPhysMemSz(1); /* sysconf() reports phys mem for full node */
-    const uint64_t safemem = (nodemem * 4) / 5; /* 80% as a safety margin (but just a guess) */
-    if (sharedLimit == (uint64_t)-1) {
-      sharedLimit = safemem;
-    }
-    if (localLimit == (uintptr_t)-1) {
-      /* Use node's configured ppn value, even if running fewer actual procs */
-      const uint64_t sprg7 = mfspr(SPRN_SPRG7RO);
-      const uint8_t ppn = (sprg7 >> 8) & 0xff; /* Byte 6 is processes per node: 1,2,4,8,16,32 or 64 */
-      localLimit = safemem / ppn;
-    }
-  }
-#else
-  if (sharedLimit == (uint64_t)-1) {
-    /* Start at something reasonable if we expect to avoid swapping */
-    const uint64_t nodemem = gasneti_getPhysMemSz(0);
-    if (nodemem) sharedLimit = nodemem; /* no change if getPhysMemSz failed */
-  }
-#endif
-
   /* Apply intial limits, even if not sharing nodes */
-  maxsz = GASNETI_MMAP_LIMIT;
+  uintptr_t auxsegsz = gasneti_auxseg_preinit();
+  uintptr_t maxsz = MAX(GASNETI_MMAP_LIMIT, auxsegsz);
+  maxsz = gasneti_mmap_alignup(maxsz);
   if ((uint64_t)localLimit > sharedLimit) localLimit = sharedLimit;
   maxsz = MIN(maxsz, localLimit);
 
   /* Coordinate the search IFF there are any shared nodes. */
   if (gasneti_myhost.grp_count != gasneti_nodes) {
-    uintptr_t *sz_exchg = gasneti_malloc(gasneti_nodes * sizeof(uintptr_t));
+    uintptr_t *sz_exchg = gasneti_calloc(gasneti_nodes, sizeof(uintptr_t));
     gasnet_seginfo_t se = {0,0};
 
     /* Ensure our probe will not collectively exceed the shareLimit, if any. */
     if ((sharedLimit != (uint64_t)-1) && (local_count > 1)) {
-#if SIZEOF_VOID_P != 8
-       /* Skip MIN() on overflow */
-       if ((sharedLimit / local_count) < (uint64_t)(uintptr_t)(-1))
-#endif
-       { uintptr_t tmp = sharedLimit / local_count;
-         maxsz = MIN(maxsz, tmp);
-       }
+      uint64_t tmp = sharedLimit / local_count;
+      tmp = MIN(tmp,(uintptr_t)-1); // avoid overflowing 32-bit maxsz on ILP32
+      maxsz = MIN(maxsz,tmp);
     }
 
     /* Allow each node in a given host to probe SEQUENTIALLY, and then collect the results */
@@ -1283,18 +1417,19 @@ uintptr_t gasneti_mmapLimit(uintptr_t localLimit, uint64_t sharedLimit,
         /* Bcast because we can use "declining expectations" to potentially speed later probes */
         gasneti_pshmnet_bootstrapBroadcast(gasneti_request_pshmnet, &maxsz, sizeof(uintptr_t), &maxsz, i);
         sz_exchg[gasneti_nodemap_local[i]] = maxsz;
+        if (!maxsz) break;
       }
     } else
 #endif
     if (maxsz) {
       /* Find widest host */
-      gasnet_node_t rounds = 0;
+      gex_Rank_t rounds = 0;
       {
-        const gasnet_node_t num_hosts = gasneti_myhost.grp_count;
-        gasnet_node_t *tmp = gasneti_calloc(num_hosts, sizeof(gasnet_node_t));
+        const gex_Rank_t num_hosts = gasneti_myhost.grp_count;
+        gex_Rank_t *tmp = gasneti_calloc(num_hosts, sizeof(gex_Rank_t));
         for (i = 0; i < gasneti_nodes; ++i) {
-          const gasnet_node_t host = gasneti_nodeinfo[i].host;
-          gasneti_assert(host < num_hosts);
+          const gex_Rank_t host = gasneti_nodeinfo[i].host;
+          gasneti_assert_uint(host ,<, num_hosts);
           tmp[host] += 1;
           rounds = MAX(rounds, tmp[host]);
         }
@@ -1331,10 +1466,15 @@ uintptr_t gasneti_mmapLimit(uintptr_t localLimit, uint64_t sharedLimit,
        * NOTE: must use pshm's view of supernode, which may be less than nodemap's.
        */
       if (se.size) gasneti_do_munmap(se.addr, se.size);
-      gasneti_unlink_segments(); /* Includes barrier to complete munmap()s */
+      gasneti_unlink_segments(); /* Includes supernode-scoped barrier to complete munmap()s */
+      if (gasneti_myhost.grp_count != gasneti_mysupernode.grp_count) {
+        // num_hosts != num_supernodes (multiple supernodes on at least one node)
+        // Lacking a node-scoped barrier, we require a full barrier to complete munmap()s
+        (*barrierfn)();
+      }
       se.size = 0;
 
-      if (gasneti_pshm_mynode == 0) {
+      if (gasneti_pshm_mynode == 0 && maxsz) {
         gasnet_seginfo_t *tmp_se = gasneti_calloc(gasneti_pshm_nodes,sizeof(gasnet_seginfo_t));
 	int done;
 	/* Iterate until we find a size for which N segments fit.
@@ -1361,7 +1501,7 @@ uintptr_t gasneti_mmapLimit(uintptr_t localLimit, uint64_t sharedLimit,
             tmp_se[i].size = 0;
           }
           maxsz = gasneti_mmap_aligndown(sum / gasneti_pshm_nodes);
-        } while (!done);
+        } while (!done && maxsz);
         gasneti_free(tmp_se);
       }
 
@@ -1387,6 +1527,14 @@ uintptr_t gasneti_mmapLimit(uintptr_t localLimit, uint64_t sharedLimit,
 }
 #endif /* GASNETI_MMAP_OR_PSHM */
 
+// State between segmentInit() and segmentAttach()
+#ifdef GASNETI_MMAP_OR_PSHM
+static gasnet_seginfo_t gasneti_presegment = {0,0};
+#endif
+#if GASNET_ALIGNED_SEGMENTS
+static uintptr_t gasneti_maxbase;
+#endif
+
 /* do the work necessary for initing a standard segment map in arbitrary memory 
      uses mmap if available, or malloc otherwise
    requires an exchange callback function that can be used to exchange data
@@ -1394,286 +1542,263 @@ uintptr_t gasneti_mmapLimit(uintptr_t localLimit, uint64_t sharedLimit,
    localSegmentLimit provides an optional conduit-specific limit on max segment sz
     (for example, to limit size based on physical memory availability)
     pass (uintptr_t)-1 for unlimited
-    Use of gasneti_mmapLimit() can help determine the right value to pass here
+    Use of gasneti_segmentLimit() can help determine the right value to pass here
    keeps internal state for attach
  */
 void gasneti_segmentInit(uintptr_t localSegmentLimit,
-                         gasneti_bootstrapExchangefn_t exchangefn) {
+                         gasneti_bootstrapExchangefn_t exchangefn,
+                         gex_Flags_t flags)
+{
+  const int legacy_mode = flags & GASNETI_FLAG_INIT_LEGACY;
 #if GASNET_PSHM
   gasneti_pshm_cs_enter(&gasneti_cleanup_shm);
 #endif
 
-  gasneti_assert(gasneti_MaxLocalSegmentSize == 0);
-  gasneti_assert(gasneti_MaxGlobalSegmentSize == 0);
+  gasneti_assert_uint(gasneti_MaxLocalSegmentSize ,==, 0);
+  gasneti_assert_uint(gasneti_MaxGlobalSegmentSize ,==, 0);
   gasneti_assert(exchangefn);
-  gasneti_assert(gasneti_nodes > 0);
-  gasneti_assert(gasneti_mynode < gasneti_nodes);
+  gasneti_assert_uint(gasneti_nodes ,>, 0);
+  gasneti_assert_uint(gasneti_mynode ,<, gasneti_nodes);
 
-  gasneti_segexch = (gasneti_segexch_t *)gasneti_malloc(gasneti_nodes*sizeof(gasneti_segexch_t));
+#if GASNET_SEGMENT_EVERYTHING
 
-  if (localSegmentLimit != (uintptr_t)-1) 
-    localSegmentLimit = gasneti_mmap_aligndown(localSegmentLimit);
+  // Initialize global data
+  gasneti_leak(gasneti_seginfo    = gasneti_malloc(gasneti_nodes*sizeof(gasnet_seginfo_t)));
+  for (gex_Rank_t i = 0; i < gasneti_nodes; i++) {
+    gasneti_seginfo[i].addr = NULL;
+    gasneti_seginfo[i].size = (uintptr_t)-1;
+  }
+  gasneti_MaxLocalSegmentSize = (uintptr_t)-1;
+  gasneti_MaxGlobalSegmentSize = (uintptr_t)-1;
+
+#else // GASNET_SEGMENT_EVERYTHING
+
+  // PART 0: allocate (and zero-initialize) global data
+
+  gasneti_leak(gasneti_seginfo    = gasneti_calloc(gasneti_nodes, sizeof(gasnet_seginfo_t)));
+
+  // PART I: allocate "pre-segment"
+
+#ifdef GASNETI_MMAP_OR_PSHM
+  localSegmentLimit = MIN(localSegmentLimit, GASNETI_MMAP_LIMIT);
+#endif
+  localSegmentLimit = gasneti_mmap_aligndown(localSegmentLimit);
 
   #ifdef GASNETI_MMAP_OR_PSHM
-  { gasneti_segexch_t se;
-    int i;
-
     // NOTE: If the conduit did not derive localSegmentLimit from a call to
-    // gasneti_mmapLimit(), then this call might lead to unexpected failures
+    // gasneti_segmentLimit(), then this call might lead to unexpected failures
     // (such as bug 651) due to it's lack of coordination among processes.
-    gasneti_segment = gasneti_mmap_segment_search(localSegmentLimit == (uintptr_t)-1 ?
-                                                  GASNETI_MMAP_LIMIT : 
-                                                  MIN(localSegmentLimit,GASNETI_MMAP_LIMIT));
+    gasneti_presegment = gasneti_mmap_segment_search(localSegmentLimit);
+
     GASNETI_TRACE_PRINTF(C, ("My segment: addr="GASNETI_LADDRFMT"  sz=%"PRIuPTR,
-      GASNETI_LADDRSTR(gasneti_segment.addr), gasneti_segment.size));
-
-    se.seginfo = gasneti_segment;
-  #if PLATFORM_OS_DARWIN
-    /* sbrk() is "emulated", making the heap-separation test invalid. */
-    /* TODO: is there an alternative separation test we could/should apply? */
-    gasneti_myheapend = GASNETI_PAGE_ALIGNDOWN((uintptr_t)-1);
+      GASNETI_LADDRSTR(gasneti_presegment.addr), gasneti_presegment.size));
   #else
-    gasneti_myheapend = (uintptr_t)sbrk(0);
-    if (gasneti_myheapend == (uintptr_t)-1) gasneti_fatalerror("Failed to sbrk(0):%s",strerror(errno));
-    gasneti_myheapend = GASNETI_PAGE_ALIGNUP(gasneti_myheapend);
-  #endif
-    se.u.heapend = gasneti_myheapend;
-
-    /* gather the sbrk info and mmap segment location */
-    (*exchangefn)(&se, sizeof(gasneti_segexch_t), gasneti_segexch);
-
-    /* compute bounding-box of segment location */
-    { uintptr_t maxbase = 0;
-      uintptr_t maxsize = 0;
-      uintptr_t minsize = (uintptr_t)-1;
-      uintptr_t minend = (uintptr_t)-1;
-      uintptr_t maxheapend = 0;
-      char segstats[255];
-      /* compute various stats across nodes */
-      for (i=0;i < gasneti_nodes; i++) {
-        if (gasneti_segexch[i].u.heapend > maxheapend)
-          maxheapend = gasneti_segexch[i].u.heapend;
-        if (((uintptr_t)gasneti_segexch[i].seginfo.addr) > maxbase)
-          maxbase = (uintptr_t)gasneti_segexch[i].seginfo.addr;
-        if (gasneti_segexch[i].seginfo.size > maxsize)
-          maxsize = gasneti_segexch[i].seginfo.size;
-        if (gasneti_segexch[i].seginfo.size < minsize)
-          minsize = gasneti_segexch[i].seginfo.size;
-        if ((uintptr_t)gasneti_segexch[i].seginfo.addr + gasneti_segexch[i].seginfo.size < minend)
-          minend = (uintptr_t)gasneti_segexch[i].seginfo.addr + gasneti_segexch[i].seginfo.size;
-      }
-      snprintf(segstats, sizeof(segstats),
-          "Segment stats: "
-          "maxsize = %"PRIuPTR"   "
-          "minsize = %"PRIuPTR"   "
-          "maxbase = "GASNETI_LADDRFMT"   "
-          "minend = "GASNETI_LADDRFMT"   "
-          "maxheapend = "GASNETI_LADDRFMT"   ",
-          maxsize, minsize,
-          GASNETI_LADDRSTR(maxbase), GASNETI_LADDRSTR(minend), GASNETI_LADDRSTR(maxheapend));
-      segstats[sizeof(segstats)-1] = '\0';
-      GASNETI_TRACE_MSG(C, segstats);
-
-      gasneti_maxheapend = maxheapend;
-      gasneti_maxbase = maxbase;
-      #if GASNET_ALIGNED_SEGMENTS
-       /* BG/[PQ] would incorrectly probe the I/O node */
-       #if !defined(PLATFORM_OS_BGQ)
-        if (gasneti_nodes > 1) { 
-          /* bug 2067 - detect if the compute nodes are using Linux's 'intentional VM space randomization'
-           * security feature, which is known to break GASNET_ALIGNED_SEGMENTS, esp at large scale
-           */
-           FILE *fp = fopen("/proc/sys/kernel/randomize_va_space", "r");
-           if (fp) {
-             int VMrand = fgetc(fp);
-             if (VMrand != EOF && VMrand != '0') {
-               const char *wmsg = "WARNING: It appears your compute nodes are using a Linux security feature "
-                                  "which intentionally randomizes the virtual address space, "
-                                  "but GASNet was configured to optimize for congruent address spaces. "
-                                  "You probably need to re-configure with --disable-aligned-segments to avoid "
-                                  "errors at job startup (especially for runs with large node count or shared segment size).";
-               GASNETI_TRACE_MSG(I, wmsg);
-               if (!gasneti_getenv_yesno_withdefault("GASNET_QUIET",0)) {
-                 fprintf(stderr, "%s\n", wmsg);
-                 fflush(stderr);
-               }
-             }
-             fclose(fp);
-           }
-        }   
-       #endif
-        if (maxbase >= minend) { /* no overlap - maybe should be a fatal error... */
-          const char *wmsg = "WARNING: unable to locate overlapping mmap segments in gasneti_segmentInit()"
-            ": perhaps you need to re-configure with --disable-aligned-segments";
-          GASNETI_TRACE_MSG(I, wmsg);
-          if (!gasneti_mynode && !gasneti_getenv_yesno_withdefault("GASNET_QUIET",0)) {
-            fprintf(stderr, "%s\n%s\n", wmsg, segstats);
-            for (i=0;i < gasneti_nodes; i++) {
-              fprintf(stderr, " %i: seg=["GASNETI_LADDRFMT","GASNETI_LADDRFMT"]"
-                              " size=%"PRIuPTR" heapend="GASNETI_LADDRFMT"\n", i,
-                      GASNETI_LADDRSTR(gasneti_segexch[i].seginfo.addr), 
-                      GASNETI_LADDRSTR(((uintptr_t)gasneti_segexch[i].seginfo.addr)+gasneti_segexch[i].seginfo.size), 
-                      gasneti_segexch[i].seginfo.size,
-                      GASNETI_LADDRSTR(gasneti_segexch[i].u.heapend));
-              fflush(stderr);
-            }
-          }
-          gasneti_MaxLocalSegmentSize = 0;
-          gasneti_MaxGlobalSegmentSize = 0;
-        } else {
-          gasneti_MaxLocalSegmentSize = ((uintptr_t)gasneti_segment.addr + gasneti_segment.size) - maxbase;
-          gasneti_MaxGlobalSegmentSize = minend - maxbase;
-        }
-      #else
-        gasneti_MaxLocalSegmentSize = gasneti_segment.size;
-        gasneti_MaxGlobalSegmentSize = minsize;
-      #endif
-    }
-  }
-  #else /* !GASNETI_MMAP_OR_PSHM */
     #if GASNET_ALIGNED_SEGMENTS && !GASNET_CONDUIT_SMP
       #error bad config: dont know how to provide GASNET_ALIGNED_SEGMENTS when !HAVE_MMAP
     #endif
-    /* some systems don't support mmap - 
-       TODO: safe mechanism to determine a true max seg sz, 
-       for now just trust the GASNETI_MALLOCSEGMENT_LIMIT size */
-    gasneti_MaxLocalSegmentSize = GASNETI_PAGE_ALIGNDOWN(MIN(localSegmentLimit, GASNETI_MALLOCSEGMENT_LIMIT));
-    gasneti_MaxGlobalSegmentSize = gasneti_MaxLocalSegmentSize;
   #endif
-  GASNETI_TRACE_PRINTF(C, ("MaxLocalSegmentSize = %"PRIuPTR"   MaxGlobalSegmentSize = %"PRIuPTR,
-                           gasneti_MaxLocalSegmentSize, gasneti_MaxGlobalSegmentSize));
-  gasneti_assert(gasneti_MaxLocalSegmentSize % GASNET_PAGESIZE == 0);
-  gasneti_assert(gasneti_MaxGlobalSegmentSize % GASNET_PAGESIZE == 0);
-  gasneti_assert(gasneti_MaxGlobalSegmentSize <= gasneti_MaxLocalSegmentSize);
-  gasneti_assert(gasneti_MaxLocalSegmentSize <= localSegmentLimit);
 
 #if GASNET_PSHM
   gasneti_unlink_segments();
   gasneti_pshm_cs_leave();
 #endif
+
+  // PART II: Exchange segment info if needed for later stage
+  // TODO-EX: Non-scalable exchange where a reduce is probably sufficient
+
+  #ifdef GASNETI_MMAP_OR_PSHM
+  gasnet_seginfo_t *gasneti_segexch = NULL;
+  if (1) { // TODO-EX: in anticipation of alignment and Max*SegmentSize being runtime choices
+    /* gather the mmap segment location */
+    gasneti_segexch = gasneti_malloc(gasneti_nodes*sizeof(gasnet_seginfo_t));
+    (*exchangefn)(&gasneti_presegment, sizeof(gasnet_seginfo_t), gasneti_segexch);
+  }
+  #endif
+
+  // PART III: Optionally align segments
+
+  #if GASNET_ALIGNED_SEGMENTS && defined(GASNETI_MMAP_OR_PSHM)
+  if (legacy_mode) { // Aligned segments only available to GASNet-1 clients
+    /* BG/Q would incorrectly probe the I/O node */
+    #if !defined(PLATFORM_OS_BGQ)
+      if (gasneti_nodes > 1) {
+        /* bug 2067 - detect if the compute nodes are using Linux's 'intentional VM space randomization'
+         * security feature, which is known to break GASNET_ALIGNED_SEGMENTS, esp at large scale
+         */
+         FILE *fp = fopen("/proc/sys/kernel/randomize_va_space", "r");
+         if (fp) {
+           int VMrand = fgetc(fp);
+           if (VMrand != EOF && VMrand != '0') {
+             const char *wmsg = "WARNING: It appears your compute nodes are using a Linux security feature "
+                                "which intentionally randomizes the virtual address space, "
+                                "but GASNet was configured to optimize for congruent address spaces. "
+                                "You probably need to re-configure with --disable-aligned-segments to avoid "
+                                "errors at job startup (especially for runs with large node count or shared segment size).";
+             GASNETI_TRACE_MSG(I, wmsg);
+             if (!gasneti_getenv_yesno_withdefault("GASNET_QUIET",0)) {
+               fprintf(stderr, "%s\n", wmsg);
+               fflush(stderr);
+             }
+           }
+           fclose(fp);
+         }
+      }
+    #endif // !PLATFORM_OS_BGQ
+
+    // Find highest start and lowest end among all segments
+    uintptr_t maxbase = (uintptr_t)gasneti_segexch[0].addr;
+    uintptr_t minend  = (uintptr_t)gasneti_segexch[0].addr + gasneti_segexch[0].size;
+    for (int i = 1; i < gasneti_nodes; i++) {
+      maxbase = MAX(maxbase, (uintptr_t)gasneti_segexch[i].addr);
+      minend  = MIN(minend,  (uintptr_t)gasneti_segexch[i].addr + gasneti_segexch[i].size);
+    }
+
+    char alignstats[255];
+    snprintf(alignstats, sizeof(alignstats),
+        "Segment alignment stats: "
+        "maxbase = "GASNETI_LADDRFMT"   "
+        "minend = "GASNETI_LADDRFMT"   ",
+        GASNETI_LADDRSTR(maxbase), GASNETI_LADDRSTR(minend));
+    alignstats[sizeof(alignstats)-1] = '\0';
+    GASNETI_TRACE_MSG(C, alignstats);
+
+    if (maxbase >= minend) { /* no overlap - maybe should be a fatal error... */
+      const char *wmsg = "WARNING: unable to locate overlapping mmap segments: "
+                         "perhaps you need to re-configure with --disable-aligned-segments";
+      GASNETI_TRACE_MSG(I, wmsg);
+      if (!gasneti_mynode && !gasneti_getenv_yesno_withdefault("GASNET_QUIET",0)) {
+        fprintf(stderr, "%s\n%s\n", wmsg, alignstats);
+        for (int i = 0; i < gasneti_nodes; i++) {
+          fprintf(stderr, " %i: seg=["GASNETI_LADDRFMT","GASNETI_LADDRFMT"]"
+                          " size=%"PRIuPTR"\n", i,
+                  GASNETI_LADDRSTR(gasneti_segexch[i].addr),
+                  GASNETI_LADDRSTR(((uintptr_t)gasneti_segexch[i].addr)+gasneti_segexch[i].size),
+                  gasneti_segexch[i].size);
+          fflush(stderr);
+        }
+      }
+
+      // Zero my size (in two place) to yield Max{Local,Global}SegmentSize == 0
+      gasneti_presegment.size = 0;
+      gasneti_segexch[gasneti_mynode].size = 0;
+    } else {
+      // Trim sizes to reflect begining at maxbase (for finding MaxGlobalSegmentSize)
+      for (int i = 0; i < gasneti_nodes; i++) {
+        gasneti_segexch[i].size -= (maxbase - (uintptr_t)gasneti_segexch[i].addr);
+      }
+    }
+    gasneti_maxbase = maxbase;
+  }
+  #endif
+
+  // PART IV: Compute Max{Local,Remote}SegmentSize
+
+  if (1) { // TODO-EX: in anticipation of Max{Local,Global}SegmentSize becoming optional
+  #ifdef GASNETI_MMAP_OR_PSHM
+    /* compute min and max sizes across nodes */
+    uintptr_t maxsize = gasneti_segexch[0].size;
+    uintptr_t minsize = gasneti_segexch[0].size;
+    for (int i = 1; i < gasneti_nodes; i++) {
+      maxsize = MAX(maxsize, gasneti_segexch[i].size);
+      minsize = MIN(minsize, gasneti_segexch[i].size);
+    }
+
+    #if GASNET_TRACE
+      char segstats[255];
+      snprintf(segstats, sizeof(segstats),
+          "Segment stats: "
+          "maxsize = %"PRIuPTR"   "
+          "minsize = %"PRIuPTR"   ",
+          maxsize, minsize);
+      segstats[sizeof(segstats)-1] = '\0';
+      GASNETI_TRACE_MSG(C, segstats);
+    #endif
+
+    gasneti_MaxLocalSegmentSize = gasneti_presegment.size;
+    gasneti_MaxGlobalSegmentSize = minsize;
+  #else /* !GASNETI_MMAP_OR_PSHM */
+    /* some systems don't support mmap - 
+       TODO: safe mechanism to determine a true max seg sz, 
+       for now just trust gasneti_max_segsize */
+    gasneti_MaxLocalSegmentSize = GASNETI_PAGE_ALIGNDOWN(MIN(localSegmentLimit, gasneti_max_segsize()));
+    gasneti_MaxGlobalSegmentSize = gasneti_MaxLocalSegmentSize;
+  #endif
+
+    GASNETI_TRACE_PRINTF(C, ("MaxLocalSegmentSize = %"PRIuPTR"   MaxGlobalSegmentSize = %"PRIuPTR,
+                           gasneti_MaxLocalSegmentSize, gasneti_MaxGlobalSegmentSize));
+
+    gasneti_assert_uint(gasneti_MaxLocalSegmentSize % GASNET_PAGESIZE ,==, 0);
+    gasneti_assert_uint(gasneti_MaxGlobalSegmentSize % GASNET_PAGESIZE ,==, 0);
+    gasneti_assert_uint(gasneti_MaxGlobalSegmentSize ,<=, gasneti_MaxLocalSegmentSize);
+    gasneti_assert_uint(gasneti_MaxLocalSegmentSize ,<=, localSegmentLimit);
+  }
+
+  // PART V: Discard the pre-segment if not supporting GASNet-1's attach
+#ifdef GASNETI_MMAP_OR_PSHM
+  if (!legacy_mode) {
+    if (gasneti_presegment.addr) gasneti_do_munmap(gasneti_presegment.addr, gasneti_presegment.size);
+    gasneti_presegment.addr = NULL;
+    gasneti_presegment.size = 0;
+  }
+#endif
+
+#ifdef GASNETI_MMAP_OR_PSHM
+  gasneti_free(gasneti_segexch);
+#endif
+#endif // GASNET_SEGMENT_EVERYTHING
 }
 
 /* ------------------------------------------------------------------------------------ */
 
-void gasneti_segmentAttach(uintptr_t segsize, uintptr_t minheapoffset,
-                           gasnet_seginfo_t *seginfo,
-                           gasneti_bootstrapExchangefn_t exchangefn) {
+static // TODO-EX: static for now, at least
+void gasneti_segmentAttachLocal(gasnet_seginfo_t *segment_p, uintptr_t segsize,
+                                gasneti_bootstrapExchangefn_t exchangefn)
+{
   void *segbase = NULL;
-  gasneti_assert(seginfo);
-  gasneti_assert(exchangefn);
-  gasneti_assert(gasneti_segexch);
-  gasneti_memcheck(gasneti_segexch);
-
-  #if GASNET_PSHM
-    /* Avoid leaking shared memory files in case of non-collective exit between init/attach */
-    gasneti_pshm_cs_enter(&gasneti_cleanup_shm);
-    gasneti_pshmnet_bootstrapBarrier();
-  #endif
 
   #ifdef GASNETI_MMAP_OR_PSHM
-  { /* TODO: this assumes heap grows up */
-    uintptr_t topofheap;
-    #if GASNET_ALIGNED_SEGMENTS
-      #if GASNETI_USE_HIGHSEGMENT
-        { /* the segsizes requested may differ across nodes, so in order to 
-             place the segment as high as possible while maintaining alignment, 
-             we need another all-to-all to calculate the new aligned base address
-           */
-          gasneti_segexch_t se;
-          uintptr_t minsegstart = (uintptr_t)-1;
-          int i;
-
-          /* gather the segsize info again */
-          se.seginfo = gasneti_segment;
-          se.u.segsize_request = segsize;
-          (*exchangefn)(&se, sizeof(gasneti_segexch_t), gasneti_segexch);
-
-          for (i=0;i<gasneti_nodes;i++) {
-            uintptr_t segstart = 
-                ((uintptr_t)gasneti_segexch[i].seginfo.addr + gasneti_segexch[i].seginfo.size) - 
-                 gasneti_segexch[i].u.segsize_request;
-            /*gasneti_assert(gasneti_segexch[i].u.segsize_request >= 0); True by typing */
-            gasneti_assert(segstart >= gasneti_maxbase);
-            if (segstart < minsegstart) minsegstart = segstart;
-          }
-
-          segbase = (void *)minsegstart;
-        }
-      #else /* !GASNETI_USE HIGH_SEGMENTS */
-        segbase = (void *)gasneti_maxbase;
-      #endif /* GASNETI_USE HIGH_SEGMENTS */
-      topofheap = gasneti_maxheapend;
-    #else /* !GASNETI_ALIGNED_SEGMENTS */
-      topofheap = gasneti_myheapend;
-      #if GASNETI_USE_HIGHSEGMENT
-        segbase = (void *)((uintptr_t)gasneti_segment.addr + 
-                           gasneti_segment.size - segsize);
-      #else
-        segbase = gasneti_segment.addr;
-      #endif
-    #endif /* GASNETI_ALIGNED_SEGMENTS */
-
+  {
     if (segsize == 0) { /* no segment */
-      gasneti_do_munmap(gasneti_segment.addr, gasneti_segment.size);
+      if (segment_p->addr && segment_p->size) {
+        gasneti_do_munmap(segment_p->addr, segment_p->size);
+      }
       segbase = NULL; 
-    }
-    else {
-      /* check if segment is above the heap (in its path) and too close */
-      if ((((uintptr_t)segbase + segsize) > topofheap) &&
-        (topofheap + minheapoffset > (uintptr_t)segbase)) {
-        uintptr_t maxsegsz;
-        void *endofseg = (void *)((uintptr_t)gasneti_segment.addr + gasneti_segment.size);
-        /* we're too close to the heap - readjust to prevent collision 
-           note this allows us to return different segsizes on diff nodes
-           (even when we are using GASNET_ALIGNED_SEGMENTS)
-         */
-        segbase = (void *)(topofheap + minheapoffset);
-        if (segbase >= endofseg) 
-          gasneti_fatalerror("minheapoffset too large to accomodate a segment");
-        maxsegsz = (uintptr_t)endofseg - (uintptr_t)segbase;
-        if (segsize > maxsegsz) {
-          GASNETI_TRACE_PRINTF(I, ("WARNING: gasneti_segmentAttach() reducing requested segsize (%"PRIuPTR"=>%"PRIuPTR") to accomodate minheapoffset",
-            segsize, maxsegsz));
-          segsize = maxsegsz;
-        }
-      }
-
-    #if GASNET_PSHM
-      /* Must always recreate the segment*/
-      const int trim = 1;
+    } else if (segment_p->addr) { /* a pre-segment exists */
+    #if GASNET_ALIGNED_SEGMENTS
+      segbase = (void*)gasneti_maxbase;
     #else
-      /* trim final segment if required */
-      const int trim = (gasneti_segment.addr != segbase || gasneti_segment.size != segsize);
+      segbase = segment_p->addr;
     #endif
-
-      if (trim) {
-        gasneti_assert(segbase >= gasneti_segment.addr &&
-               (uintptr_t)segbase + segsize <= (uintptr_t)gasneti_segment.addr + gasneti_segment.size);
-        gasneti_do_munmap(gasneti_segment.addr, gasneti_segment.size);
-      }
-
-      #if GASNETI_BUG3480_WORKAROUND
-        // Barrier between unmap and re-map, via 1-byte exchange (a.k.a. GatherAll).
-        // This is a bit of a hack, but is the most expedient way to get a barrier
-        // with compute-node scope, since gasneti_pshmnet_bootstrapBarrier() may
-        // have a narrower scope when env var GASNET_SUPERNODE_MAXSIZE is set.
-        char a; char *b = gasneti_malloc(gasneti_nodes);
-        (*exchangefn)(&a, sizeof(char), b);
-        gasneti_free(b);
-      #endif
-
-      if (trim) {
+      gasneti_assert_uint(segsize ,<=, segment_p->size);
+      if (GASNET_PSHM || (segment_p->size != segsize) || (segment_p->addr != segbase)) {
+        gasneti_do_munmap(segment_p->addr, segment_p->size);
+        gasneti_bug3480_fence(exchangefn);
 #if GASNETI_PSHM_MAP_FIXED_IGNORED
         segbase =
 #endif
-        gasneti_do_mmap_fixed(segbase, segsize);
+        gasneti_do_mmap_fixed(segbase, segsize, 0);
+      } else {
+        gasneti_bug3480_fence(exchangefn);
+      }
+    } else { /* need segment from scratch */
+      segbase = gasneti_do_mmap(segsize);
+      if (MAP_FAILED == segbase) {
+        // TODO-EX: improve error handling here (e.g. ENOMEM might be returned to caller)
+        int mmap_errno = errno;
+      #if GASNET_PSHM
+        gasneti_cleanup_shm();
+      #endif
+        gasneti_fatalerror("mmap failed for segment of size %"PRIuPTR": %s",
+                           segsize, strerror(mmap_errno));
       }
     }
-    gasneti_free(gasneti_segexch);
-    gasneti_segexch = NULL;
   }
   #else /* !GASNETI_MMAP_OR_PSHM */
     /* for the T3E, and other platforms which don't support mmap */
+    // TODO_EX: if we think non-mmap support remains important:
+    //    + move to segmentInit and use presegment
+    //    + perform full binary search
+    //    + use hidden base (as in gasneti_malloc_aligned) to support free
     segbase = gasneti_malloc_allowfail(segsize + GASNET_PAGESIZE);
     while (!segbase) {
       segsize = GASNETI_PAGE_ALIGNDOWN(segsize/2);
@@ -1684,49 +1809,46 @@ void gasneti_segmentAttach(uintptr_t segsize, uintptr_t minheapoffset,
       segbase = (void *)GASNETI_PAGE_ALIGNUP(segbase);
     }
   #endif /* GASNETI_MMAP_OR_PSHM */
-  gasneti_assert(((uintptr_t)segbase) % GASNET_PAGESIZE == 0);
-  gasneti_assert(segsize % GASNET_PAGESIZE == 0);
+  gasneti_assert_uint(((uintptr_t)segbase) % GASNET_PAGESIZE ,==, 0);
+  gasneti_assert_uint(segsize % GASNET_PAGESIZE ,==, 0);
   GASNETI_TRACE_PRINTF(C, ("Final segment: segbase="GASNETI_LADDRFMT"  segsize=%"PRIuPTR,
     GASNETI_LADDRSTR(segbase), segsize));
 
-  /*  gather segment information */
-  gasneti_segment.addr = segbase;
-  gasneti_segment.size = segsize;
-  (*exchangefn)(&gasneti_segment, sizeof(gasnet_seginfo_t), seginfo);
+  segment_p->addr = segbase;
+  segment_p->size = segsize;
+}
 
-  #if GASNET_ALIGNED_SEGMENTS == 1
-    if (segsize > 0) { int i; /*  check that segments are aligned */
-      for (i=0; i < gasneti_nodes; i++) {
-        if (seginfo[i].size != 0 && seginfo[i].addr != segbase) 
-          gasneti_fatalerror("Failed to acquire aligned segments for GASNET_ALIGNED_SEGMENTS");
-      }
-    }
-  #endif
-
-  #if GASNET_PSHM
-  { /* Map the remote shared segments */
-    int i;
-
+#if GASNET_PSHM
+/* Map the remote shared segments */
+// TODO-EX: need scalable data structure in place of gasneti_nodeinfo
+static // TODO-EX: static for now, at least
+void gasneti_segmentAttachRemote(gasnet_seginfo_t *seginfo)
+{
     gasneti_nodeinfo[gasneti_mynode].offset = 0;
-    gasneti_export_segment(gasneti_segment.addr, gasneti_segment.size);
-    for (i = 0; i < gasneti_pshm_nodes; i++){
-        if (i != gasneti_pshm_mynode) {
-            const gasnet_node_t node = gasneti_nodemap_local[i];
+    gasneti_pshm_rank_t local_rank = 0;
+
+    gasneti_publish_segment(seginfo[gasneti_mynode]);
+
+    // Note that we try to avoid iteration over all nodes.
+    // For the case of supernode peers with contiguous ranks we examine no extra nodes
+    for (gex_Rank_t node = gasneti_pshm_firstnode; local_rank < gasneti_pshm_nodes; node++) {
+        if (! gasneti_pshm_jobrank_in_supernode(node)) continue;
+        gasneti_assert_uint(local_rank ,==, gasneti_pshm_jobrank_to_local_rank(node));
+        if (node != gasneti_mynode) {
+
             const uintptr_t size = seginfo[node].size;
-            void *segbase = gasneti_mmap_remote_shared(NULL, size, i);
+            void *segbase = gasneti_mmap_remote_shared(NULL, size, local_rank);
 
-            gasneti_assert(((uintptr_t)segbase) % GASNET_PAGESIZE == 0);
-            gasneti_assert(size % GASNET_PAGESIZE == 0);
+            gasneti_assert_uint(((uintptr_t)segbase) % GASNET_PAGESIZE ,==, 0);
+            gasneti_assert_uint(size % GASNET_PAGESIZE ,==, 0);
 
-            if (((uintptr_t)segbase >= gasneti_myheapend) &&
-                ((uintptr_t)segbase <  gasneti_myheapend + minheapoffset))
-              gasneti_fatalerror("minheapoffset too large to accomodate a remote segment");
-
+            // TODO-EX: single global gasneti_nodeinfo is a problem (eg for aux vs client)
             gasneti_nodeinfo[node].offset = (uintptr_t)segbase - (uintptr_t)seginfo[node].addr;
 
             GASNETI_TRACE_PRINTF(C, ("Remote segment %d: segbase="GASNETI_LADDRFMT"  segsize=%"PRIuPTR,
                                      (int)node, GASNETI_LADDRSTR(segbase), size));
         }
+        ++local_rank;
     }
 
     /* Barrier #1 ensures all attaches complete before unlinking */
@@ -1734,11 +1856,39 @@ void gasneti_segmentAttach(uintptr_t segsize, uintptr_t minheapoffset,
     gasneti_cleanup_shm();
     /* Barrier #2 ensures unlinking completes before return, so crashes cannot leak segments */
     gasneti_pshmnet_bootstrapBarrier();
-    gasneti_pshm_cs_leave();
-  }
-  #endif /* GASNET_PSHM */
 }
-#endif /* !GASNET_SEGMENT_EVERYTHING */
+#endif /* GASNET_PSHM */
+
+void gasneti_segmentAttach(uintptr_t segsize,
+                           gasnet_seginfo_t *all_segments,
+                           gasneti_bootstrapExchangefn_t exchangefn,
+                           gex_Flags_t flags)
+{
+  gasneti_assert(all_segments);
+  gasneti_assert(exchangefn);
+
+#if GASNET_PSHM
+  /* Avoid leaking shared memory files in case of non-collective exit between init/attach */
+  gasneti_pshm_cs_enter(&gasneti_cleanup_shm);
+  gasneti_pshmnet_bootstrapBarrier();
+#endif
+
+  gasnet_seginfo_t local_segment = {0,0};
+#ifdef GASNETI_MMAP_OR_PSHM
+  /* in "legacy_mode" we consume the presegment, otherwise working from scratch */
+  if (flags & GASNETI_FLAG_INIT_LEGACY) local_segment = gasneti_presegment;
+#endif
+  
+  gasneti_segmentAttachLocal(&local_segment, segsize, exchangefn);
+
+  /*  gather segment information */   // TODO-EX: need scalable replacement
+  (*exchangefn)(&local_segment, sizeof(gasnet_seginfo_t), all_segments);
+
+#if GASNET_PSHM
+  gasneti_segmentAttachRemote(all_segments);
+  gasneti_pshm_cs_leave();
+#endif
+}
 
 /* Used to pass the nodemap information to the client
  * Similar to gasneti_getSegmentInfo(). 
@@ -1756,7 +1906,7 @@ extern int gasneti_getNodeInfo(gasnet_nodeinfo_t *nodeinfo_table, int numentries
   if (gasneti_nodeinfo) {
     memcpy(nodeinfo_table, gasneti_nodeinfo, numentries*sizeof(gasnet_nodeinfo_t));
   } else {
-    gasnet_node_t i;
+    gex_Rank_t i;
 
     for (i=0; i < numentries; i++) {
       nodeinfo_table[i].host = i;
@@ -1770,22 +1920,95 @@ extern int gasneti_getNodeInfo(gasnet_nodeinfo_t *nodeinfo_table, int numentries
   return GASNET_OK;
 }
 
+// Provides information about supernode peers (the caller's "neighborhood")
+//
+// TODO: Could improve "safety" by not exposing addr of critical internal data
+// TODO: Could reduce memory use if array lived in shared memory
+extern void gex_System_QueryNbrhdInfo(
+            gex_RankInfo_t         **info_p,
+            gex_Rank_t             *info_count_p,
+            gex_Rank_t             *my_info_index_p)
+{
+  GASNETI_CHECKINIT();
+#if GASNET_PSHM
+  if (info_p) {
+    gasneti_static_assert(sizeof(gex_RankInfo_t) == sizeof(gex_Rank_t));
+    *info_p = (gex_RankInfo_t *) gasneti_mysupernode.nodes;
+  }
+  if (info_count_p) {
+    *info_count_p = gasneti_mysupernode.node_count;
+  }
+  if (my_info_index_p) {
+    *my_info_index_p = gasneti_mysupernode.node_rank;
+  }
+#else
+  if (info_p) {
+    gasneti_static_assert(sizeof(gex_RankInfo_t) == sizeof(gex_Rank_t));
+    *info_p = (gex_RankInfo_t *) &gasneti_mynode;
+  }
+  if (info_count_p) {
+    *info_count_p = 1;
+  }
+  if (my_info_index_p) {
+    *my_info_index_p = 0;
+  }
+#endif
+}
+
+// Provides information about compute-node peers (same O/S image, files system, etc.)
+//
+// TODO: Could improve "safety" by not exposing addr of critical internal data
+// TODO: Could reduce memory use if array lived in shared memory
+extern void gex_System_QueryHostInfo(
+            gex_RankInfo_t         **info_p,
+            gex_Rank_t             *info_count_p,
+            gex_Rank_t             *my_info_index_p)
+{
+  GASNETI_CHECKINIT();
+  if (info_p) {
+    gasneti_static_assert(sizeof(gex_RankInfo_t) == sizeof(gex_Rank_t));
+    *info_p = (gex_RankInfo_t *) gasneti_myhost.nodes;
+  }
+  if (info_count_p) {
+    *info_count_p = gasneti_myhost.node_count;
+  }
+  if (my_info_index_p) {
+    *my_info_index_p = gasneti_myhost.node_rank;
+  }
+}
+
+extern void gex_System_QueryMyPosition(
+            gex_Rank_t *nbrhd_set_size_p,
+            gex_Rank_t *nbrhd_set_rank_p,
+            gex_Rank_t *host_set_size_p,
+            gex_Rank_t *host_set_rank_p)
+{
+  GASNETI_CHECKINIT();
+  if (nbrhd_set_size_p) {
+    *nbrhd_set_size_p = gasneti_mysupernode.grp_count;
+  }
+  if (nbrhd_set_rank_p) {
+    *nbrhd_set_rank_p = gasneti_mysupernode.grp_rank;
+  }
+  if (host_set_size_p) {
+    *host_set_size_p = gasneti_myhost.grp_count;
+  }
+  if (host_set_rank_p) {
+    *host_set_rank_p = gasneti_myhost.grp_rank;
+  }
+}
+
 /* ------------------------------------------------------------------------------------ */
 /* seginfo initialization and manipulation */
 extern int gasneti_getSegmentInfo(gasnet_seginfo_t *seginfo_table, int numentries) {
   GASNETI_CHECKATTACH();
+  gasneti_memcheck(gasneti_seginfo_aux);
   gasneti_memcheck(gasneti_seginfo);
-  gasneti_memcheck(gasneti_seginfo_client);
-  gasneti_memcheck(gasneti_seginfo_ub);
-  gasneti_memcheck(gasneti_seginfo_client_ub);
   #if GASNET_DEBUG /*  sanity checks */
     #if GASNET_SEGMENT_EVERYTHING
     { int i; /*  sanity check seg-everything condition */
       for (i=0; i < gasneti_nodes; i++) {
         gasneti_assert(gasneti_seginfo[i].addr == 0 && gasneti_seginfo[i].size == (uintptr_t)-1);
-        gasneti_assert(gasneti_seginfo_client[i].addr == 0 && gasneti_seginfo_client[i].size == (uintptr_t)-1);
-        gasneti_assert(gasneti_seginfo_ub[i] == (void *)(uintptr_t)-1);
-        gasneti_assert(gasneti_seginfo_client_ub[i] == (void *)(uintptr_t)-1);
       }
     }
     #else
@@ -1794,30 +2017,28 @@ extern int gasneti_getSegmentInfo(gasnet_seginfo_t *seginfo_table, int numentrie
       void *segbase = NULL;
       #endif
       for (i=0; i < gasneti_nodes; i++) {
-        if (gasneti_seginfo[i].size == 0) {
+        if (gasneti_seginfo_aux[i].size == 0) {
+          gasneti_assert(gasneti_seginfo_aux[i].addr == 0);
           gasneti_assert(gasneti_seginfo[i].addr == 0);
-          gasneti_assert(gasneti_seginfo_client[i].addr == 0);
-          gasneti_assert(gasneti_seginfo_ub[i] == 0);
-          gasneti_assert(gasneti_seginfo_client_ub[i] == 0);
         } else {
           #if GASNET_ALIGNED_SEGMENTS
+          if (gasneti_maxbase) { // non-zero IFF gasneti_segmentInit() passed GASNETI_FLAG_INIT_LEGACY
             /*  sanity check that segments are aligned */
             if (!segbase) segbase = gasneti_seginfo[i].addr;
-            else if (gasneti_seginfo[i].addr != segbase)  
+            else if (gasneti_seginfo[i].addr != segbase)
               gasneti_fatalerror("Failed sanity check for aligned segments with GASNET_ALIGNED_SEGMENTS");
+          }
           #endif
-          /* sanity check _ub caches */
-          gasneti_assert(gasneti_seginfo_ub[i] == (void*)(((uintptr_t)gasneti_seginfo[i].addr) + gasneti_seginfo[i].size));
-          gasneti_assert(gasneti_seginfo_client_ub[i] == (void*)(((uintptr_t)gasneti_seginfo_client[i].addr) + gasneti_seginfo_client[i].size));
-          if (gasneti_seginfo_client[i].size > 0) {
-            gasneti_assert(gasneti_seginfo[i].addr <= gasneti_seginfo_client[i].addr);
-            gasneti_assert(gasneti_seginfo_ub[i] >= gasneti_seginfo_client_ub[i]);
+          /*  sanity check that client and aux segments do not overlap */
+          if (gasneti_seginfo[i].size > 0) {
+            uintptr_t seg_ub = (uintptr_t)gasneti_seginfo[i].addr + gasneti_seginfo[i].size;
+            uintptr_t aux_ub = (uintptr_t)gasneti_seginfo_aux[i].addr + gasneti_seginfo_aux[i].size;
+            gasneti_assert((seg_ub <= (uintptr_t)gasneti_seginfo_aux[i].addr) ||
+                           (aux_ub <= (uintptr_t)gasneti_seginfo[i].addr));
           }
           /* misc segment sanity checks */
-          gasneti_assert(((uintptr_t)gasneti_seginfo[i].addr) % GASNET_PAGESIZE == 0);
-          gasneti_assert(((uintptr_t)gasneti_seginfo_client[i].addr) % GASNET_PAGESIZE == 0);
-          gasneti_assert(((uintptr_t)gasneti_seginfo_ub[i]) % GASNET_PAGESIZE == 0);
-          gasneti_assert(((uintptr_t)gasneti_seginfo_client_ub[i]) % GASNET_PAGESIZE == 0);
+          gasneti_assert_uint(((uintptr_t)gasneti_seginfo_aux[i].addr) % GASNET_PAGESIZE ,==, 0);
+          gasneti_assert_uint(((uintptr_t)gasneti_seginfo[i].addr) % GASNET_PAGESIZE ,==, 0);
         }
       }
     }
@@ -1829,52 +2050,52 @@ extern int gasneti_getSegmentInfo(gasnet_seginfo_t *seginfo_table, int numentrie
   }
   gasneti_assert(seginfo_table);
   if_pf (numentries > gasneti_nodes) numentries = gasneti_nodes;
-  memcpy(seginfo_table, gasneti_seginfo_client, numentries*sizeof(gasnet_seginfo_t));
+  memcpy(seginfo_table, gasneti_seginfo, numentries*sizeof(gasnet_seginfo_t));
   return GASNET_OK;
 }
-/* ------------------------------------------------------------------------------------ */
-// Unmap vnet and cross-mapped segments.
-#if GASNET_PSHM
-extern void gasneti_pshm_fini(void) {
-  #if PLATFORM_OS_WSL || PLATFORM_OS_LINUX
-    if (!gasneti_platform_isWSL()) return;
 
-    // WSL cleanup code
-    if (gasneti_attach_done) {
-      int lrank = 0;
-      for (gasnet_node_t n = 0; n < gasneti_nodes; ++n) {
-        if (!gasneti_pshm_in_supernode(n)) continue;
-        void *segbase = (void*)((uintptr_t)gasneti_seginfo[n].addr + gasneti_nodeinfo[n].offset);
-        // NOTE: assumes OK to "remote" unmap local segment - may not be appropriate for XPMEM
-        gasneti_munmap_remote(lrank, segbase, gasneti_seginfo[n].size);
-        lrank += 1;
-      }
+int gasneti_Segment_QueryBound(
+                        gex_TM_t tm,
+                        gex_Rank_t rank,
+                        void **owneraddr_p,
+                        void **localaddr_p,
+                        uintptr_t *size_p)
+{
+  // Trivial implementation using legacy data structures and assumptions.
+  gex_Rank_t jobrank = gasneti_e_tm_rank_to_jobrank(tm, rank);
+
+  // TODO-EX: cannot yet tell no segment from zero-length segment
+  gasneti_assert(gasneti_seginfo);
+  if (!gasneti_seginfo[jobrank].addr) return 1; // No (bound) segment
+
+  if (owneraddr_p) {
+    *owneraddr_p = gasneti_seginfo[jobrank].addr;
+  }
+
+  if (size_p){
+    *size_p = gasneti_seginfo[jobrank].size;
+  }
+
+  if (localaddr_p) {
+    if (GASNETI_NBRHD_JOBRANK_IS_LOCAL(jobrank)) {
+    #if GASNET_PSHM
+      gasneti_assert(gasneti_nodeinfo);
+      *localaddr_p = (void*)((uintptr_t)gasneti_seginfo[jobrank].addr + gasneti_nodeinfo[jobrank].offset);
+    #else
+      *localaddr_p = gasneti_seginfo[jobrank].addr;
+    #endif
     } else {
-      gasneti_munmap(gasneti_segment.addr, gasneti_segment.size);
+      *localaddr_p = NULL;
     }
-    if (gasneti_vnet_addr) {
-      gasneti_munmap(gasneti_vnet_addr, gasneti_vnet_size);
-    }
-  #else
-    // Not currently supported (or thought to be necessary) on platforms other than WSL
-  #endif
+  }
+
+  return 0;
 }
-#endif // PSHM
+
 /* ------------------------------------------------------------------------------------ */
 /* Aux-seg support */
 
-#include <gasnet_core_internal.h> /* for _hidx_gasnetc_auxseg_reqh */
-
-/* if the client requestsz is power-of-two, 
-   reduce the client request to maintain a power-of-two full segsize */
-#ifndef GASNETI_AUXSEG_PRESERVE_POW2_FULLSEGSZ
-#define GASNETI_AUXSEG_PRESERVE_POW2_FULLSEGSZ 0
-#endif
-
-/* force the client segment to appear at the base of the fullseg */
-#ifndef GASNETI_FORCE_CLIENTSEG_TO_BASE
-#define GASNETI_FORCE_CLIENTSEG_TO_BASE 0
-#endif
+#include <gasnet_core_internal.h> /* for GASNETC_AUXSEG_{FNS,DECLS} */
 
 /* lists of internal functions that want auxseg (with trailing commas) */
 /* conduit-specific auxseg fns */
@@ -1914,13 +2135,9 @@ gasneti_auxsegregfn_t gasneti_auxsegfns[] = {
 /* page-aligned size of auxseg */
 static gasneti_auxseg_request_t gasneti_auxseg_total_alignedsz = { 0, 0 };
 static gasneti_auxseg_request_t *gasneti_auxseg_alignedsz = NULL;
-static uintptr_t gasneti_auxseg_sz = 0;
-static uintptr_t gasneti_auxseg_client_request_sz = 0;
 
 #if GASNET_DEBUG
-  /* spawner hint of our auxseg requirements */
   #define GASNETI_AUXSEG_DUMMY_SZ    463
-  GASNETI_IDENT(gasneti_dummy_auxseg_IdentString, "$GASNetAuxSeg_dummy: "_STRINGIFY(GASNETI_AUXSEG_DUMMY_SZ)" $");
 
   gasneti_auxseg_request_t gasneti_auxseg_dummy(gasnet_seginfo_t *auxseg_info) {
     gasneti_auxseg_request_t retval;
@@ -1940,15 +2157,15 @@ static uintptr_t gasneti_auxseg_client_request_sz = 0;
     }
     for (i=0; i < gasneti_nodes; i++) {
       gasneti_assert(auxseg_save[i].addr);
-      gasneti_assert(((uintptr_t)auxseg_save[i].addr) % GASNETI_CACHE_LINE_BYTES == 0);
-      gasneti_assert(((uintptr_t)auxseg_save[i].addr) % 8 == 0);
-      gasneti_assert(auxseg_save[i].size >= retval.minsz);
-      gasneti_assert(auxseg_save[i].size <= retval.optimalsz);
+      gasneti_assert_uint(((uintptr_t)auxseg_save[i].addr) % GASNETI_CACHE_LINE_BYTES ,==, 0);
+      gasneti_assert_uint(((uintptr_t)auxseg_save[i].addr) % 8 ,==, 0);
+      gasneti_assert_uint(auxseg_save[i].size ,>=, retval.minsz);
+      gasneti_assert_uint(auxseg_save[i].size ,<=, retval.optimalsz);
     }
     for (i=0; i < auxseg_save[gasneti_mynode].size; i++) {
       uint8_t *p = (uint8_t *)auxseg_save[gasneti_mynode].addr;
       #define AUXSEG_TESTVAL(i) ((uint8_t)(8|((i+0x3F)^(i>>8))))
-      if (selftest) gasneti_assert(p[i] == AUXSEG_TESTVAL(i));
+      if (selftest) gasneti_assert_uint(p[i] ,==, AUXSEG_TESTVAL(i));
       else p[i] = AUXSEG_TESTVAL(i);
       #undef AUXSEG_TESTVAL
     }
@@ -1956,17 +2173,21 @@ static uintptr_t gasneti_auxseg_client_request_sz = 0;
   }
 #endif
 
-/* collect required auxseg sizes and subtract them from the values to report to client */
-void gasneti_auxseg_init(void) {
-  int i;
-  int numfns = (sizeof(gasneti_auxsegfns)/sizeof(gasneti_auxsegregfn_t))-1;
+// collect and return optimal auxseg size sum, padded to page size
+// may be called multiple times, subsequent calls return cached value
+uintptr_t gasneti_auxseg_preinit(void) {
+  static uintptr_t gasneti_auxseg_sz = 0;
+  if (gasneti_auxseg_sz) return gasneti_auxseg_sz; // only the first call computes requirements
 
+  const int numfns = (sizeof(gasneti_auxsegfns)/sizeof(gasneti_auxsegregfn_t))-1;
   gasneti_assert(gasneti_auxsegfns[numfns] == NULL);
-  if (numfns > 0)
+  if (numfns > 0) {
     gasneti_auxseg_alignedsz = gasneti_calloc(numfns,sizeof(gasneti_auxseg_request_t));
+    gasneti_leak(gasneti_auxseg_alignedsz);
+  }
 
   /* collect requests */
-  for (i=0; i < numfns; i++) {
+  for (int i = 0; i < numfns; i++) {
     gasneti_auxseg_alignedsz[i] = (gasneti_auxsegfns[i])(NULL);
     gasneti_auxseg_total_alignedsz.minsz += 
       GASNETI_ALIGNUP(gasneti_auxseg_alignedsz[i].minsz,GASNETI_CACHE_LINE_BYTES);
@@ -1974,229 +2195,165 @@ void gasneti_auxseg_init(void) {
       GASNETI_ALIGNUP(gasneti_auxseg_alignedsz[i].optimalsz,GASNETI_CACHE_LINE_BYTES);
   }
   gasneti_auxseg_total_alignedsz.minsz = 
-    GASNETI_PAGE_ALIGNUP(gasneti_auxseg_total_alignedsz.minsz);
+    gasneti_mmap_alignup(gasneti_auxseg_total_alignedsz.minsz);
   gasneti_auxseg_total_alignedsz.optimalsz = 
-    GASNETI_PAGE_ALIGNUP(gasneti_auxseg_total_alignedsz.optimalsz);
+    gasneti_mmap_alignup(gasneti_auxseg_total_alignedsz.optimalsz);
 
   gasneti_auxseg_sz = gasneti_auxseg_total_alignedsz.optimalsz;
-  #if GASNET_SEGMENT_EVERYTHING
-    GASNETI_TRACE_PRINTF(C, ("gasneti_auxseg_init(): gasneti_auxseg_sz = %"PRIuPTR, gasneti_auxseg_sz));
-  #else
-    /* TODO: implement request downsizing down to minsz */
-    if (gasneti_auxseg_sz >= gasneti_MaxGlobalSegmentSize)
-      gasneti_fatalerror("GASNet internal auxseg size (%"PRIuPTR" bytes) exceeds available segment size (%"PRIuPTR" bytes)",
-        gasneti_auxseg_sz, gasneti_MaxGlobalSegmentSize);
-
-    #if GASNETI_AUXSEG_PRESERVE_POW2_FULLSEGSZ
-      if (!GASNETI_POWEROFTWO(gasneti_MaxLocalSegmentSize) && 
-          !GASNETI_POWEROFTWO(gasneti_MaxGlobalSegmentSize)) 
-    #endif
-      { /* could relax single-value restriction on auxseg registration size by doing another exchange here */
-        gasneti_MaxLocalSegmentSize -= gasneti_auxseg_sz;
-        gasneti_MaxGlobalSegmentSize -= gasneti_auxseg_sz;
-      }
-    GASNETI_TRACE_PRINTF(C, ("gasneti_auxseg_init(): gasneti_auxseg_sz = %"PRIuPTR": "
-                   "MaxLocalSegmentSize = %"PRIuPTR"   MaxGlobalSegmentSize = %"PRIuPTR,
-                   gasneti_auxseg_sz, gasneti_MaxLocalSegmentSize, gasneti_MaxGlobalSegmentSize));
-  #endif
-  gasneti_assert(gasneti_auxseg_sz % GASNET_PAGESIZE == 0);
-}
-
-#if GASNET_SEGMENT_EVERYTHING
-  static gasnet_seginfo_t _gasneti_my_auxseg;
-  static volatile gasnet_seginfo_t *_gasneti_auxseg_everything = NULL;
-  static gasneti_weakatomic32_t _gasneti_auxseg_rcvd[32]; // Implicitly zero-initialized
-
-  extern void gasnetc_auxseg_reqh(gasnet_token_t token, void *buf, size_t nbytes, gasnet_handlerarg_t arg0) {
-    gasneti_assert(_gasneti_auxseg_everything != NULL);
-    const int step = arg0 & 0x1f; // Max 2^5 steps            => 2^32 nodes
-    const int seq = arg0 >> 5;    // Max 2^27 fragments * 512 => 64GB (and max sent is len*nodes/2)
-    const int distance = (1 << step);
-    gasneti_assert(distance < gasneti_nodes);
-    uint8_t *dest = (uint8_t*)(_gasneti_auxseg_everything + distance) + (seq * gasnet_AMMaxMedium());
-    gasneti_assert(dest + nbytes <= (uint8_t*)(_gasneti_auxseg_everything + gasneti_nodes));
-    memcpy(dest, buf, nbytes);
-    gasneti_weakatomic32_increment(&_gasneti_auxseg_rcvd[step], GASNETI_ATOMIC_REL);
-  }
-
-  static void gasneti_auxseg_exchange(void) {
-    const size_t len = sizeof(gasnet_seginfo_t);
-    uint8_t *dest = (uint8_t *)_gasneti_auxseg_everything;
-
-    /* copy in local contribution */
-    memcpy(dest, &_gasneti_my_auxseg, len);
-
-    /* Bruck's concatenation algorithm: */
-    unsigned int step, distance;
-    for (step = 0, distance = 1; distance < gasneti_nodes; ++step, distance *= 2) {
-      gasnet_node_t peer = (distance <= gasneti_mynode) ? gasneti_mynode - distance
-                                                        : gasneti_mynode + (gasneti_nodes - distance);
-      size_t nbytes = len * MIN(distance, gasneti_nodes - distance);
-      size_t offset = 0;
-      uint32_t seq = 0;
-
-      /* Send payload using AMMedium(s) */
-      do {
-        const size_t to_xfer = MIN(nbytes, gasnet_AMMaxMedium());
-        GASNETI_SAFE(gasnet_AMRequestMedium1(peer, _hidx_gasnetc_auxseg_reqh,
-                                             dest + offset, to_xfer, step | (seq << 5)));
-        ++seq;
-        offset += to_xfer;
-        nbytes -= to_xfer;
-      } while (nbytes);
-
-      /* Poll until we have received the same number of messages as we sent */
-      GASNET_BLOCKUNTIL((int)gasneti_weakatomic32_read(&_gasneti_auxseg_rcvd[step], 0) >= (int)seq);
-      gasneti_assert((int)gasneti_weakatomic32_read(&_gasneti_auxseg_rcvd[step], 0) == (int)seq);
-    }
-
-    /* Copy to final destination while performing the rotation */
-    uint8_t *temp = gasneti_malloc(len * gasneti_nodes);
-    const size_t a = len * (gasneti_nodes - gasneti_mynode);
-    const size_t b = len * gasneti_mynode;
-    memcpy(temp, dest + a, b);
-    memcpy(temp + b, dest, a);
-    gasneti_free(dest);
-    _gasneti_auxseg_everything = (volatile gasnet_seginfo_t *)temp;
-
-    gasneti_assert(! memcmp((void*)(_gasneti_auxseg_everything + gasneti_mynode), &_gasneti_my_auxseg, len));
-  }
-#endif
-
-/* consume the client's segsize request and return the 
-   value to acquire including auxseg requirements */
-uintptr_t gasneti_auxseg_preattach(uintptr_t client_request_sz) {
-  uintptr_t result;
-  gasneti_assert(gasneti_auxseg_sz % GASNET_PAGESIZE == 0);
-  #if GASNET_SEGMENT_EVERYTHING
-  { /* malloc page/cache aligned space for gasneti_auxseg_sz */
-    void *auxseg = gasneti_malloc(gasneti_auxseg_sz+MAX(GASNETI_CACHE_LINE_BYTES, GASNET_PAGESIZE));
-    _gasneti_auxseg_everything = gasneti_malloc(gasneti_nodes*sizeof(gasnet_seginfo_t));
-    _gasneti_my_auxseg.addr = (void *)GASNETI_ALIGNUP(auxseg,MAX(GASNETI_CACHE_LINE_BYTES, GASNET_PAGESIZE));
-    _gasneti_my_auxseg.size = gasneti_auxseg_sz;
-    result = 0;
-  }
-  #else
-    gasneti_assert(client_request_sz % GASNET_PAGESIZE == 0);
-    gasneti_auxseg_client_request_sz = client_request_sz;
-    #if GASNETI_AUXSEG_PRESERVE_POW2_FULLSEGSZ
-      if (GASNETI_POWEROFTWO(client_request_sz)) { 
-        result = client_request_sz;
-        while (result < (client_request_sz+gasneti_auxseg_sz) && result*2 <= gasneti_MaxGlobalSegmentSize)
-          result *= 2;
-      } else
-    #endif
-        result = client_request_sz + gasneti_auxseg_sz;
-  #endif
-  GASNETI_TRACE_PRINTF(C,("gasneti_auxseg_preattach(%"PRIuPTR") => %"PRIuPTR,
-                          client_request_sz, result));
-  return result;
+  GASNETI_TRACE_PRINTF(C, ("gasneti_auxseg_preinit(): gasneti_auxseg_sz = %"PRIuPTR, gasneti_auxseg_sz));
+  gasneti_assert_uint(gasneti_auxseg_sz % gasneti_mmap_pagesize() ,==, 0);
+  return gasneti_auxseg_sz;
 }
 
 /* provide auxseg to GASNet components and init secondary segment arrays 
-   requires gasneti_seginfo has been initialized to the correct values
-   exchangefn is used only for GASNET_SEGMENT_EVERYTHING and may be NULL
+   requires input seginfo has been initialized to the correct values
  */
-void gasneti_auxseg_attach(gasneti_bootstrapExchangefn_t exchangefn) {
-  gasnet_seginfo_t *si;
-  int numfns = (sizeof(gasneti_auxsegfns)/sizeof(gasneti_auxsegregfn_t))-1;
-  int i,j;
-
+void gasneti_auxseg_attach(gasnet_seginfo_t *auxseg_info) {
+  const int numfns = (sizeof(gasneti_auxsegfns)/sizeof(gasneti_auxsegregfn_t))-1;
   gasneti_assert(gasneti_auxsegfns[numfns] == NULL);
-  gasneti_seginfo_client = gasneti_calloc(gasneti_nodes, sizeof(gasnet_seginfo_t));
-  gasneti_leak(gasneti_seginfo_client);
-
-  /* point si at the auxseg */
-  #if GASNET_SEGMENT_EVERYTHING
-    /* exchange locations into _gasneti_auxseg_everything */
-    gasneti_assert(_gasneti_auxseg_everything);
-    if (exchangefn) {
-      (*exchangefn)(&_gasneti_my_auxseg, sizeof(gasnet_seginfo_t), (void*)_gasneti_auxseg_everything);
-    } else {
-      gasneti_auxseg_exchange();
-    }
-    si = (gasnet_seginfo_t *)_gasneti_auxseg_everything;
-  #else
-    si = gasneti_malloc(gasneti_nodes*sizeof(gasnet_seginfo_t));
-    /* break up fullseg into client seg and auxseg */
-    for (j=0; j < gasneti_nodes; j++) {
-      #if GASNETI_FORCE_CLIENTSEG_TO_BASE
-        gasneti_seginfo_client[j].addr = gasneti_seginfo[j].addr;
-        gasneti_seginfo_client[j].size = gasneti_seginfo[j].size - gasneti_auxseg_sz;
-        si[j].addr = (void *)(((uintptr_t)gasneti_seginfo_client[j].addr) + gasneti_seginfo_client[j].size);
-        si[j].size = gasneti_auxseg_sz;
-      #else /* place auxseg at bottom of fullseg by default, to reduce chance of client overflow damage */
-        gasneti_seginfo_client[j].addr = (void *)(((uintptr_t)gasneti_seginfo[j].addr) + gasneti_auxseg_sz);
-        gasneti_seginfo_client[j].size = gasneti_seginfo[j].size - gasneti_auxseg_sz;
-        si[j].addr = gasneti_seginfo[j].addr;
-        si[j].size = gasneti_auxseg_sz;
-      #endif
-      #if GASNETI_AUXSEG_PRESERVE_POW2_FULLSEGSZ 
-        /* bug 361: cannot safely do this in general without a bootstrap exchange, because segsize requests may differ across conduits */
-        /* trim client segment, which may be inflated due to GASNETI_AUXSEG_PRESERVE_POW2_FULLSEGSZ */
-        if (gasneti_seginfo_client[j].size > gasneti_auxseg_client_request_sz)
-          gasneti_seginfo_client[j].size = gasneti_auxseg_client_request_sz;
-      #endif
-    }
-  #endif
-
-  gasneti_seginfo_ub = gasneti_malloc(gasneti_nodes*sizeof(void *));
-  gasneti_leak(gasneti_seginfo_ub);
-  gasneti_seginfo_client_ub = gasneti_malloc(gasneti_nodes*sizeof(void *));
-  gasneti_leak(gasneti_seginfo_client_ub);
-
-  for (i=0; i < gasneti_nodes; i++) {
-    #if GASNET_SEGMENT_EVERYTHING
-      gasneti_assert(gasneti_seginfo[i].addr == 0 && gasneti_seginfo[i].size == (uintptr_t)-1);
-      gasneti_seginfo_client[i].addr = 0;
-      gasneti_seginfo_client[i].size = (uintptr_t)-1;
-      gasneti_seginfo_ub[i] = (void *)(uintptr_t)-1;
-      gasneti_seginfo_client_ub[i] = (void *)(uintptr_t)-1;
-    #else
-      if (gasneti_seginfo_client[i].size == 0) {
-        gasneti_seginfo_client[i].addr = 0;
-        gasneti_seginfo_client_ub[i] = 0;
-      } else {
-        gasneti_seginfo_client_ub[i] = (void*)(((uintptr_t)gasneti_seginfo_client[i].addr) + gasneti_seginfo_client[i].size);
-      }
-      if (gasneti_seginfo[i].size == 0) {
-        gasneti_seginfo_ub[i] = 0;
-      } else {
-        gasneti_seginfo_ub[i] = (void*)(((uintptr_t)gasneti_seginfo[i].addr) + gasneti_seginfo[i].size);
-      }
-    #endif
-  }
-  GASNETI_TRACE_PRINTF(C,("gasneti_auxseg_attach() clientsegment => ("GASNETI_LADDRFMT".."GASNETI_LADDRFMT") (%"PRIuPTR" bytes)",
-                  GASNETI_LADDRSTR(gasneti_seginfo_client[gasneti_mynode].addr), 
-                  GASNETI_LADDRSTR(gasneti_seginfo_client_ub[gasneti_mynode]),
-                  gasneti_seginfo_client[gasneti_mynode].size));
 
   if (numfns > 0) {
-    for (j=0; j < gasneti_nodes; j++) {
-      gasneti_assert((uintptr_t)si[j].addr % GASNET_PAGESIZE == 0);
-      gasneti_assert((uintptr_t)si[j].addr % GASNETI_CACHE_LINE_BYTES == 0);
-      gasneti_assert((uintptr_t)si[j].size == gasneti_auxseg_sz);
+    gasnet_seginfo_t *si = gasneti_malloc(gasneti_nodes*sizeof(gasnet_seginfo_t));
+    memcpy(si, auxseg_info, gasneti_nodes*sizeof(gasnet_seginfo_t));
+
+    uintptr_t auxseg_sz = auxseg_info[gasneti_mynode].size;
+
+    for (int j = 0; j < gasneti_nodes; j++) {
+      gasneti_assert_uint((uintptr_t)si[j].addr % GASNET_PAGESIZE ,==, 0);
+      gasneti_assert_uint((uintptr_t)si[j].addr % GASNETI_CACHE_LINE_BYTES ,==, 0);
+      gasneti_assert_uint((uintptr_t)si[j].size ,==, auxseg_sz);
       si[j].size = gasneti_auxseg_alignedsz[0].optimalsz;
     }
 
-    for (i=0; i < numfns; i++) {
+    for (int i = 0; i < numfns; i++) {
       GASNETI_TRACE_PRINTF(C,("gasneti_auxseg_attach() fn[%i] => ("GASNETI_LADDRFMT".."GASNETI_LADDRFMT") (%"PRIuPTR" bytes)",
                       i, GASNETI_LADDRSTR(si[gasneti_mynode].addr), 
                       GASNETI_LADDRSTR(((uintptr_t)si[gasneti_mynode].addr)+si[gasneti_mynode].size),
                       si[gasneti_mynode].size));
       (gasneti_auxsegfns[i])(si);
       if (i+1 < numfns) {
-        for (j=0; j < gasneti_nodes; j++) {
+        for (int j = 0; j < gasneti_nodes; j++) {
           si[j].addr = (void *)(((uintptr_t)si[j].addr) + gasneti_auxseg_alignedsz[i].optimalsz);
           si[j].addr = (void *)GASNETI_ALIGNUP(si[j].addr,GASNETI_CACHE_LINE_BYTES);
           si[j].size = gasneti_auxseg_alignedsz[i+1].optimalsz;
         }
       }
     }
+    gasneti_free(si);
   }
-  gasneti_free(si);
-  gasneti_leak(gasneti_auxseg_alignedsz);
+
+#if GASNET_PSHM // TODO-EX: this is a hack until AttachRemote can set the right offset array
+  for (int i = 0; i < gasneti_pshm_nodes; i++){
+    const gex_Rank_t node = gasneti_nodemap_local[i];
+    gasneti_nodeinfo[node].auxoffset = gasneti_nodeinfo[node].offset;
+  }
+#endif
 }
+
+/* common case use of gasneti_auxseg_{prepare,attach} for conduits using gasneti_segmentAttach() */
+void gasneti_auxsegAttach(uint64_t maxsize, gasneti_bootstrapExchangefn_t exchangefn)
+{
+  uintptr_t auxsize = gasneti_auxseg_preinit();
+  if (auxsize > maxsize) {
+    /* TODO: implement request downsizing down to minsz */
+    gasneti_fatalerror("GASNet internal auxseg size (%"PRIuPTR" bytes) exceeds available limit (%"PRIu64" bytes)",
+                       auxsize, maxsize);
+  }
+  gasneti_leak(gasneti_seginfo_aux    = gasneti_malloc(gasneti_nodes*sizeof(gasnet_seginfo_t)));
+  gasneti_segmentAttach(auxsize, gasneti_seginfo_aux, exchangefn, 0);
+  gasneti_auxseg_attach(gasneti_seginfo_aux);
+  gasneti_assert_uint(gasneti_seginfo_aux[gasneti_mynode].size ,==, auxsize);
+}
+
+/* ------------------------------------------------------------------------------------ */
+// AM-based gasneti_bootstrapExchangefn_t
+
+static gasneti_weakatomic32_t gasneti_exchg_rcvd[2][32]; // Implicitly zero-initialized
+
+static uint8_t *_gasneti_exchg_data[2] = {NULL,NULL};
+static uint8_t *gasneti_exchg_data(int phase, size_t elemsz) {
+  uint8_t *data = _gasneti_exchg_data[phase];
+  if_pf (! data) {
+    static gasneti_mutex_t lock = GASNETI_MUTEX_INITIALIZER;
+    gasneti_mutex_lock(&lock);
+    data = _gasneti_exchg_data[phase];
+    if (! data) {
+      data = gasneti_malloc(elemsz * gasneti_nodes);
+      _gasneti_exchg_data[phase] = data;
+    }
+    gasneti_mutex_unlock(&lock);
+  }
+  return data;
+}
+
+extern void gasnetc_exchg_reqh(gex_Token_t token, void *buf, size_t nbytes,
+                               gex_AM_Arg_t arg0, gex_AM_Arg_t elemsz) {
+    const int phase = arg0 & 1;
+    const int step = (arg0 >> 1) & 0x1f; // Max 2^5 steps            => 2^32 nodes
+    const int seq  = (arg0 >> 6);        // Max 2^26 fragments * 512 => 32GB (and max sent is elemsz*nodes/2)
+    const int distance = (1 << step);
+    gasneti_assert_uint(distance ,<, gasneti_nodes);
+    uint8_t *data = gasneti_exchg_data(phase, elemsz);
+    uint8_t *dest = data + (elemsz * distance) + (seq * gex_AM_LUBRequestMedium());
+    gasneti_assert_ptr(dest + nbytes ,<=, data + elemsz * gasneti_nodes);
+    memcpy(dest, buf, nbytes);
+    gasneti_weakatomic32_increment(&gasneti_exchg_rcvd[phase][step], GASNETI_ATOMIC_REL);
+}
+
+extern void gasneti_defaultExchange(void *src, size_t elemsz, void *dst) {
+  static int phase = 0;
+  gasneti_sync_reads();
+
+  uint8_t *data = gasneti_exchg_data(phase, elemsz);
+
+  /* copy in local contribution */
+  memcpy(data, src, elemsz);
+
+  /* Bruck's concatenation algorithm: */
+  unsigned int step, distance;
+  for (step = 0, distance = 1; distance < gasneti_nodes; ++step, distance *= 2) {
+    gex_Rank_t peer = (distance <= gasneti_mynode) ? gasneti_mynode - distance
+                                                        : gasneti_mynode + (gasneti_nodes - distance);
+    size_t nbytes = elemsz * MIN(distance, gasneti_nodes - distance);
+    size_t offset = 0;
+    uint32_t seq = 0;
+
+    /* Send payload using AMMedium(s) */
+    do {
+      const size_t to_xfer = MIN(nbytes, gex_AM_LUBRequestMedium());
+      gex_AM_RequestMedium(gasneti_THUNK_TM, peer, _hidx_gasnetc_exchg_reqh,
+                               data + offset, to_xfer, GEX_EVENT_NOW, 0,
+                               phase | (step << 1) | (seq << 6), (uint32_t)elemsz);
+      ++seq;
+      offset += to_xfer;
+      nbytes -= to_xfer;
+    } while (nbytes);
+
+    /* Poll until we have received the same number of messages as we sent */
+    GASNET_BLOCKUNTIL((int)gasneti_weakatomic32_read(&gasneti_exchg_rcvd[phase][step], 0) >= (int)seq);
+    gasneti_assert_int((int)gasneti_weakatomic32_read(&gasneti_exchg_rcvd[phase][step], 0) ,==, (int)seq);
+    gasneti_weakatomic32_set(&gasneti_exchg_rcvd[phase][step], 0, 0);
+  }
+
+#if GASNET_PSHM
+  // Cannot use AMPSHM and pshm bootstrap collectives in same pshmnet barrier phase
+  gasneti_pshmnet_bootstrapBarrierPoll();
+#endif
+
+  /* Copy to final destination while performing the rotation */
+  const size_t a = elemsz * (gasneti_nodes - gasneti_mynode);
+  const size_t b = elemsz * gasneti_mynode;
+  memcpy(dst, data + a, b);
+  memcpy((uint8_t*)dst + b, data, a);
+  gasneti_assert(! memcmp((uint8_t*)dst + gasneti_mynode*elemsz, src, elemsz));
+
+  gasneti_free(data);
+  _gasneti_exchg_data[phase] = NULL;
+
+  gasneti_sync_writes();
+  phase ^= 1;
+}
+
 /* ------------------------------------------------------------------------------------ */
 #if defined(GASNETI_PSHM_GHEAP)
   /* Access to unwrapped malloc/free */

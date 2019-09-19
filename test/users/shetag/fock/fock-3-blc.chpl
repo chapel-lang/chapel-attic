@@ -13,7 +13,7 @@ var jmat2, kmat2, jmat2T, kmat2T : [matD] elemType;
 
 config const numConsumers = max(1, (+ reduce Locales.maxTaskPar) - 1),
              poolSize = numConsumers;
-const t = new taskpool(poolSize);
+const t = new unmanaged taskpool(poolSize);
 
 proc buildjk() {
   cobegin {
@@ -42,7 +42,7 @@ proc buildjk() {
 proc consumer() {
   var blk = t.remove();
   while (blk != nil) {
-    const copyofblk = blk;
+    const copyofblk = blk!;
     cobegin with (ref blk) {
       buildjk_atom4(copyofblk);
       blk = t.remove();
@@ -55,13 +55,13 @@ proc producer() {
     t.add(blk);
 }
 
-iter genBlocks() {
+iter genBlocks() : unmanaged blockIndices? {
   for iat in 1..natom do // sjd: changed forall to for because of yield
     for (jat, kat) in {1..iat, 1..iat} { // sjd: changed forall to for because of yield
       const lattop = if (kat==iat) then jat 
                                    else kat;
       for lat in 1..lattop do // sjd: changed forall to for because of yield
-        yield new blockIndices(iat, jat, kat, lat);
+        yield new unmanaged blockIndices(iat, jat, kat, lat);
     }
   for loc in 1..numConsumers do // sjd: changed forall to for because of yield
     yield nil;

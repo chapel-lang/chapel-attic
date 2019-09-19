@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2018 Cray Inc.
+ * Copyright 2004-2019 Cray Inc.
  * Other additional copyright holders may be indicated within.
  *
  * The entirety of this work is licensed under the Apache License,
@@ -21,6 +21,7 @@
 #define _EXPR_H_
 
 #include "baseAST.h"
+#include "driver.h"
 
 #include "primitive.h"
 #include "symbol.h"
@@ -68,6 +69,16 @@ public:
   void            insertBefore(Expr* new_ast);
   void            insertAfter(Expr* new_ast);
   void            replace(Expr* new_ast);
+
+  // Insert multiple ASTs in the order of the arguments.
+  // Todo: replace with a single varargs version.
+  void            insertAfter(Expr* e1, Expr* e2);
+  void            insertAfter(Expr* e1, Expr* e2, Expr* e3);
+  void            insertAfter(Expr* e1, Expr* e2, Expr* e3, Expr* e4);
+  void            insertAfter(Expr* e1, Expr* e2, Expr* e3, Expr* e4,
+                              Expr* e5);
+  void            insertAfter(Expr* e1, Expr* e2, Expr* e3, Expr* e4,
+                              Expr* e5, Expr* e6);
 
   void            insertBefore(AList exprs);
   void            insertAfter(AList exprs);
@@ -242,37 +253,6 @@ private:
   bool                   hasRef;
 };
 
-//
-//
-//
-//
-
-class ForallExpr : public Expr {
-public:
-  Expr* indices;
-  Expr* iteratorExpr;
-  Expr* expr;
-  Expr* cond;
-  bool maybeArrayType;
-  bool zippered;
-
-  ForallExpr(Expr* indices,
-             Expr* iteratorExpr,
-             Expr* expr,
-             Expr* cond,
-             bool maybeArrayType,
-             bool zippered);
-
-  DECLARE_COPY(ForallExpr);
-
-  virtual void    replaceChild(Expr* old_ast, Expr* new_ast);
-  virtual void    verify();
-  virtual void    accept(AstVisitor* visitor);
-  virtual GenRet  codegen();
-
-  virtual Expr*   getFirstExpr();
-};
-
 
 class NamedExpr : public Expr {
  public:
@@ -321,6 +301,11 @@ static inline bool isAlive(Symbol* symbol) {
 }
 
 static inline bool isAlive(Type* type) {
+  if (fMinimalModules) {
+    if(type == dtBytes || type == dtString) {
+      return false;
+    }
+  }
   return isAlive(type->symbol->defPoint);
 }
 
@@ -342,6 +327,10 @@ static inline bool isTaskFun(FnSymbol* fn) {
          fn->hasFlag(FLAG_ON);
 }
 
+static inline bool isLoopExprFun(FnSymbol* fn) {
+  return 0 == strncmp(fn->name, astr_loopexpr_iter, strlen(astr_loopexpr_iter));
+}
+
 // Does this function require "capture for parallelism"?
 // Yes, if it comes from a begin/cobegin/coforall block in Chapel source.
 static inline bool needsCapture(FnSymbol* taskFn) {
@@ -350,15 +339,8 @@ static inline bool needsCapture(FnSymbol* taskFn) {
          taskFn->hasFlag(FLAG_NON_BLOCKING);
 }
 
-inline SymExpr* ShadowVarSymbol::outerVarSE() const {
-  if (SymExpr* ovse = toSymExpr(this->outerVarRep))
-    return ovse;
-  else
-    return NULL;
-}
-
 inline Symbol* ShadowVarSymbol::outerVarSym() const {
-  if (SymExpr* ovse = this->outerVarSE())
+  if (SymExpr* ovse = this->outerVarSE)
     return ovse->symbol();
   else
     return NULL;
@@ -368,6 +350,13 @@ inline Symbol* ShadowVarSymbol::outerVarSym() const {
 static inline void verifyNotOnList(Expr* expr) {
   if (expr && expr->list)
     INT_FATAL(expr, "Expr is in a list incorrectly");
+}
+
+// Strip NamedExpr, if present.
+static inline Symbol* symbolForActual(Expr* actual) {
+  if (NamedExpr* ne = toNamedExpr(actual))
+    actual = ne->actual;
+  return toSymExpr(actual)->symbol();
 }
 
 
@@ -391,9 +380,18 @@ Expr* getNextExpr(Expr* expr);
 Expr* new_Expr(const char* format, ...);
 Expr* new_Expr(const char* format, va_list vl);
 
+// This mechanism allows storing optimization/analysis results
+// in case they need to be used by later passes.
+// The optimization/analysis result is stored in a PRIM_OPTIMIZATION_INFO
+// expression after insertAfter, or added to one if it already exists.
+void addOptimizationFlag(Expr* insertAfter, Flag flag);
+// Returns true if a nearby PRIM_OPTIMIZATION_INFO includes this flag
+bool hasOptimizationFlag(Expr* anchor, Flag flag);
+
+
 #ifdef HAVE_LLVM
-llvm::Value* createTempVarLLVM(llvm::Type* type, const char* name);
-llvm::Value* createTempVarLLVM(llvm::Type* type);
+llvm::Value* createVarLLVM(llvm::Type* type, const char* name);
+llvm::Value* createVarLLVM(llvm::Type* type);
 #endif
 
 GenRet codegenValue(GenRet r);
@@ -405,5 +403,7 @@ GenRet codegenDeref(GenRet toDeref);
 GenRet codegenLocalDeref(GenRet toDeref);
 GenRet codegenNullPointer();
 GenRet codegenCast(const char* typeName, GenRet value, bool Cparens = true);
+
+void codegenCallPrintf(const char* arg);
 
 #endif

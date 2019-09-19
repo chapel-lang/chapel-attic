@@ -19,7 +19,7 @@ class InterpolationObject {
     this.invDx  = 1.0/dx;
     this.nSpace = {-1..n+1};
 
-    this.initDone();
+    this.complete();
 
     values[0..n-1] = buf;
 
@@ -49,7 +49,7 @@ class InterpolationObject {
 }
 
 class PotentialEAM : BasePotential {
-  var phiIO, rhoIO, fIO : InterpolationObject;
+  var phiIO, rhoIO, fIO : unmanaged InterpolationObject;
 
   var rhoDom : domain(3);
   var rhoSpace = rhoDom dmapped AccumStencil(rhoDom); // basically BlockDist
@@ -58,8 +58,8 @@ class PotentialEAM : BasePotential {
   var dfEmbed : [dfSpace] [1..MAXATOMS] real;
 
   proc init() {
-    var info : BasePotential;
-    var p, r, f : InterpolationObject;
+    var info : unmanaged BasePotential?;
+    var p, r, f : unmanaged InterpolationObject?;
 
     if potType == PotType.setfl then
       (info, p, r, f) = readSetFl();
@@ -68,11 +68,11 @@ class PotentialEAM : BasePotential {
     else
       halt("Unsupported pot type: ", potType);
 
-    super.init(info);
+    super.init(info!);
 
-    this.phiIO = p;
-    this.rhoIO = r;
-    this.fIO   = f;
+    this.phiIO = p!;
+    this.rhoIO = r!;
+    this.fIO   = f!;
 
     const boxInfo  = computeBoxInfo(info.lat, info.cutoff);
     const numBoxes = boxInfo(2);
@@ -86,7 +86,7 @@ class PotentialEAM : BasePotential {
     delete rhoIO;
     delete fIO;
   }
-  proc print() {
+  override proc print() {
     writeln("  Potential type  : EAM");
     writeln("  Species name    : ", name);
     writeln("  Atomic number   : ", atomicNo);
@@ -101,8 +101,8 @@ proc readSetFl() {
   var chan = open(potDir + "/" + potName, iomode.r);
   var r = chan.reader();
 
-  var info = new BasePotential();
-  var pIO, rIO, fIO : InterpolationObject;
+  var info = new unmanaged BasePotential();
+  var pIO, rIO, fIO : unmanaged InterpolationObject?;
 
   // Skip comments
   r.readln();
@@ -125,11 +125,11 @@ proc readSetFl() {
 
   // Read embedding energy F(rhobar)
   for i in 1..nrho do buf[i] = r.read(real);
-  fIO = new InterpolationObject(nrho, x0, drho, buf);
+  fIO = new unmanaged InterpolationObject(nrho, x0, drho, buf);
 
   // Read electron density rho(r)
   for i in 1..nr do buf[i] = r.read(real);
-  rIO = new InterpolationObject(nr, x0, dr, buf);
+  rIO = new unmanaged InterpolationObject(nr, x0, dr, buf);
 
   // Read phi(r)*r and convert to phi(r)
   for i in 1..nr do buf[i] = r.read(real);
@@ -138,17 +138,17 @@ proc readSetFl() {
     buf[i] /= r;
   }
   buf[1] = buf[2] + (buf[2] - buf[3]);
-  pIO = new InterpolationObject(nr, x0, dr, buf);
+  pIO = new unmanaged InterpolationObject(nr, x0, dr, buf);
 
-  return (info, pIO, rIO, fIO);
+  return (info, pIO!, rIO!, fIO!);
 }
 
 proc readFuncFl() {
   var chan = open(potDir + "/" + potName, iomode.r);
   var r = chan.reader();
 
-  var info = new BasePotential();
-  var pIO, rIO, fIO : InterpolationObject;
+  var info = new unmanaged BasePotential();
+  var pIO, rIO, fIO : unmanaged InterpolationObject?;
 
   // Comments
   info.name = r.readln(string);
@@ -164,7 +164,7 @@ proc readFuncFl() {
 
   // Read embedding energy F(rhobar)
   for i in 1..nrho do buf[i] = r.read(real);
-  fIO = new InterpolationObject(nrho, x0, drho, buf);
+  fIO = new unmanaged InterpolationObject(nrho, x0, drho, buf);
 
   // Read Z(r) and conver to phi(r)
   for i in 1..nr do buf[i] = r.read(real);
@@ -174,12 +174,12 @@ proc readFuncFl() {
     buf[i] *= hartreeToEv * bohrToAngs;
   }
   buf[1] = buf[2] + (buf[2] - buf[3]);
-  pIO = new InterpolationObject(nr, x0, dr, buf);
+  pIO = new unmanaged InterpolationObject(nr, x0, dr, buf);
 
   for i in 1..nr do buf[i] = r.read(real);
-  rIO = new InterpolationObject(nr, x0, dr, buf);
+  rIO = new unmanaged InterpolationObject(nr, x0, dr, buf);
 
-  return (info, pIO, rIO, fIO);
+  return (info, pIO!, rIO!, fIO!);
 }
 
 proc PotentialEAM.reset() {
@@ -272,7 +272,7 @@ proc PotentialEAM.computeElectronCloud() {
   }
 }
 
-proc PotentialEAM.force() {
+override proc PotentialEAM.force() {
   reset();
 
   const pairWiseEnergy = computePairWise();

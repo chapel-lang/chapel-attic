@@ -1,24 +1,55 @@
-#!/bin/sh
+#!/bin/bash
 
-if [ -d llvm ]
+BRANCH=unknown
+ENABLE_RV=0
+
+if [ "$#" -eq 0 ]
+then
+  MYVERSION=`cat LLVM_VERSION | sed 's/\.//g'`
+  BRANCH=release_$MYVERSION
+  echo "a branch argument is required; try"
+  echo "  master"
+  echo "  $BRANCH"
+  exit 1
+else
+# Argument supplied, use that branch
+BRANCH="$1"
+fi
+
+echo About to check out LLVM etc branch:
+echo   $BRANCH
+sleep 1
+
+CLONEARGS="--branch $BRANCH --single-branch --depth=1"
+
+if [ -d llvm-project ]
 then
 
 echo Updating LLVM
-cd llvm
-git pull
-echo Updating CLANG
-cd tools/clang
-git pull
+cd llvm-project
+git pull --rebase
+echo Updating RV
+if [ -d llvm/tools/rv ]
+then
+cd llvm/tools/rv
+git pull --rebase
 cd ../../..
+fi
+
+cd ..
 
 else
 
-echo Checking out current LLVM trunk
-git clone http://llvm.org/git/llvm.git
-mkdir -p llvm/tools
-cd llvm/tools
-echo Checking out current CLANG trunk
-git clone http://llvm.org/git/clang.git
-cd ../..
+echo Checking out LLVM monorepo $BRANCH
+git clone https://github.com/llvm/llvm-project.git llvm-project
+
+if [ "$ENABLE_RV" -ne 0 ]
+then
+echo Checking out RV $BRANCH
+git clone $CLONEARGS https://github.com/cdl-saarland/rv llvm-project/llvm/tools/rv
+cd llvm-project/llvm/tools/rv
+git submodule update --init
+cd ../../../..
+fi
 
 fi

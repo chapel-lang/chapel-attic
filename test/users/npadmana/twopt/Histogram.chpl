@@ -13,7 +13,7 @@ module Histogram {
 
     proc init(param dim : int, nbins : dim*int, limits : dim*(real,real)) {
       this.dim = dim;
-      this.initDone();
+      this.complete();
       var dd : dim*range;
       this.nbins = nbins;
       for param ii in 1..dim {
@@ -56,7 +56,7 @@ module Histogram {
 
   } // UniformBins
 
-  proc writeHist(ff : channel, hh : UniformBins, fmt : string = "%20.14er ")
+  proc writeHist(ff : channel, hh : borrowed UniformBins, fmt : string = "%20.14er ")
     throws {
     // Dump out values
     for xx in hh.bins(1) do ff.writef("%12.4dr",xx); 

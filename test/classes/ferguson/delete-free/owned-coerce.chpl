@@ -1,5 +1,3 @@
-use OwnedObject;
-
 class C {
   var x:int;
   proc deinit() {
@@ -7,12 +5,12 @@ class C {
   }
 }
 
-proc myLegacyFunction(arg:C) {
+proc myLegacyFunction(arg:borrowed C) {
   writeln(arg.x);
 }
 
 proc test() {
-  var x = new Owned(new C());
+  var x = new owned C();
 
   myLegacyFunction(x); // feature request: coerce from Owned to C (borrow)
 }

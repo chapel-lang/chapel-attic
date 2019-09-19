@@ -1,10 +1,12 @@
 class NilClass { }
+override proc NilClass.writeThis(f) { f <~> "nil"; }
+var gNil = new owned NilClass();
 
-proc Nil(): NilClass
-  return nil;
+proc Nil(): borrowed NilClass
+  return gNil.borrow();
 
 proc isNil(x): bool {
-  if x.type == NilClass then
+  if x.type <= NilClass then
     return true;
   else
     return false;

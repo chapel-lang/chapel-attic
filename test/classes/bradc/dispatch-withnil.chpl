@@ -3,15 +3,15 @@ class C {
 }
 
 class D {
-  var y: C;
+  var y: borrowed C?;
 }
 
-proc foo(c: C) {
+proc foo(c: borrowed C) {
   writeln("x is: ", c.x);
 }
 
-proc foo(d: D) {
-  foo(d.y);
+proc foo(d: borrowed D) {
+  foo(d.y!);
 }
 
 proc foo(n: _nilType) {
@@ -19,13 +19,10 @@ proc foo(n: _nilType) {
 }
 
 proc main() {
-  var myC = new C(x=1);
+  var myC = new borrowed C(x=1);
   foo(myC);
-  var myD = new D();
-  myD.y = new C();
-  myD.y.x = 2;
+  var myD = new borrowed D();
+  myD.y = new borrowed C();
+  myD.y!.x = 2;
   foo(myD);
-  delete myC;
-  delete myD.y;
-  delete myD;
 }

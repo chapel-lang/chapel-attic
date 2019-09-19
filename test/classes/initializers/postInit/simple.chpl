@@ -9,13 +9,13 @@ class C {
     this.y = 1.0;
   }
 
-  proc postInit() {
-    writeln("C.postInit");
+  proc postinit() {
+    writeln("C.postinit");
     y *= x;
   }
 }
 
-var c = new C();
+var c = new unmanaged C();
 writeln("c = ", c);
 writeln();
 delete c;
@@ -27,8 +27,8 @@ record R {
     writeln("R.init");
   }
 
-  proc postInit() {
-    writeln("R.postInit");
+  proc postinit() {
+    writeln("R.postinit");
   }
 }
 

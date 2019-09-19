@@ -157,8 +157,6 @@ proc initVectors(B, C) {
 
   randlist.fillRandom(B);
   randlist.fillRandom(C);
-
-  delete randlist;
 }
 
 //

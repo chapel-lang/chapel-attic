@@ -3,17 +3,16 @@ class ThisPhase2 {
 
   proc init(val: complex) {
     someField = val;
-    this.initDone();
+    this.complete();
     outsideFunc(this);
     // Verifies that we can utilize "this" in Phase 2
   }
 }
 
-proc outsideFunc(x: ThisPhase2) {
+proc outsideFunc(x: borrowed ThisPhase2) {
   writeln(x.someField);
 }
 
 proc main() {
-  var c: ThisPhase2 = new ThisPhase2(2.5 + 1.3i);
-  delete c;
+  var c: borrowed ThisPhase2 = new borrowed ThisPhase2(2.5 + 1.3i);
 }

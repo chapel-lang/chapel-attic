@@ -3,7 +3,7 @@ class Parent {
   }
 }
 class Child : Parent {
-  proc runTask() {
+  override proc runTask() {
     begin {
       writeln("IN TASK 1");
       writeln("IN TASK 2");
@@ -12,9 +12,8 @@ class Child : Parent {
 }
 proc run() {
   sync {
-    var obj:Parent = new Child();
+    var obj:borrowed Parent = new borrowed Child();
     obj.runTask();
-    delete obj;
   }
 }
 run();

@@ -1,9 +1,9 @@
 .\" -*- nroff -*-
-.\" Copyright © 2009-2017 Inria.  All rights reserved.
+.\" Copyright © 2009-2018 Inria.  All rights reserved.
 .\" Copyright © 2010 Université of Bordeaux
 .\" Copyright © 2009-2010 Cisco Systems, Inc.  All rights reserved.
 .\" See COPYING in top-level directory.
-.TH HWLOC-BIND "1" "#HWLOC_DATE#" "#PACKAGE_VERSION#" "#PACKAGE_NAME#"
+.TH HWLOC-BIND "1" "%HWLOC_DATE%" "%PACKAGE_VERSION%" "%PACKAGE_NAME%"
 .SH NAME
 hwloc-bind \- Launch a command that is bound to specific processors
 and/or memory, or consult the binding of an existing program
@@ -129,7 +129,7 @@ Restrict the topology to the given cpuset.
 Do not consider administration limitations.
 .TP
 \fB--hbm\fR
-Only take high bandwidth memory nodes (such as KNL's MCDRAM)
+Only take high bandwidth memory nodes (such as Intel Xeon Phi MCDRAM)
 in account when looking for NUMA nodes in the input locations.
 
 This option must be combined with NUMA node locations,
@@ -137,7 +137,7 @@ such as \fI--hbm numa:1\fR for binding on the second HBM node.
 It may also be written as \fIhbm:1\fR.
 .TP
 \fB--no-hbm\fR
-Ignore high bandwidth memory nodes (such as KNL's MCDRAM)
+Ignore high bandwidth memory nodes (such as Intel Xeon Phi MCDRAM)
 when looking for NUMA nodes in the input locations.
 .TP
 \fB\-f\fR \fB\-\-force\fR

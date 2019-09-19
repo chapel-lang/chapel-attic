@@ -1,5 +1,12 @@
 # Submitted Chapel Computer Language Benchmarks Game Codes
 
+Developer Note:
+
+ *This directory is intended to reflect the code submitted to the
+  benchmarks game website. If tests in this directory start failing,
+  DO NOT update the tests. Instead, give them a .notest or .future
+  file to disable them causing testing noise.*
+
 This directory contains
 [Chapel versions](http://benchmarksgame.alioth.debian.org/u64q/chapel.html)
 of the
@@ -9,8 +16,6 @@ Benchmarks Games website.
 
 * [binarytrees.chpl](http://benchmarksgame.alioth.debian.org/u64q/program.php?test=binarytrees&lang=chapel&id=1)
     * Allocates and deallocates many, many binary trees
-* [chameneosredux.chpl](http://benchmarksgame.alioth.debian.org/u64q/program.php?test=chameneosredux&lang=chapel&id=1)
-    * Simulates meetings between color-changing Chameneos
 * [fannkuchredux.chpl](http://benchmarksgame.alioth.debian.org/u64q/program.php?test=fannkuchredux&lang=chapel&id=1)
     * Performs many operations on small arrays
 * [fasta.chpl](http://benchmarksgame.alioth.debian.org/u64q/program.php?test=fasta&lang=chapel&id=1) |
@@ -29,10 +34,8 @@ Benchmarks Games website.
 * [pidigits.chpl](http://benchmarksgame.alioth.debian.org/u64q/program.php?test=pidigits&lang=chapel&id=1) |
   [pidigits.chpl #2](http://benchmarksgame.alioth.debian.org/u64q/program.php?test=pidigits&lang=chapel&id=2)
     * Computes digits of pi using GMP, if available
-* [regexdna.chpl](http://benchmarksgame.alioth.debian.org/u64q/program.php?test=regexdna&lang=chapel&id=1)
-    * Performs DNA matching
 * [regexdna-redux.chpl](http://benchmarksgame.alioth.debian.org/u64q/program.php?test=regexredux&lang=chapel&id=1)
-    * Performs DNA matching, modified version of the above
+    * Performs DNA matching
 * [revcomp.chpl](http://benchmarksgame.alioth.debian.org/u64q/program.php?test=revcomp&lang=chapel&id=1)
     * Calculate the strand to bind with a given DNA strand
 * [spectralnorm.chpl](http://benchmarksgame.alioth.debian.org/u64q/program.php?test=spectralnorm&lang=chapel&id=1)

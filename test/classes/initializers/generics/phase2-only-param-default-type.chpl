@@ -5,11 +5,11 @@ class Foo {
   param p: int;
 
   proc init() {
-    this.initDone();
+    this.complete();
     p = 4; // This should fail
   }
 }
 
-var foo = new Foo();
+var foo = new unmanaged Foo();
 writeln(foo);
 delete foo;

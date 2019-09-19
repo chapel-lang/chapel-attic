@@ -8,6 +8,561 @@ capture significant language changes that have the possibility of breaking
 existing user codes or code samples from old presentations or papers that
 predated the changes.
 
+Note that the compiler flag ``--warn-unstable`` is available and can be
+useful when migrating programs to the current version of the language.
+The purpose of this flag is to identify  portions of a program that use a
+language feature that has changed meaning.
+
+version 1.20, September 2019
+----------------------------
+
+Version 1.20 made language changes that address problems with classes.
+
+In summary:
+
+ * variables of class type can no longer store `nil` by default but can
+   opt-in to possibly being `nil` with `?`.
+   See :ref:`readme-evolution.nilability-changes`
+ * certain casts have changed behavior to support nilability changes
+   See :ref:`readme-evolution.nilability-and-casts`
+ * un-decorated class types such as `MyClass` (as opposed to `borrowed
+   MyClass`) now have generic management
+   See :ref:`readme-evolution.undecorated-classes-generic-management`
+ * arguments with `owned` or `shared` declared type now use `const ref`
+   default intent rather than `in` intent.
+   See :ref:`readme-evolution.new-default-intent-for-owned-and-shared`
+ * ``new C`` now creates an `owned C` rather than a `borrowed C`
+   See :ref:`readme-evolution.new-C-is-owned`
+
+
+.. _readme-evolution.nilability-changes:
+
+nilability changes
+******************
+
+Previous to 1.20, variables of class type could always store ``nil``.  In
+1.20, only nilable class types can store ``nil``. Non-nilable class types
+and nilable class types are different types. A class type expression
+such as ``borrowed C`` indicates a non-nilable class type.
+
+As an aid in migrating code to this change, the flag ``--legacy-classes``
+will disable this new behavior.
+
+Consider the following example:
+
+.. code-block:: chapel
+
+  class C {
+    var x:int;
+  }
+
+  var a: borrowed C = (new owned C()).borrow();
+
+In 1.19, variables of type ``borrowed C`` could store ``nil``:
+
+.. code-block:: chapel
+
+  var b: borrowed C = nil;
+  var c: borrowed C;
+  a = nil;
+
+The 1.20 compiler will report errors for all 3 of these lines. To resolve
+the errors, it is necessary to use a nilable class type. Nilable class
+types are written with ``?`` at the end of the type. In this example:
+
+.. code-block:: chapel
+
+  var a: borrowed C? = (new owned C()).borrow();
+  var b: borrowed C? = nil;
+  var c: borrowed C?;
+  a = nil;
+
+Implicit conversions are allowed from non-nilable class types to nilable
+class types.
+
+When converting variables to nilable types to migrate code, there will be
+situations in which it is known by the developer that a variable cannot
+be ``nil`` at a particular point in the code. For example:
+
+.. code-block:: chapel
+
+  proc f(arg: borrowed C) { }
+  proc C.method() { }
+
+  config const choice = true;
+  var a: owned C?;
+  if choice then
+    a = new owned C(1);
+  else
+    a = new owned C(2);
+
+  f(a);
+  a.method();
+
+Errors on the last two lines can be resolved by writing
+
+.. code-block:: chapel
+
+  f(a!);
+  a!.method();
+
+where here the ``!`` asserts that the value is not ``nil`` and it can
+halt if the value is ``nil``.
+
+Note that in ``prototype`` and implicit file-level modules, the compiler
+will automatically add ``!`` on method calls with nilable receivers
+(i.e. in the ``a.method()`` case above).
+
+In the above case, a cleaner way to write the conditional would be to
+create a function that always returns a value or throws if there is a
+problem. For example:
+
+.. code-block:: chapel
+
+  proc makeC() throws {
+    var a: owned C?;
+    if choice then
+      a = new owned C(1);
+    else
+      a = new owned C(2);
+    return a:owned C; // this cast throws if a stores nil
+  }
+
+  proc main() throws {
+    var a:owned C = makeC();
+    f(a);
+    a.method();
+  }
+
+
+.. _readme-evolution.nilability-and-casts:
+
+nilability and casts
+********************
+
+Because casts to class types should necessarily return something of the
+requested type, and because many class types now cannot store ``nil``,
+certain patterns involving casts will need to change to work with 1.20.
+
+class downcasts
+^^^^^^^^^^^^^^^
+
+In a class downcast, a class is casted to a subtype. If the dynamic type
+of the variable does not match the requested subtype, the downcast fails.
+In 1.19, a failed downcast would result in ``nil``. In 1.20, a failed
+downcast will result in ``nil`` only if the target type is nilable and
+will throw an error otherwise.
+
+For example:
+
+.. code-block:: chapel
+
+  class Parent { }
+  class Child : Parent { }
+
+  var p:borrowed Parent = (new owned Parent()).borrow();
+  var c:borrowed Parent = (new owned Child()).borrow();
+
+  writeln(c:Child?); // downcast succeeds
+  writeln(c:Child);  // downcast succeeds
+
+  writeln(p:Child?); // this downcast fails and results in `nil`
+  writeln(p:Child); // this downcast fails and will throw a ClassCastError
+
+casting C pointers to classes
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Casts from ``c_void_ptr`` to class types were previously allowed. However,
+since ``c_void_ptr`` can store ``NULL``, this case needs adjustment
+following the nilability changes. Additionally, since ``c_void_ptr``
+refers to a C pointer, and C pointers are manually managed (i.e. you call
+``free`` on them at the appropriate time), it makes the most sense
+for casts from ``c_void_ptr`` to end up with an unmanaged type.
+
+Consider the following example:
+
+.. code-block:: chapel
+
+  class C {
+    var x:int;
+  }
+
+  var myC = new owned C();
+  var ptr:c_void_ptr = myC.borrow(); // store the instance in a C ptr
+
+Now we can cast from ``ptr`` to the class type:
+
+.. code-block:: chapel
+
+  var c = ptr:C; // cast from a C pointer to the borrowed type
+
+This example would work in 1.19. In 1.20, it needs to be updated to
+cast to ``unmanaged C?``:
+
+.. code-block:: chapel
+
+  var c = ptr:unmanaged C?;
+
+As with other values of type ``unmanaged C?``, from there it can:
+
+ * be borrowed, e.g. ``c.borrow()``
+ * have ``!`` applied to convert to a non-nilable value or halt, e.g. ``c!``
+ * be cast to a non-nilable type, throwing if it is ``nil``, e.g.
+   ``c:borrowed C``
+
+.. _readme-evolution.undecorated-classes-generic-management:
+
+undecorated classes have generic management
+********************************************
+
+Undecorated classes now have generic management. As an aid in migrating
+code to this change, the flag ``--legacy-classes`` will disable this
+new behavior.
+
+Supposing that we have a ``class C`` declaration as in the following:
+
+.. code-block:: chapel
+
+  class C {
+    var x:int;
+  }
+
+Code using ``C`` might refer to the type ``C`` on its own or it might use
+a decorator to specify memory management strategy, as in ``borrowed C``.
+
+The type expression ``C`` was the same as ``borrowed C`` in 1.18 and
+1.19 but now means generic management. For example, in the following code:
+
+.. code-block:: chapel
+
+  var myC:C = new owned C();
+
+``myC`` previously had type ``borrowed C``, and was initialized using
+including an implicit conversion from ``owned C`` to ``borrowed C``. In 1.20,
+``myC`` has type ``owned C``. Since the variable's type expression is
+generic management, it takes its management from the initializing
+expression.
+
+This change combines with the nilability changes described above
+to prevent compilation of existing code like the following:
+
+.. code-block:: chapel
+
+  var x:C;
+
+Knowing that ``C`` now cannot store ``nil``, one might try to update this
+program to:
+
+.. code-block:: chapel
+
+  var x:C?;
+
+However this does not work either. ``C?`` indicates a nilable class type
+with generic management, and a variable with generic type cannot be
+default-initialized.
+
+To update such a variable declaration to 1.20, it is necessary to include
+a memory management decorator as well as ``?``. For example:
+
+.. code-block:: chapel
+
+  var x:borrowed C?;
+
+The resulting variable will initially store ``nil``.
+
+.. _readme-evolution.new-default-intent-for-owned-and-shared:
+
+new default intent for owned and shared
+***************************************
+
+The default intent for `owned` and `shared` arguments is now
+`const ref` where it was previously `in`. Cases where such arguments
+will be interpreted differently can be reported with the ``--warn-unstable``
+compilation flag.
+
+Consider the following example:
+
+.. code-block:: chapel
+
+  class C {
+    var x:int;
+  }
+
+  var global: owned C?;
+  proc f(arg: owned C) {
+    global = arg;
+  }
+
+  f(new owned C(1));
+
+This program used to compile and run, performing ownership transfer
+once when passing the result of ``new`` to ``f`` and a second time
+in the assignment statement ``global = arg``.
+
+This program does not work in 1.20. The compiler will issue an error for
+the statement ``global = arg`` because the ownership transfer requires
+modifying ``arg`` but it is not modifiable because it was passed with
+``const ref`` intent.
+
+To continue working, this program needs to be updated to add the `in`
+intent to ``f``, as in ``proc f(in arg: owned C)``.
+
+Note that for totally generic arguments, the 1.18 and 1.19 compiler
+would instantiate the argument with the borrow type when passed
+``owned`` or ``shared`` classes. For example:
+
+.. code-block:: chapel
+
+  class C {
+    var x:int;
+  }
+
+  proc f(arg) { }
+
+  var myC = new owned C(1);
+
+  f(myC);       // does this call transfer ownership out of myC?
+  writeln(myC); // prints `nil` if ownership transfer occurred
+
+This example functions the same in 1.18 and 1.20, but for different
+reasons. In 1.18, ``f`` is instantiated as accepting an argument of type
+``borrowed C``. In the call ``f(myC)``, the compiler applies a coercion
+from ``owned C`` to ``borrowed C``, so ownership transfer does not occur.
+In 1.20, ``f`` is instantiated as accepting an argument of type ``owned C``
+but this type uses the default intent (``const ref``). As a result,
+ownership transfer does not occur.
+
+.. _readme-evolution.new-C-is-owned:
+
+new C is owned
+**************
+
+Supposing that `C` is a class type, `new C()` was equivalent to
+`new borrowed C()` before this release - meaning that it resulted in
+something of type `borrowed C`. However, it is now equivalent to `new
+owned C()` which produces something of type `owned C`.
+
+
+version 1.18, September 2018
+----------------------------
+
+Version 1.18 includes many language changes that address problems with
+classes.
+
+In summary:
+
+ * constructors are deprecated and replaced with initializers
+   See :ref:`readme-evolution.initializers-replace-constructors`
+ * memory management for class types has changed
+   See :ref:`readme-evolution.class-memory-management`
+ * `override` is now required on overriding methods
+   See :ref:`readme-evolution.mark-overriding`
+
+.. _readme-evolution.initializers-replace-constructors:
+
+initializers replace constructors
+*********************************
+
+Code that contained user-defined constructors will need to be updated
+to use an initializer. For example:
+
+.. code-block:: chapel
+
+  record Point {
+    var x, y: real;
+    proc Point() {
+      x = 0;
+      y = 0;
+      writeln("In Point()");
+    }
+    proc Point(x: real, y: real) {
+      this.x = x;
+      this.y = y;
+      writeln("In Point(x,y)");
+    }
+  }
+  var a:Point;
+  var b = new Point(1.0, 2.0);
+
+will now compile with deprecation warnings. Here is the same program
+updated to use initializers:
+
+.. code-block:: chapel
+
+  record Point {
+    var x, y: real;
+    proc init() {
+      x = 0;
+      y = 0;
+      writeln("In Point.init()");
+    }
+    proc init(x: real, y: real) {
+      this.x = x;
+      this.y = y;
+      writeln("In Point.init(x,y)");
+    }
+  }
+  var a:Point;
+  var b = new Point(1.0, 2.0);
+
+The change to initializers is much more than a change in the name of the
+method. See the language specification for further details.
+
+.. _readme-evolution.class-memory-management:
+
+class memory management
+***********************
+
+Before 1.18, if ``C`` is a class type, a variable of type ``C`` needed
+to be deleted in order to prevent a memory leak. For example:
+
+.. code-block:: chapel
+
+  class C {
+    var x: int;
+  }
+  proc main() {
+    var instance: C = new C(1);
+    delete instance;
+  }
+
+Version 1.18 introduced four memory management strategies that form part
+of a class type and are used with `new` expressions:
+
+``owned C``
+  ``owned`` classes will be deleted automatically when the ``owned``
+  variable goes out of scope, but only one ``owned`` variable can refer to
+  the instance at a time.
+  Such instances can be created with ``new owned C()``.
+
+``shared C``
+  ``shared`` classes will be deleted when all of the ``shared`` variables
+  referring to the instance go out of scope.
+  Such instances can be created with ``new shared C()``.
+
+``borrowed C``
+  refers to a class instance that has a lifetime managed by
+  another variable.
+  Values of type ``borrowed C`` can be created with ``new borrowed
+  C()``, by coercion from the other class ``C`` types, or by explicitly
+  calling the ``.borrow()`` method on one of the other class ``C``
+  types.
+  ``new borrowed C()`` creates a temporary instance that will automatically
+  be deleted at the end of the current block.
+
+``unmanaged C``
+  the instance must have `delete` called on it explicitly to
+  reclaim its memory.
+  Such instances can be created with ``new unmanaged C()``.
+
+Further note that the default is ``borrowed``, that is:
+
+``C``
+  is now the same as ``borrowed C``
+
+``new C()``
+  is now the same as ``new borrowed C()``
+
+Now, back to the example above. There are several ways to translate this
+program.
+
+First, the most semantically similar option is to replace uses of ``C``
+with ``unmanaged C``:
+
+.. code-block:: chapel
+
+  class C {
+    var x: int;
+  }
+  proc main() {
+    var instance: unmanaged C = new unmanaged C(1);
+    delete instance;
+  }
+
+Using ``unmanaged`` allows a Chapel programmer to opt in to manually
+managing the memory of the instances.
+
+A reasonable alternative would be to translate the program to use
+``owned C``:
+
+.. code-block:: chapel
+
+  class C {
+    var x: int;
+  }
+  proc main() {
+    var instance: owned C = new owned C(1);
+    // instance will now be automatically deleted at the end of this block
+  }
+
+If the program does not explicitly use ``owned C``, it can rely on
+``new C()`` being equivalent to ``new borrowed C()``:
+
+.. code-block:: chapel
+
+  class C {
+    var x: int;
+  }
+  proc main() {
+    var instance: C = new C(1);
+
+    // instance will now be automatically deleted at the end of this block
+  }
+
+See the *Class New* section in the *Classes* chapter of the language
+specification for more details.
+
+.. _readme-evolution.mark-overriding:
+
+overriding methods must be marked
+*********************************
+
+Before 1.18, a class inheriting from another class can create an
+overriding method that is a candidate for virtual dispatch:
+
+.. code-block:: chapel
+
+  class Person {
+    var name: string;
+    proc greet() {
+      writeln("Hello ", name, "!");
+    }
+  }
+  class Student: Person {
+    var grade: int;
+    proc greet() {
+      writeln("Hello ", name, ", welcome to grade ", grade);
+    }
+  }
+  proc main() {
+    var person: Person = new Student("Jeannie", 5);
+    person.greet(); // uses the run-time type of person (Student)
+                    // and virtually dispatches to Student.greet()
+  }
+
+Now such overriding methods must be marked with the `override` keyword:
+
+.. code-block:: chapel
+
+  class Person {
+    var name: string;
+    proc greet() {
+      writeln("Hello ", name, "!");
+    }
+  }
+  class Student: Person {
+    var grade: int;
+    override proc greet() {
+      writeln("Hello ", name, ", welcome to grade ", grade);
+    }
+  }
+  proc main() {
+    var person: Person = new Student("Jeannie", 5);
+    person.greet(); // uses the run-time type of person (Student)
+                    // and virtually dispatches to Student.greet()
+  }
+
+
 version 1.15, April 2017
 ------------------------
 
@@ -204,7 +759,8 @@ const-checking error messages from the compiler.
     writeln(D.member(6)); // outputs `true` !
   }
 
-See GitHub issue #5217 for more examples and discussion.
+See `GitHub issue #5217 <https://github.com/chapel-lang/chapel/issues/5217>`_
+for more examples and discussion.
 
 In order to make such programs less surprising, version 1.15 changes the default
 intent for arrays to `ref` if the formal argument is modified in the function
@@ -245,7 +801,8 @@ record methods was implemented as `ref` but specified as `const ref`. In
 1.15, this changed to `ref` if the formal `this` argument is modified in
 the body of the function and `const ref` if not.
 
-See GitHub issue #5266 for more details and discussion.
+See `GitHub issue #5266 <https://github.com/chapel-lang/chapel/issues/5266>`_
+for more details and discussion.
 
 .. code-block:: chapel
 
@@ -539,7 +1096,7 @@ reflect what we think it intuitive to users and correct what is viewed in many
 circles to be a regrettable mistake in C. At the same time, we changed the
 binding of ``in`` and ``..`` to support some other Chapel idioms more naturally,
 like ``1..10 == 1..10``. To see the current operator precedence, refer to the
-:download:Quick Reference <https://chapel-lang.org/spec/quickReference.pdf> sheet.
+`Quick Reference sheet <https://chapel-lang.org/spec/quickReference.pdf>`_.
 
 improved interpretation of {D}
 ******************************

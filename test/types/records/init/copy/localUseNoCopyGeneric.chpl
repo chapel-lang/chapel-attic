@@ -4,15 +4,15 @@ module Bar {
   record R {
     var x,y,z;
   }
-  proc R.init(other:R){
+  proc R.init=(other:R){
     x = other.x;
     y = other.y;
     z = other.z;
   }
-  proc R.init(a,b,c) {
-    x = a;
-    y = b;
-    z = c;
+  proc R.init(x,y,z) {
+    this.x = x;
+    this.y = y;
+    this.z = z;
   }
 
   proc getter() {

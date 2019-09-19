@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2018 Cray Inc.
+ * Copyright 2004-2019 Cray Inc.
  * Other additional copyright holders may be indicated within.
  * 
  * The entirety of this work is licensed under the Apache License,
@@ -28,6 +28,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <sys/socket.h>
+#include <sys/select.h>
 #include <netinet/in.h>
 #ifndef __CYGWIN__
 #include <netinet/tcp.h>
@@ -64,6 +65,24 @@ typedef struct sys_statfs_s {
   uint64_t    f_ffree;    /* free file nodes in fs */
   uint64_t    f_namelen;  /* maximum length of filenames */
 } sys_statfs_t;
+
+typedef struct sys_stat_s {
+  dev_t       st_dev;         /* Device ID of device containing file */
+  ino_t       st_ino;         /* File serial number. */
+  mode_t      st_mode;        /* Mode of file (see below). */
+  nlink_t     st_nlink;       /* Number of hard links to the file. */
+  uid_t       st_uid;         /* User ID of file. */
+  gid_t       st_gid;         /* Group ID of file.  */
+  dev_t       st_rdev;        /* Device ID (if file is character or block special). */
+  off_t       st_size;        /* File Size in bytes */
+  struct timespec    st_atim; /* Last data access timestamp.  */
+  struct timespec    st_mtim; /* Last data modification timestamp. */
+  struct timespec    st_ctim; /* Last file status change timestamp. */
+  // blksize_t   st_blksize;     /* A file system-specific preferred I/O block size for this object. */
+  // blkcnt_t    st_blocks;      /* Number of blocks allocated for this object. */
+} sys_stat_t;
+
+void stat_to_sys_stat(const char* path, sys_stat_t* out_buf, struct stat* in_buf);
 
 typedef int fd_t;
 
@@ -147,7 +166,7 @@ err_t sys_open(const char* path, int flags, mode_t mode, fd_t* fd_out);
 err_t sys_close(fd_t fd);
 
 err_t sys_lseek(fd_t fd, off_t offset, int whence, off_t* offset_out);
-err_t sys_stat(const char* path, struct stat* buf);
+err_t sys_stat(const char* path, sys_stat_t* buf);
 err_t sys_fstat(fd_t fd, struct stat* buf);
 err_t sys_lstat(const char* path, struct stat* buf);
 err_t sys_fstatfs(fd_t fd, sys_statfs_t* buf);
@@ -267,6 +286,20 @@ err_t sys_socket(int domain, int type, int protocol, fd_t* fd_out);
 
 err_t sys_socketpair(int domain, int type, int protocol, fd_t* fd_out_a, fd_t* fd_out_b);
 
+err_t sys_select(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfds, struct timeval *timeout, int* nset);
+
+static inline void sys_fd_clr(int fd, fd_set* set) {
+  FD_CLR(fd, set);
+}
+static inline int sys_fd_isset(int fd, fd_set* set) {
+  return FD_ISSET(fd, set);
+}
+static inline void sys_fd_set(int fd, fd_set* set) {
+  FD_SET(fd, set);
+}
+static inline void sys_fd_zero(fd_set* set) {
+  FD_ZERO(set);
+}
 
 
 err_t sys_unlink(const char* path);

@@ -4,10 +4,6 @@ class C {
   var x: t;
 }
 
-var c: C(int);
-
-c = new C(int);
+var c = new C(int);
 
 writeln("{p = ", c.p, ", x = ", c.x, "}");
-
-delete c;

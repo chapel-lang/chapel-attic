@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2018 Cray Inc.
+ * Copyright 2004-2019 Cray Inc.
  * Other additional copyright holders may be indicated within.
  *
  * The entirety of this work is licensed under the Apache License,
@@ -33,7 +33,8 @@
  */
 
 module DateTime {
-  use SharedObject;
+  private use HaltWrappers only ;
+
   /* The minimum year allowed in `date` objects */
   param MINYEAR = 1;
   /* The maximum year allowed in `date` objects */
@@ -48,12 +49,6 @@ module DateTime {
   private const DI400Y = daysBeforeYear(401);
   private const DI100Y = daysBeforeYear(101);
   private const DI4Y   = daysBeforeYear(5);
-
-  // This avoids needing to create new Shared objects everywhere we need nil
-  private const nilTZ = new Shared(nil: TZInfo);
-
-  // This is here to work around issue #5267
-  private const chpl_today = datetime.today();
 
   /* Days in the week, starting with `Monday` = 0 */
   enum DayOfWeek {
@@ -86,8 +81,8 @@ module DateTime {
     extern proc gettimeofday(ref tv: timeval, tz): int;
 
     var tv: timeval;
-    if gettimeofday(tv, nil) != 0 then
-      halt("error in call to gettimeofday()");
+    var ret = gettimeofday(tv, c_nil);
+    assert(ret == 0);
     return (tv.tv_sec, tv.tv_usec);
   }
 
@@ -111,6 +106,10 @@ module DateTime {
     var tm_isdst:  c_int;         // daylight savings flag
     var tm_gmtoff: c_long;        // Seconds east of UTC
     var tm_zone:   tm_zoneType; // Timezone abbreviation
+  }
+
+  private proc assertInRange(val, low, high) {
+    assert(val >= low && val <= high);
   }
 
   private proc getLocalTime(t: 2*int) {
@@ -138,18 +137,17 @@ module DateTime {
     return y*365 + y/4 - y/100 + y/400;
   }
 
+  // assumes callee has checked for valid month range
   private proc daysBeforeMonth(year: int, month: int) {
-    if month < 1 || month > 12 then
-      halt("month must be between 1 and 12");
+    assertInRange(month, 1, 12);
     return DAYS_BEFORE_MONTH(month) + if (month > 2 && isLeapYear(year)) then 1 else 0;
   }
 
+  // assumes callee has checked for valid month/day ranges
   private proc ymdToOrd(year: int, month: int, day: int) {
-    const dim = daysInMonth(year, month);
-    if month < 1 || month > 12 then
-      halt("month must be between 1 and 12");
-    if day < 1 || day > dim then
-      halt("day must be between 1 and ", dim);
+    assertInRange(month, 1, 12);
+    const dim = try! daysInMonth(year, month);
+    assertInRange(day, 1, dim);
     return daysBeforeYear(year) + daysBeforeMonth(year, month) + day;
   }
 
@@ -186,10 +184,12 @@ module DateTime {
         month = 12;
         year -= 1;
       }
-      preceding -= daysInMonth(year, month);
+      const dim = try! daysInMonth(year, month);
+      preceding -= dim;
     }
     n -= preceding;
-    assert(0 <= n && n < daysInMonth(year, month));
+    const dim = try! daysInMonth(year, month);
+    assertInRange(n+1, 1, dim);
     return (year, month, n+1);
   }
 
@@ -199,10 +199,13 @@ module DateTime {
   }
 
   /* Return the number of days in month `month` during the year `year`.
-     The number for a month can change from year to year due to leap years. */
-  proc daysInMonth(year: int, month: int) {
+     The number for a month can change from year to year due to leap years.
+
+     :throws IllegalArgumentError: Thrown if `month` is out of range.
+*/
+  proc daysInMonth(year: int, month: int) throws {
     if month < 1 || month > 12 then
-      halt("month must be between 1 and 12");
+      throw new owned IllegalArgumentError("month must be between 1 and 12");
     if month == 2 && isLeapYear(year) then
       return 29;
     else
@@ -246,13 +249,13 @@ module DateTime {
   }
 
 
-  /* constructors/factories for date values */
+  /* initializers/factories for date values */
 
   pragma "no doc"
   proc date.init() {
   }
 
-  /* Construct a new `date` value from a `year`, `month`, and `day`. All
+  /* Initialize a new `date` value from a `year`, `month`, and `day`. All
      three arguments are required and must be in valid ranges.  The
      valid ranges are:
 
@@ -264,11 +267,12 @@ module DateTime {
   */
   proc date.init(year, month, day) {
     if year < MINYEAR-1 || year > MAXYEAR+1 then
-      halt("year is out of the valid range");
+      HaltWrappers.initHalt("year is out of the valid range");
     if month < 1 || month > 12 then
-      halt("month is out of the valid range");
-    if day < 1 || day > daysInMonth(year, month) then
-      halt("day is out of the valid range");
+      HaltWrappers.initHalt("month is out of the valid range");
+    const dim = try! daysInMonth(year, month);
+    if day < 1 || day > dim then
+      HaltWrappers.initHalt("day is out of the valid range");
 
     this.chpl_year = year;
     this.chpl_month = month;
@@ -354,7 +358,7 @@ module DateTime {
   proc date.isocalendar() {
     proc findThursday(d: date) {
       var wd = d.weekday();
-      return d + new timedelta(days = (DayOfWeek.Thursday - wd): int);
+      return d + new timedelta(days = (DayOfWeek.Thursday:int - wd:int));
     }
 
     proc findyear(d: date) {
@@ -405,7 +409,7 @@ module DateTime {
 
     const extraSpace = if day < 10 then " " else "";
     return wday + " " + month +
-           " " + extraSpace + day + " 00:00:00 " + year;
+           " " + extraSpace + day:string + " 00:00:00 " + year: string;
   }
 
   /* Return a formatted `string` matching the `format` argument and the date */
@@ -505,7 +509,7 @@ module DateTime {
     pragma "no doc"
     var chpl_hour, chpl_minute, chpl_second, chpl_microsecond: int;
     pragma "no doc"
-    var chpl_tzinfo: Shared(TZInfo);
+    var chpl_tzinfo: shared TZInfo?;
 
     /* The hour represented by this `time` value */
     proc hour {
@@ -548,21 +552,21 @@ module DateTime {
     }
   }
 
-  /* constructors/factories for time values */
+  /* initializers/factories for time values */
 
-  /* Construct a new `time` value from the given `hour`, `minute`, `second`,
+  /* Initialize a new `time` value from the given `hour`, `minute`, `second`,
      `microsecond`, and `timezone`.  All arguments are optional
    */
   proc time.init(hour=0, minute=0, second=0, microsecond=0,
-                 tzinfo: Shared(TZInfo)=nilTZ) {
+                 in tzinfo: shared TZInfo? = nil) {
     if hour < 0 || hour >= 24 then
-      halt("hour out of range");
+      HaltWrappers.initHalt("hour out of range");
     if minute < 0 || minute >= 60 then
-      halt("minute out of range");
+      HaltWrappers.initHalt("minute out of range");
     if second < 0 || second >= 60 then
-      halt("second out of range");
+      HaltWrappers.initHalt("second out of range");
     if microsecond < 0 || microsecond >= 1000000 then
-      halt("microsecond out of range");
+      HaltWrappers.initHalt("microsecond out of range");
     this.chpl_hour = hour;
     this.chpl_minute = minute;
     this.chpl_second = second;
@@ -580,7 +584,7 @@ module DateTime {
      `time` to create a new `time`. All arguments are optional.
    */
   proc time.replace(hour=-1, minute=-1, second=-1, microsecond=-1,
-                    tzinfo=this.tzinfo) {
+                    in tzinfo=this.tzinfo) {
     const newhour = if hour != -1 then hour else this.hour;
     const newminute = if minute != -1 then minute else this.minute;
     const newsecond = if second != -1 then second else this.second;
@@ -626,7 +630,7 @@ module DateTime {
     if tzinfo.borrow() == nil {
       return new timedelta();
     } else {
-      return tzinfo.utcoffset(datetime.today());
+      return tzinfo!.utcoffset(datetime.today());
     }
   }
 
@@ -635,7 +639,7 @@ module DateTime {
     if tzinfo.borrow() == nil {
       return new timedelta();
     } else {
-      return tzinfo.dst(datetime.today());
+      return tzinfo!.dst(datetime.today());
     }
   }
 
@@ -644,7 +648,7 @@ module DateTime {
     if tzinfo.borrow() == nil then
       return "";
     else
-      return tzinfo.tzname(new datetime(1,1,1));
+      return tzinfo!.tzname(new datetime(1,1,1));
   }
 
   /* Return a `string` matching the `format` argument for this `time` */
@@ -751,11 +755,9 @@ module DateTime {
       const dt1 = datetime.combine(new date(1900, 1, 1), t1);
       const dt2 = datetime.combine(new date(1900, 1, 1), t2);
       return dt1 < dt2;
-      //return (t1.replace(tzinfo=nilTZ) - t1.utcoffset()) <
-      //       (t2.replace(tzinfo=nilTZ) - t2.utcoffset());
+      //return (t1.replace(tzinfo=nil) - t1.utcoffset()) <
+      //       (t2.replace(tzinfo=nil) - t2.utcoffset());
     }
-    halt("unreachable");
-    return false;
   }
 
   pragma "no doc"
@@ -779,8 +781,6 @@ module DateTime {
       const dt2 = datetime.combine(new date(1900, 1, 1), t2);
       return dt1 <= dt2;
     }
-    halt("unreachable");
-    return false;
   }
 
   pragma "no doc"
@@ -804,8 +804,6 @@ module DateTime {
       const dt2 = datetime.combine(new date(1900, 1, 1), t2);
       return dt1 > dt2;
     }
-    halt("unreachable");
-    return false;
   }
 
   pragma "no doc"
@@ -829,8 +827,6 @@ module DateTime {
       const dt2 = datetime.combine(new date(1900, 1, 1), t2);
       return dt1 >= dt2;
     }
-    halt("unreachable");
-    return false;
   }
 
   /* A record representing a combined `date` and `time` */
@@ -896,22 +892,19 @@ module DateTime {
     }
   }
 
-  /* Constructors/factories for datetime values */
+  /* initializers/factories for datetime values */
 
   pragma "no doc"
   proc datetime.init() {
   }
 
-  /* Construct a new `datetime` value from the given `year`, `month`, `day`,
+  /* Initialize a new `datetime` value from the given `year`, `month`, `day`,
      `hour`, `minute`, `second`, `microsecond` and timezone.  The `year`,
      `month`, and `day` arguments are required, the rest are optional.
    */
   proc datetime.init(year, month, day,
                      hour=0, minute=0, second=0, microsecond=0,
-                     tzinfo: Shared(TZInfo)=new Shared(nil: TZInfo)) {
-    // For some reason, the compiler fails if we use nilTZ for the
-    // tzinfo argument above.  Almost everywhere else it works fine.
-    // Testcase: test/library/standard/DateTime/testTimezone.chpl
+                     in tzinfo: shared TZInfo? = nil) {
     chpl_date = new date(year, month, day);
     chpl_time = new time(hour, minute, second, microsecond, tzinfo);
   }
@@ -922,7 +915,7 @@ module DateTime {
   }
 
   /* Return a `datetime` value representing the current time and date */
-  proc type datetime.now(tz: Shared(TZInfo) = nilTZ) {
+  proc type datetime.now(in tz: shared TZInfo? = nil) {
     if tz.borrow() == nil {
       const timeSinceEpoch = getTimeOfDay();
       const lt = getLocalTime(timeSinceEpoch);
@@ -936,7 +929,7 @@ module DateTime {
                                microseconds=timeSinceEpoch(2));
       const utcNow = unixEpoch + td;
 
-      return (utcNow + tz.borrow().utcoffset(utcNow)).replace(tzinfo=tz);
+      return (utcNow + tz!.utcoffset(utcNow)).replace(tzinfo=tz);
     }
   }
 
@@ -949,7 +942,8 @@ module DateTime {
   }
 
   /* The `datetime` that is `timestamp` seconds from the epoch */
-  proc type datetime.fromtimestamp(timestamp: real, tz: Shared(TZInfo) = nilTZ) {
+  proc type datetime.fromtimestamp(timestamp: real,
+                                   in tz: shared TZInfo? = nil) {
     if tz.borrow() == nil {
       var t = (timestamp: int, ((timestamp - timestamp: int)*1000000): int);
       const lt = getLocalTime(t);
@@ -959,7 +953,7 @@ module DateTime {
                           microsecond=t(2));
     } else {
       var dt = datetime.utcfromtimestamp(timestamp);
-      return (dt + tz.borrow().utcoffset(dt)).replace(tzinfo=tz);
+      return (dt + tz!.utcoffset(dt)).replace(tzinfo=tz);
     }
   }
 
@@ -1008,7 +1002,7 @@ module DateTime {
    */
   proc datetime.replace(year=-1, month=-1, day=-1,
                         hour=-1, minute=-1, second=-1, microsecond=-1,
-                        tzinfo=this.tzinfo) {
+                        in tzinfo=this.tzinfo) {
     return datetime.combine(
       new date(if year == -1 then this.year else year,
                if month == -1 then this.month else month,
@@ -1021,7 +1015,7 @@ module DateTime {
   }
 
   /* Return the date and time converted into the timezone in the argument */
-  proc datetime.astimezone(tz: Shared(TZInfo)) {
+  proc datetime.astimezone(in tz: shared TZInfo) {
     if tzinfo == tz {
       return this;
     }
@@ -1034,7 +1028,7 @@ module DateTime {
     if tzinfo.borrow() == nil {
       halt("utcoffset called on naive datetime");
     } else {
-      return tzinfo.borrow().utcoffset(this);
+      return tzinfo!.utcoffset(this);
     }
   }
 
@@ -1042,14 +1036,14 @@ module DateTime {
   proc datetime.dst() {
     if tzinfo.borrow() == nil then
       halt("dst() called with nil tzinfo");
-    return tzinfo.dst(this);
+    return tzinfo!.dst(this);
   }
 
   /* Return the name of the timezone for this `datetime` value */
   proc datetime.tzname() {
     if tzinfo.borrow() == nil then
       return "";
-    return tzinfo.tzname(this);
+    return tzinfo!.tzname(this);
   }
 
   /* Return a filled record matching the C `struct tm` type for the given
@@ -1085,7 +1079,7 @@ module DateTime {
       ret.tm_isdst = 0;
       return ret;
     } else {
-      const utc = this.replace(tzinfo=nilTZ) - utcoffset();
+      const utc = this.replace(tzinfo=nil) - utcoffset();
       var ret = utc.timetuple();
       ret.tm_isdst = 0;
       return ret;
@@ -1178,8 +1172,8 @@ module DateTime {
     timeStruct.tm_sec = second: int(32);
 
     if tzinfo.borrow() != nil {
-      timeStruct.tm_isdst = tzinfo.dst(this).seconds: int(32);
-      timeStruct.tm_gmtoff = tzinfo.utcoffset(this).seconds: c_long;
+      timeStruct.tm_isdst = tzinfo!.dst(this).seconds: int(32);
+      timeStruct.tm_gmtoff = tzinfo!.utcoffset(this).seconds: c_long;
       timeStruct.tm_zone = nil;
     } else {
       timeStruct.tm_isdst = -1: int(32);
@@ -1191,7 +1185,7 @@ module DateTime {
     timeStruct.tm_mon = (month-1): int(32);    // 0 based
     timeStruct.tm_mday = day: int(32);
     timeStruct.tm_wday = (weekday(): int(32) + 1) % 7; // shift Sunday to 0
-    timeStruct.tm_yday = (this.replace(tzinfo=nilTZ) - new datetime(year, 1, 1)).days: int(32);
+    timeStruct.tm_yday = (this.replace(tzinfo=nil) - new datetime(year, 1, 1)).days: int(32);
 
     strftime(c_ptrTo(buf), bufLen, fmt.c_str(), timeStruct);
     var str = __primitive("cast", c_string, c_ptrTo(buf)): string;
@@ -1320,12 +1314,10 @@ module DateTime {
       return new timedelta(days=newday, hours=newhour, minutes=newmin,
                            seconds=newsec, microseconds=newmicro);
     } else {
-      return dt1.replace(tzinfo=nilTZ) -
-                                dt2.replace(tzinfo=nilTZ) +
+      return dt1.replace(tzinfo=nil) -
+                                dt2.replace(tzinfo=nil) +
                                 dt2.utcoffset() - dt1.utcoffset();
     }
-    halt("this should be unreachable");
-    return new timedelta();
   }
 
   pragma "no doc"
@@ -1335,18 +1327,18 @@ module DateTime {
       halt("Cannot compare naive datetime to aware datetime");
     } else if dt1.tzinfo == dt2.tzinfo {
       // just ignore tzinfo
-      var d1: date = dt1.replace(tzinfo=nilTZ).getdate(),
-          d2: date = dt2.replace(tzinfo=nilTZ).getdate();
-      var t1: time = dt1.replace(tzinfo=nilTZ).gettime(),
-          t2: time = dt2.replace(tzinfo=nilTZ).gettime();
+      var d1: date = dt1.replace(tzinfo=nil).getdate(),
+          d2: date = dt2.replace(tzinfo=nil).getdate();
+      var t1: time = dt1.replace(tzinfo=nil).gettime(),
+          t2: time = dt2.replace(tzinfo=nil).gettime();
 
       return d1.year == d2.year && d1.month == d2.month && d1.day == d2.day &&
                         t1.hour == t2.hour && t1.minute == t2.minute &&
                         t1.second == t2.second &&
                         t1.microsecond == t2.microsecond;
     } else {
-      return (dt1.replace(tzinfo=nilTZ) - dt1.utcoffset()) ==
-             (dt2.replace(tzinfo=nilTZ) - dt2.utcoffset());
+      return (dt1.replace(tzinfo=nil) - dt1.utcoffset()) ==
+             (dt2.replace(tzinfo=nil) - dt2.utcoffset());
     }
   }
 
@@ -1367,11 +1359,9 @@ module DateTime {
       else if date2 < date1 then return false;
       else return dt1.gettime() < dt2.gettime();
     } else {
-      return (dt1.replace(tzinfo=nilTZ) - dt1.utcoffset()) <
-             (dt2.replace(tzinfo=nilTZ) - dt2.utcoffset());
+      return (dt1.replace(tzinfo=nil) - dt1.utcoffset()) <
+             (dt2.replace(tzinfo=nil) - dt2.utcoffset());
     }
-    halt("this should be unreachable");
-    return false;
   }
 
   pragma "no doc"
@@ -1386,11 +1376,9 @@ module DateTime {
       else if date2 < date1 then return false;
       else return dt1.gettime() <= dt2.gettime();
     } else {
-      return (dt1.replace(tzinfo=nilTZ) - dt1.utcoffset()) <=
-             (dt2.replace(tzinfo=nilTZ) - dt2.utcoffset());
+      return (dt1.replace(tzinfo=nil) - dt1.utcoffset()) <=
+             (dt2.replace(tzinfo=nil) - dt2.utcoffset());
     }
-    halt("this should be unreachable");
-    return false;
   }
 
   pragma "no doc"
@@ -1405,11 +1393,9 @@ module DateTime {
       else if date2 > date1 then return false;
       else return dt1.gettime() > dt2.gettime();
     } else {
-      return (dt1.replace(tzinfo=nilTZ) - dt1.utcoffset()) >
-             (dt2.replace(tzinfo=nilTZ) - dt2.utcoffset());
+      return (dt1.replace(tzinfo=nil) - dt1.utcoffset()) >
+             (dt2.replace(tzinfo=nil) - dt2.utcoffset());
     }
-    halt("this should be unreachable");
-    return false;
   }
 
   pragma "no doc"
@@ -1424,11 +1410,9 @@ module DateTime {
       else if date2 > date1 then return false;
       else return dt1.gettime() >= dt2.gettime();
     } else {
-      return (dt1.replace(tzinfo=nilTZ) - dt1.utcoffset()) >=
-             (dt2.replace(tzinfo=nilTZ) - dt2.utcoffset());
+      return (dt1.replace(tzinfo=nil) - dt1.utcoffset()) >=
+             (dt2.replace(tzinfo=nil) - dt2.utcoffset());
     }
-    halt("this should be unreachable");
-    return false;
   }
 
 
@@ -1489,9 +1473,9 @@ module DateTime {
     }
   }
 
-  /* Constructors/factories for timedelta values */
+  /* initializers/factories for timedelta values */
 
-  /* Construct a `timedelta` object.  All arguments are optional and
+  /* Initialize a `timedelta` object.  All arguments are optional and
      default to 0. Since only `days`, `seconds` and `microseconds` are
      stored, the other arguments are converted to days, seconds
      and microseconds. */
@@ -1525,10 +1509,10 @@ module DateTime {
     this.chpl_microseconds = us;
 
     if this.days < -999999999 then
-      halt("Overflow: days < -999999999");
+      HaltWrappers.initHalt("Overflow: days < -999999999");
 
     if this.days > 999999999 then
-      halt("Overflow: days > 999999999");
+      HaltWrappers.initHalt("Overflow: days > 999999999");
   }
 
   /* Create a `timedelta` from a given number of seconds */
@@ -1673,25 +1657,25 @@ module DateTime {
   class TZInfo {
     /* The offset from UTC this class represents */
     proc utcoffset(dt: datetime): timedelta {
-      halt("Abstract base method called");
+      HaltWrappers.pureVirtualMethodHalt();
       return new timedelta();
     }
 
     /* The `timedelta` for daylight saving time */
     proc dst(dt: datetime): timedelta {
-      halt("Abstract base method called");
+      HaltWrappers.pureVirtualMethodHalt();
       return new timedelta();
     }
 
     /* The name of this time zone */
     proc tzname(dt: datetime): string {
-      halt("Abstract base method called");
+      HaltWrappers.pureVirtualMethodHalt();
       return "";
     }
 
     /* Convert a `time` in UTC to this time zone */
-    proc fromutc(in dt: datetime): datetime {
-      halt("Abstract base method called");
+    proc fromutc(dt: datetime): datetime {
+      HaltWrappers.pureVirtualMethodHalt();
       return new datetime(0,0,0);
     }
   }

@@ -15,18 +15,14 @@ class B:A {
     writeln("B.foo() called");
   }
   */
-  proc foo() {
+  override proc foo() {
     super.foo();
     writeln("B.foo() called");
   }
 }
 
-var a = new A();
-var b = new B();
+var a = new owned A();
+var b = new owned B();
 
 a.foo();
 b.foo();
-
-delete b;
-delete a;
-

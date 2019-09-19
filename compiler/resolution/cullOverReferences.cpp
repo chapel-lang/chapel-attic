@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2018 Cray Inc.
+ * Copyright 2004-2019 Cray Inc.
  * Other additional copyright holders may be indicated within.
  *
  * The entirety of this work is licensed under the Apache License,
@@ -22,8 +22,10 @@
 #include "astutil.h"
 #include "driver.h"
 #include "expr.h"
+#include "ForallStmt.h"
 #include "ForLoop.h"
 #include "iterator.h"
+#include "lateConstCheck.h"
 #include "loopDetails.h"
 #include "postFold.h"
 #include "resolution.h"
@@ -95,7 +97,6 @@ static void lowerContextCallPreferRefConstRef(ContextCallExpr* cc);
 static void lowerContextCallPreferConstRefValue(ContextCallExpr* cc);
 static void lowerContextCallComputeConstRef(ContextCallExpr* cc, bool notConst, Symbol* lhsSymbol);
 static bool firstPassLowerContextCall(ContextCallExpr* cc);
-static void lateConstCheck(std::map<BaseAST*, BaseAST*> & reasonNotConst);
 
 static bool
 symExprIsSetByDef(SymExpr* def) {
@@ -256,32 +257,42 @@ bool symExprIsSet(SymExpr* se)
   if (se->symbol()->qualType().isConst())
     return false;
 
-  bool ret = false;
   int defOrUse = isDefAndOrUse(se);
   if (defOrUse & 1) { // def
-    ret |= symExprIsSetByDef(se);
+    if (symExprIsSetByDef(se))
+      return true;
   }
   if (defOrUse & 2) { // use
-    ret |= symExprIsSetByUse(se);
+    if (symExprIsSetByUse(se))
+      return true;
   }
 
-  return ret;
+  return false;
 }
 
 static
 bool callSetsSymbol(Symbol* sym, CallExpr* call)
 {
-  bool ret = false;
   for_alist(expr, call->argList) {
     if (SymExpr* se = toSymExpr(expr)) {
       if (se->symbol() == sym) {
         if (symExprIsSet(se)) {
-          ret = true;
+          return true;
         }
       }
     }
   }
-  return ret;
+  return false;
+}
+
+// If 'expr' is the outer var of a shadow var SV and
+// SV has the ref intent, return SV.
+static ShadowVarSymbol* refShadowVarForOuterVarExpr(Expr* expr) {
+  if (isOuterVarOfShadowVar(expr))
+    if (ShadowVarSymbol* svar = toShadowVarSymbol(expr->parentSymbol))
+      if (svar->intent == TFI_REF)
+        return svar;
+  return NULL;
 }
 
 // Would choosing the refCall or valueCall change our determination
@@ -384,7 +395,14 @@ void createFieldQualifiersIfNeeded(Symbol* sym)
   if (at && !sym->fieldQualifiers) {
     int numFields = at->numFields();
     sym->fieldQualifiers = new Qualifier[numFields+1]; // +1 for 1-base
-    sym->fieldQualifiers[0] = QUAL_UNKNOWN;
+    Qualifier totalQ = QUAL_UNKNOWN;
+    if (sym->isRef()) {
+      if (sym->isConstant())
+        totalQ = QUAL_CONST_REF;
+      else
+        totalQ = QUAL_REF;
+    }
+    sym->fieldQualifiers[0] = totalQ;
     int i = 1;
     for_fields(field, at) {
       Qualifier q = QUAL_UNKNOWN;
@@ -462,6 +480,7 @@ void markConst(GraphNode node)
         if (sym->fieldQualifiers[i] == QUAL_REF)
           sym->fieldQualifiers[i] = QUAL_CONST_REF;
       }
+      markSymbolConst(sym);
     } else {
       // mark only fieldIndex
       int i = node.fieldIndex;
@@ -645,6 +664,23 @@ void cullOverReferences() {
       }
     }
   }
+  // forward-flow constness for getting refs to tuples
+  // this would be handled by a FLAG_REF_TO_CONST_WHEN_CONST_THIS accessor
+  // but for whatever reason the compiler doesn't always use that for tuples.
+  forv_Vec(CallExpr, call, gCallExprs) {
+    if (call->isPrimitive(PRIM_GET_MEMBER)) {
+      CallExpr* move = toCallExpr(call->parentExpr);
+      if (move->isPrimitive(PRIM_MOVE)) {
+        SymExpr* aggregateSe = toSymExpr(call->get(1));
+        SymExpr* lhsSe = toSymExpr(move->get(1));
+        AggregateType* at = toAggregateType(aggregateSe->getValType());
+        // note, at might be NULL for unmanaged SomeClass
+        if (at && !at->isClass() && aggregateSe->symbol()->qualType().isConst())
+            markSymbolConst(lhsSe->symbol());
+      }
+    }
+  }
+
 
   // Determine const-ness of ArgSymbols with INTENT_REF_MAYBE_CONST
   forv_Vec(ArgSymbol, arg, gArgSymbols) {
@@ -659,23 +695,22 @@ void cullOverReferences() {
       continue;
     }
 
+    AggregateType* argAt = toAggregateType(arg->getValType());
+    if (argAt && argAt->symbol->hasFlag(FLAG_TUPLE) &&
+        containsReferenceFields(argAt)) {
+      AggregateType* tupleType  = toAggregateType(arg->type);
+      int            fieldIndex = 1;
 
-    if (arg->intent == INTENT_REF_MAYBE_CONST) {
-      if (arg->type->symbol->hasFlag(FLAG_TUPLE)) {
-        AggregateType* tupleType  = toAggregateType(arg->type);
-        int            fieldIndex = 1;
-
-        for_fields(field, tupleType) {
-          if (field->isRef() ||
-              field->type->symbol->hasFlag(FLAG_TUPLE)) {
-            collectedSymbols.push_back(makeNode(arg,fieldIndex));
-          }
-
-          fieldIndex++;
+      for_fields(field, tupleType) {
+        if (field->isRef() ||
+            field->type->symbol->hasFlag(FLAG_TUPLE)) {
+          collectedSymbols.push_back(makeNode(arg,fieldIndex));
         }
-      } else {
-        collectedSymbols.push_back(makeNode(arg,0));
+
+        fieldIndex++;
       }
+    } else if (arg->intent == INTENT_REF_MAYBE_CONST) {
+      collectedSymbols.push_back(makeNode(arg,0));
     }
   }
 
@@ -729,30 +764,63 @@ void cullOverReferences() {
 
     DEBUG_SYMBOL(sym);
 
+    AggregateType* symAt = toAggregateType(sym->getValType());
+    bool symHasRefFields = symAt && containsReferenceFields(symAt);
+
     // If we already determined that a symbol is const, no need to
     // do additional work here.
-    if (sym->qualType().isConst())
+    if (sym->qualType().isConst() && !symHasRefFields)
       continue;
 
     // If it's a tuple, create the field qualifiers if needed
-    if (sym->type->symbol->hasFlag(FLAG_TUPLE))
+    if (symHasRefFields) {
       createFieldQualifiersIfNeeded(sym);
+
+      // If it has ref fields, and all of them are const, do no more here
+      bool allConst = (sym->fieldQualifiers[0] != QUAL_REF);
+      int i = 1;
+      for_fields(field, symAt) {
+        if (field->isRef()) {
+          if (sym->fieldQualifiers[i] == QUAL_REF)
+            allConst = false;
+        }
+        i++;
+      }
+      if (allConst)
+        continue;
+    }
 
     bool setter = false;
     bool revisit = false;
 
     for_SymbolSymExprs(se, sym) {
 
-      // Check several cases that might require other other
-      // information to resolve. These can be added to the revisitGraph.
+      // Check several cases that might require other information
+      // to resolve. These can be added to the revisitGraph.
       if (CallExpr* call = toCallExpr(se->parentExpr)) {
+
+        // Case: loop.
+        bool foundLoop = false;
+        bool isForall = false;
+        IteratorDetails leaderDetails;
+        ForLoop* followerForLoop = NULL;
+        std::vector<IteratorDetails> detailsVector;
+
+        if (ForallStmt* pfs = isForallIterExpr(call)) {
+
+          gatherLoopDetails(pfs, isForall, leaderDetails,
+                            followerForLoop, detailsVector);
+          foundLoop = true;
+        }
+
+        // Otherwise, look for a ForLoop / old style forall
 
         // Check if sym is iterated over. In that case, what's the
         // index variable?
         //
         // It's important that this case run before the check
         // for build_tuple.
-        {
+        else {
           // Find enclosing PRIM_MOVE
           CallExpr* move = toCallExpr(se->parentExpr->getStmtExpr());
           if (!move->isPrimitive(PRIM_MOVE))
@@ -763,6 +831,8 @@ void cullOverReferences() {
             SymExpr* lhs = toSymExpr(move->get(1));
             Symbol* iterator = lhs->symbol();
             ForLoop* forLoop = NULL;
+            ForallStmt*   fs = NULL;
+            // Todo expand isChplIterOrLoopIterator to watch for ForallStmt?
 
             // marked with chpl__iter or with type iterator class?
             if (isChplIterOrLoopIterator(iterator, forLoop)) {
@@ -771,10 +841,13 @@ void cullOverReferences() {
 
               if (!forLoop) {
                 Expr* e = move;
-                while (e && !isForLoop(e)) {
+                while (e) {
+                  if ( (forLoop = toForLoop(e)) )
+                    break;
+                  if ( (fs = toForallStmt(e)) )
+                    break;
                   e = e->next;
                 }
-                forLoop = toForLoop(e);
               }
 
               if (forLoop) {
@@ -782,21 +855,29 @@ void cullOverReferences() {
                 // correspondence between what was iterated over
                 // and the index variables.
 
-                bool isForall = false;
-                IteratorDetails leaderDetails;
-                ForLoop* followerForLoop = NULL;
-                std::vector<IteratorDetails> detailsVector;
-
                 /*
                 printf("print working on node %i %i\n",
                        node.variable->id, node.fieldIndex);
-                
+
                 printf("for iterator %i\n", iterator->id);
                 */
 
                 gatherLoopDetails(forLoop, isForall, leaderDetails,
                                   followerForLoop, detailsVector);
+                foundLoop = true;
+              }
+              else if (fs) {
+                // Ditto if it is a ForallStmt.
 
+                gatherLoopDetails(fs, isForall, leaderDetails,
+                                  followerForLoop, detailsVector);
+                foundLoop = true;
+              }
+            }
+          }
+        }
+
+        if (foundLoop) {
                 bool handled = false;
 
                 for (size_t i = 0; i < detailsVector.size(); i++) {
@@ -859,11 +940,9 @@ void cullOverReferences() {
 
                 if (handled)
                   continue; // continue outer loop
-              }
-            }
-          }
         }
 
+        // Case: 'call' invokes build_tuple().
         if (FnSymbol* calledFn = call->resolvedFunction()) {
           if (calledFn->hasFlag(FLAG_BUILD_TUPLE)) {
             if (CallExpr* move = toCallExpr(call->parentExpr)) {
@@ -914,6 +993,7 @@ void cullOverReferences() {
           }
         }
 
+        // Case: ContextCallExpr.
         // check for the case that sym is passed a ContextCall
         // and the determination depends on which branch is chosen.
         if (ContextCallExpr* cc = toContextCallExpr(call->parentExpr)) {
@@ -940,10 +1020,11 @@ void cullOverReferences() {
 
             addDependency(revisitGraph, srcNode, node);
 
-            continue; // move on to the next iteration
+            continue; // move on to the next SymExpr
           }
         }
 
+        // Case: tuple cast fn or accessor-like fn or const?-ref formal.
         if (FnSymbol* calledFn = call->resolvedFunction()) {
           ArgSymbol* formal = actual_to_formal(se);
 
@@ -964,7 +1045,7 @@ void cullOverReferences() {
 
               addDependency(revisitGraph, srcNode, node);
 
-              continue; // move on to the next iteration
+              continue; // move on to the next SymExpr
             }
           }
 
@@ -991,7 +1072,7 @@ void cullOverReferences() {
 
                 addDependency(revisitGraph, srcNode, node);
 
-                continue; // move on to the next iteration
+                continue; // move on to the next SymExpr
               }
             }
           }
@@ -1013,13 +1094,13 @@ void cullOverReferences() {
 
             addDependency(revisitGraph, srcNode, node);
 
-            continue; // move on to the next iteration
+            continue; // move on to the next SymExpr
           }
 
         }
 
-        // Check for the case of extracting a reference field from
-        // a tuple into another Symbol
+        // Case: extracting a reference field.
+        // from a tuple into another Symbol
         if (call->isPrimitive(PRIM_GET_MEMBER_VALUE))
           if (CallExpr* parentCall = toCallExpr(call->parentExpr))
             if (parentCall->isPrimitive(PRIM_MOVE)) {
@@ -1064,18 +1145,64 @@ void cullOverReferences() {
               }
             }
 
+        // Case: creating a temporary from one tuple to another tuple.
+        if (call->isPrimitive(PRIM_SET_MEMBER)) {
+          SymExpr* base       = toSymExpr(call->get(1));
+          Symbol*  baseSymbol = base->symbol();
+
+          SymExpr* rhs        = toSymExpr(call->get(3));
+          Symbol*  rhsSymbol  = rhs->symbol();
+
+          if (rhsSymbol == sym) {
+            SymExpr*       fieldSe    = toSymExpr(call->get(2));
+            Symbol*        field      = fieldSe->symbol();
+            AggregateType* tupleType  = toAggregateType(base->getValType());
+            int            fieldIndex = 1;
+
+            for_fields(curField, tupleType) {
+              if (curField == field) {
+                break;
+              }
+
+              fieldIndex++;
+            }
+
+            INT_ASSERT(fieldIndex <= tupleType->numFields());
+
+            // ignore if the field set isn't
+            // the current field.
+            if (node.fieldIndex == 0 || node.fieldIndex == fieldIndex) {
+              // add a dependency in the graph. Knowing if the
+              // tuple field is set will tell us if the
+              // RHS is set.
+              GraphNode srcNode = makeNode(baseSymbol, fieldIndex);
+
+              collectedSymbols.push_back(srcNode);
+
+              revisit = true;
+
+              addDependency(revisitGraph,
+                            srcNode,
+                            makeNode(rhsSymbol, 0));
+
+              continue;
+            }
+          }
+        }
+
         // Check for the case of extracting a star tuple field?
 
-        // Check for the case that sym is moved to a compiler-introduced
-        // variable, possibly with PRIM_MOVE tmp, PRIM_ADDR_OF sym
+        // Case: sym is moved to a compiler temp, ex.
+        //   PRIM_MOVE tmp, PRIM_ADDR_OF sym
+        CallExpr* call2 = call;
         if (call->isPrimitive(PRIM_ADDR_OF) ||
             call->isPrimitive(PRIM_SET_REFERENCE) ||
             call->isPrimitive(PRIM_GET_MEMBER) ||
             call->isPrimitive(PRIM_GET_SVEC_MEMBER))
-            call = toCallExpr(call->parentExpr);
+          call2 = toCallExpr(call->parentExpr);
 
-        if (call->isPrimitive(PRIM_MOVE)) {
-          SymExpr* lhs       = toSymExpr(call->get(1));
+        if (call2->isPrimitive(PRIM_MOVE)) {
+          SymExpr* lhs       = toSymExpr(call2->get(1));
           Symbol*  lhsSymbol = lhs->symbol();
 
           if (lhsSymbol != sym &&
@@ -1088,9 +1215,18 @@ void cullOverReferences() {
 
             addDependency(revisitGraph, srcNode, node);
 
-            continue; // move on to the next iteration
+            continue; // move on to the next SymExpr
           }
         }
+      }  // if (CallExpr* call = toCallExpr(se->parentExpr))
+
+      // Case: sym is the outer variable in a forall intent.
+      if (ShadowVarSymbol* svar = refShadowVarForOuterVarExpr(se)) {
+        GraphNode srcNode = makeNode(svar, node.fieldIndex);
+        collectedSymbols.push_back(srcNode);
+        addDependency(revisitGraph, srcNode, node);
+        revisit = true;
+        continue; // move on to the next SymExpr
       }
 
       // Determine if se represents a "setting" or a "getting" mention of sym
@@ -1106,12 +1242,12 @@ void cullOverReferences() {
           }
         }
       }
-    }
+    }  // for_SymbolSymExprs(se, sym)
 
     if (revisit) {
       if (setter) {
         // We decided to revisit this Symbol, but separate uses
-        // determined it to be const. So don't revisit it.
+        // determined it to be not const. So don't revisit it.
         revisit = false;
       } else {
         // We might still decide to use setter.
@@ -1132,7 +1268,7 @@ void cullOverReferences() {
         markConst(node);
       }
     }
-  }
+  }  // for(size_t i = 0; i < collectedSymbols.size(); i++)
 
   // Handle the graph of revisits
   // Note this could be a cyclic graph when there are recursive
@@ -1185,7 +1321,7 @@ void cullOverReferences() {
   // Now, lower ContextCalls
   forv_Vec(ContextCallExpr, cc, gContextCallExprs) {
     // Some ContextCallExprs have already been removed above
-    if (cc->parentExpr == NULL)
+    if (!cc->inTree())
       continue;
 
     CallExpr* move = toCallExpr(cc->parentExpr);
@@ -1209,7 +1345,7 @@ void cullOverReferences() {
   // markConst / markNotConst so there is nothing else to do
   // here for ArgSymbols.
 
-  lateConstCheck(reasonNotConst);
+  lateConstCheck(&reasonNotConst);
 }
 
 // Handle certain degenerate cases, such as when a
@@ -1278,7 +1414,7 @@ void lowerContextCallPreferRefConstRef(ContextCallExpr* cc)
     which = USE_CONST_REF;
   } else {
     which = USE_VALUE;
-    INT_ASSERT("lowering context call with only 1 option");
+    INT_FATAL("lowering context call with only 1 option");
   }
 
   lowerContextCall(cc, which);
@@ -1300,7 +1436,7 @@ void lowerContextCallPreferConstRefValue(ContextCallExpr* cc)
     which = USE_VALUE;
   } else {
     which = USE_REF;
-    INT_ASSERT("lowering context call with only 1 option");
+    INT_FATAL("lowering context call with only 1 option");
   }
 
   lowerContextCall(cc, which);
@@ -1355,7 +1491,7 @@ void lowerContextCall(ContextCallExpr* cc, choose_type_t which)
     INT_ASSERT(constRefCall != NULL);
   if (which == USE_VALUE)
     INT_ASSERT(valueCall != NULL);
-  
+
   CallExpr* someCall = refCall;
   if (someCall == NULL) someCall = constRefCall;
   if (someCall == NULL) someCall = valueCall;
@@ -1470,256 +1606,5 @@ void lowerContextCall(ContextCallExpr* cc, choose_type_t which)
     // Replace the ContextCallExpr with the ref call
     if (refCall) cc->replace(refCall);
     else if(constRefCall) cc->replace(constRefCall);
-  }
-}
-
-static bool isTupleOfTuples(Type* t)
-{
-  AggregateType* at = toAggregateType(t->getValType());
-
-  if (at && at->symbol->hasFlag(FLAG_TUPLE)) {
-    for_fields(field, at) {
-      if (field->getValType()->symbol->hasFlag(FLAG_TUPLE))
-        return true;
-    }
-  }
-
-  return false;
-}
-
-
-static void printReason(BaseAST* reason, BaseAST** lastPrintedReason)
-{
-  // First, figure out the module and function it's in
-  Expr* expr = toExpr(reason);
-  if (Symbol* s = toSymbol(reason))
-    expr = s->defPoint;
-  ModuleSymbol* inModule = expr->getModule();
-  FnSymbol* inFunction = NULL;
-
-  if (FnSymbol* fn = toFnSymbol(reason))
-    inFunction = fn;
-  else
-    inFunction = expr->getFunction();
-
-  // We'll output differently based upon whether it's
-  // in a user-defined module or a compiler-generated function.
-  bool user = inModule->modTag == MOD_USER;
-  bool compilerGenerated = false;
-  if (inFunction != NULL)
-    compilerGenerated = inFunction->hasFlag(FLAG_COMPILER_GENERATED);
-
-  BaseAST* last = *lastPrintedReason;
-  bool same = (last != NULL &&
-               reason->fname() == last->fname() &&
-               reason->linenum() == last->linenum());
-
-  if (developer || (user && !compilerGenerated && !same)) {
-    if (isArgSymbol(reason) || isFnSymbol(reason))
-      USR_PRINT(reason, "to ref formal here");
-    else if (TypeSymbol* ts = toTypeSymbol(reason))
-      USR_PRINT(reason, "to formal of type %s", ts->name);
-    else
-      USR_PRINT(reason, "passed as ref here");
-
-    // useful for debugging this pass
-    if (developer)
-      USR_PRINT(reason, "id %i", reason->id);
-  } else {
-    if (TypeSymbol* ts = toTypeSymbol(reason))
-      USR_PRINT("to formal of type %s", ts->name);
-  }
-
-  *lastPrintedReason = reason;
-}
-
-/* Since const-checking can depend on ref-pair determination
-   or upon the determination of whether an array formal with
-   blank intent is passed by ref or by value, do final const checking here.
-
-   TODO: decide if we also need const checking in functionResolution.cpp.
- */
-static void lateConstCheck(std::map<BaseAST*, BaseAST*> & reasonNotConst)
-{
-  forv_Vec(CallExpr, call, gCallExprs) {
-
-    // Ignore calls removed earlier by this pass.
-    if (call->parentExpr == NULL) {
-      continue;
-    }
-
-    if (FnSymbol* calledFn = call->resolvedFunction()) {
-      char        cn1          = calledFn->name[0];
-      const char* calleeParens = (isalpha(cn1) || cn1 == '_') ? "()" : "";
-
-      // resolved calls
-      for_formals_actuals(formal, actual, call) {
-        bool error = false;
-
-        if (actual->qualType().isConst() && ! formal->qualType().isConst()) {
-          // But... there are exceptions
-
-          // If the formal intent is INTENT_REF_MAYBE_CONST,
-          // earlier cullOverReferences should have changed it
-          // to INTENT_REF or INTENT_CONST_REF. If not, it's something
-          // that was ignored by earlier portions of this pass.
-          if (formal->intent == INTENT_REF_MAYBE_CONST) {
-            // OK, not an error
-
-          // it's OK if we're calling a function marked
-          // FLAG_REF_TO_CONST_WHEN_CONST_THIS and the result is
-          // marked const. In that case, we pretend that the `this`
-          // argument would be marked const too.
-          } else if (calledFn->hasFlag(FLAG_REF_TO_CONST_WHEN_CONST_THIS) &&
-                     formal->hasFlag(FLAG_ARG_THIS)) {
-            CallExpr* move = toCallExpr(call->parentExpr);
-            if (move && move->isPrimitive(PRIM_MOVE)) {
-              SymExpr* lhs = toSymExpr(move->get(1));
-              Symbol* lhsSym = lhs->symbol();
-              if (lhsSym->qualType().isConst())
-                ; // OK, lhsSym has const Qualifier
-              else if (lhsSym->hasFlag(FLAG_REF_TO_CONST))
-                ; // OK, lhsSym is marked with FLAG_REF_TO_CONST
-              else
-                error = true; // l-value error
-            }
-
-          // Or, if passing a 'const' thing into an 'in' formal,
-          // that's OK
-          } else if (formal->intent == INTENT_IN &&
-                     !formal->type->symbol->hasFlag(FLAG_COPY_MUTATES)) {
-            // OK, not an error
-          } else {
-            error = true;
-          }
-        }
-
-        // TODO: check tuple const-ness:
-        //   make analysis above more complete
-        //   work with toSymExpr(actual)->symbol()->fieldQualifiers
-        //   handle tuples containing tuples properly
-
-        FnSymbol* inFn = call->parentSymbol->getFunction();
-
-        // Ignore errors in functions marked with FLAG_SUPPRESS_LVALUE_ERRORS.
-        if (inFn->hasFlag(FLAG_SUPPRESS_LVALUE_ERRORS)) {
-          error = false;
-        }
-
-        // A 'const' record should be able to be initialized
-        if (calledFn->name == astrInit) {
-          error = false;
-        }
-
-        // For now, ignore errors with tuple construction/build_tuple
-        if (calledFn->hasFlag(FLAG_BUILD_TUPLE) ||
-            (calledFn->hasFlag(FLAG_CONSTRUCTOR) &&
-             calledFn->retType->symbol->hasFlag(FLAG_TUPLE))) {
-          error = false;
-        }
-
-        // For now, ignore errors with tuples-of-tuples.
-        // Otherwise errors with e.g.
-        //   const tup = (("a", 1), ("b", 2));
-        //   for x in tup { writeln(x); }
-        if (isTupleOfTuples(formal->type)) {
-          error = false;
-        }
-
-        // For now, ignore errors with default constructors
-        if (calledFn->hasFlag(FLAG_DEFAULT_CONSTRUCTOR)) {
-          error = false;
-        }
-
-        // For now, ignore errors with calls to promoted functions.
-        // To turn this off, get this example working:
-        //   test/functions/ferguson/ref-pair/plus-reduce-field-in-const.chpl
-        if (calledFn->hasFlag(FLAG_PROMOTION_WRAPPER)) {
-          error = false;
-        }
-
-        if (error) {
-          USR_FATAL_CONT(actual,
-                         "const actual is passed to %s formal '%s' of %s%s",
-                         formal->intentDescrString(),
-                         formal->name,
-                         calledFn->name, calleeParens);
-
-          BaseAST* lastPrintedReason = NULL;
-
-          printReason(formal->getValType()->symbol, &lastPrintedReason);
-
-          SymExpr* actSe = toSymExpr(actual);
-
-          if (actSe != NULL &&
-              actSe->symbol()->hasFlag(FLAG_CONST_DUE_TO_TASK_FORALL_INTENT)) {
-            printTaskOrForallConstErrorNote(actSe->symbol());
-          }
-
-          printReason(formal, &lastPrintedReason);
-
-          BaseAST* reason     = reasonNotConst[formal];
-          BaseAST* lastReason = formal;
-
-          while (reason) {
-            BaseAST* printCause = reason;
-
-            // If the last reason and the this reason are both Symbols,
-            // try to figure out what links them by looking at uses
-            // of lastReason.
-            if (isSymbol(lastReason) && isArgSymbol(reason)) {
-              Symbol*    lastSym   = toSymbol(lastReason);
-              ArgSymbol* curFormal = toArgSymbol(reason);
-
-              for_SymbolSymExprs(se, lastSym) {
-                if (CallExpr* parentCall = toCallExpr(se->parentExpr)) {
-                  if (parentCall->isResolved()) {
-                    if (curFormal == actual_to_formal(se)) {
-                      printReason(se, &lastPrintedReason);
-                      break;
-                    }
-                  }
-                }
-              }
-            }
-
-            // Go from LHS VarSymbol to called fn
-            // for better reporting for the reason of context-call
-            if (VarSymbol* v = toVarSymbol(reason)) {
-              for_SymbolDefs(def, v) {
-                if (CallExpr* parentCall = toCallExpr(def->parentExpr)) {
-                  if (parentCall->isPrimitive(PRIM_MOVE)) {
-                    if (CallExpr* rhsCall = toCallExpr(parentCall->get(2))) {
-                      if (FnSymbol* rhsCalledFn = rhsCall->resolvedFunction()) {
-                        printReason(def,         &lastPrintedReason);
-                        printReason(rhsCalledFn, &lastPrintedReason);
-                        printCause = NULL;
-
-                        break;
-                      }
-                    }
-                  }
-                }
-              }
-            }
-
-            if (printCause) {
-              // Print out an annotation line
-              printReason(printCause, &lastPrintedReason);
-            }
-
-            if (reasonNotConst.count(reason) != 0) {
-              lastReason = reason;
-              reason     = reasonNotConst[reason];
-            } else {
-              break;
-            }
-          }
-        }
-      }
-    }
-
-    // For now, don't check primitives. Compiler can be loose
-    // with const-ness on its own internal temporaries.
   }
 }

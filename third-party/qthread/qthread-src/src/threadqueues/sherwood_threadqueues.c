@@ -70,17 +70,6 @@ static long      steal_chunksize = 0;
 # define STEAL_AMOUNT(q, ct)    do {} while(0)
 #endif /* ifdef STEAL_PROFILE */
 
-// Our onPark and onUnpark callbacks
-static void (*onPark)(void);
-static void (*onUnpark)(void);
-
-void qthread_registerOnPark(void (*_onPark)(void)) {
-    onPark = _onPark;
-}
-void qthread_registerOnUnpark(void (*_onUnpark)(void)) {
-    onUnpark = _onUnpark;
-}
-
 // Forward declarations
 qt_threadqueue_node_t INTERNAL *qt_threadqueue_dequeue_steal(qt_threadqueue_t *h,
                                                              qt_threadqueue_t *v);
@@ -516,11 +505,6 @@ qthread_t INTERNAL *qt_init_agg_task() // partly a duplicate from qthread.c
     t->ret             = 0;
     t->rdata           = NULL;
     t->preconds        = NULL;  // use for list of f and arg
-#ifdef QTHREAD_USE_ROSE_EXTENSIONS
-    t->task_counter      = 0;
-    t->parent            = NULL;
-    t->prev_thread_state = QTHREAD_STATE_ILLEGAL;
-#endif
     t->flags &= ~QTHREAD_HAS_ARGCOPY;
     t->flags |= QTHREAD_SIMPLE; // will remain a simple task if all tasks it batches are simple.
     t->flags |= QTHREAD_AGGREGATED;
@@ -914,14 +898,12 @@ qthread_t INTERNAL *qt_scheduler_get_thread(qt_threadqueue_t         *q,
 
         if ((node == NULL) && (active)) {
             if (qlib->nshepherds > 1) {
-                if (onPark) onPark();
                 if (!steal_disable) {
                     node = qthread_steal(my_shepherd); // TODO: same agg behavior when stealing
                 } else {
                     while (NULL == q->head) SPINLOCK_BODY();
                     continue;
                 }
-                if (onUnpark) onUnpark();
             }
         }
         if (node) {

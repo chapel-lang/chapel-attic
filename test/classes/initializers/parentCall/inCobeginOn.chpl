@@ -5,13 +5,12 @@ class Foo {
     x = xVal + yVal;
     cobegin {
       on xVal.locale {
-        this.initDone();
+        this.complete();
       }
       writeln("in cobegin, whee!");
     }
   }
 }
 
-var foo = new Foo(5, 2);
+var foo = new shared Foo(5, 2);
 writeln(foo);
-delete foo;

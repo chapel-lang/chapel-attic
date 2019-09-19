@@ -1,5 +1,5 @@
 config const printResults = false;
-var mo = memory_order_seq_cst; // can't have configs of extern types
+param mo = memoryOrder.seqCst;
 
 proc doit(type myType) {
   var ax: atomic myType;
@@ -30,31 +30,11 @@ proc doit(type myType) {
   ax.write(0:myType, mo);
   coforall i in 1..15 do on Locales[i%numLocales] { // 15 is max for int(8)
       var a = (ax.fetchAdd(i:myType, mo)+i:myType):myType;
-      ax.compareExchange(a, a, mo);
+      ax.compareAndSwap(a, a, mo);
     }
   x = ax.read(mo);
   if x != 120:myType then
-    writeln(myType:string, ": ERROR: (fetchAdd/compareExchange) x=", x, " (should be 120)");
-  if printResults then writeln(x);
-
-  ax.write(0:myType, mo);
-  coforall i in 1..15 do on Locales[i%numLocales] { // 15 is max for int(8)
-      var a = (ax.fetchAdd(i:myType, mo)+i:myType):myType;
-      ax.compareExchangeStrong(a, a, mo);
-    }
-  x = ax.read(mo);
-  if x != 120:myType then
-    writeln(myType:string, ": ERROR: (fetchAdd/compareExchangeStrong) x=", x, " (should be 120)");
-  if printResults then writeln(x);
-
-  ax.write(0:myType, mo);
-  coforall i in 1..15 do on Locales[i%numLocales] { // 15 is max for int(8)
-      var a = (ax.fetchAdd(i:myType, mo)+i:myType):myType;
-      ax.compareExchangeWeak(a, a, mo);
-    }
-  x = ax.read(mo);
-  if x != 120:myType then
-    writeln(myType:string, ": ERROR: (fetchAdd/compareExchangeWeak) x=", x, " (should be 120)");
+    writeln(myType:string, ": ERROR: (fetchAdd/compareAndSwap) x=", x, " (should be 120)");
   if printResults then writeln(x);
 
   var b: atomic bool;
@@ -142,18 +122,18 @@ proc doit(type myType) {
   for i in D do aA[i].write(i:myType, mo);
   var A = [a in aA] a.read(mo);
   for i in D {
-    if A[i-D.dim(1).low+1] != i:myType then
-      writeln(myType:string, ": ERROR: A[", i-D.dim(1).low+1, "]=",
-              A[i-D.dim(1).low+1], " (should be ", i, ")");
+    if A[i] != i:myType then
+      writeln(myType:string, ": ERROR: A[", i, "]=",
+              A[i], " (should be ", i, ")");
   }
   if printResults then writeln(A);
 
   for i in D do aA[i].write((i+1):myType);
   A = aA.read(mo);
   for i in D {
-    if A[i-D.dim(1).low+1] != (i+1):myType then
-      writeln(myType:string, ": ERROR: A[", i-D.dim(1).low+1, "]=",
-              A[i-D.dim(1).low+1], " (should be ", i+1, ")");
+    if A[i] != (i+1):myType then
+      writeln(myType:string, ": ERROR: A[", i, "]=",
+              A[i], " (should be ", i+1, ")");
   }
   if printResults then writeln(A);
 }

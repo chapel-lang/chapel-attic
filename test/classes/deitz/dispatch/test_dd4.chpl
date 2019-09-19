@@ -1,7 +1,3 @@
-//
-// Noakes: The style of this test implies that it has leaks
-//
-
 class C {
   proc goo() {
     writeln("C.goo");
@@ -16,14 +12,14 @@ class D : C {
 }
 
 class E : D {
-  proc goo() {
+  override proc goo() {
     writeln("E.goo");
   }
 }
 
-(new C()).goo();
-(new D()).goo();
-(new E()).goo();
+(new borrowed C()).goo();
+(new borrowed D()).goo();
+(new borrowed E()).goo();
 
-(new D()).foo();
-(new E()).foo();
+(new borrowed D()).foo();
+(new borrowed E()).foo();

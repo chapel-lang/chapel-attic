@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2018 Cray Inc.
+ * Copyright 2004-2019 Cray Inc.
  * Other additional copyright holders may be indicated within.
  *
  * The entirety of this work is licensed under the Apache License,
@@ -21,6 +21,9 @@
 #define _num_h_
 
 #include <cstring>
+#include <sstream>
+#include <string>
+
 #include "chpltypes.h"
 #include "map.h"
 #include "misc.h"
@@ -47,22 +50,34 @@ enum IF1_const_kind {
 
 enum IF1_string_kind {
   STRING_KIND_STRING,
+  STRING_KIND_BYTES,
   STRING_KIND_C_STRING
 };
 
+// This is a sentinel value whose actual value doesn't really matter
+// as long as it can be distinguished from other legal bool sizes (so
+// that `bool` remains a distinct type from `bool(n)` for the legal
+// values of 'n'
+//
+#define BOOL_SYS_WIDTH 0
+
 enum IF1_bool_type {
-  BOOL_SIZE_1, BOOL_SIZE_SYS, BOOL_SIZE_8, BOOL_SIZE_16, BOOL_SIZE_32,
+  BOOL_SIZE_SYS, BOOL_SIZE_8, BOOL_SIZE_16, BOOL_SIZE_32,
   BOOL_SIZE_64, BOOL_SIZE_NUM
 };
 
+// when updating these, be sure to also update int_type_precision!
 enum IF1_int_type {
   INT_SIZE_8, INT_SIZE_16, INT_SIZE_32, INT_SIZE_64, INT_SIZE_NUM
 };
 
+// when updating these, be sure to also update float_type_precision!
 enum IF1_float_type {
   FLOAT_SIZE_32, FLOAT_SIZE_64, FLOAT_SIZE_NUM
 };
 
+// these should correspond to double the IF1_float_types.
+// i.e. float_type_precision[i] here should refer to the real size of i
 enum IF1_complex_type {
   COMPLEX_SIZE_64, COMPLEX_SIZE_128, COMPLEX_SIZE_NUM
 };
@@ -88,7 +103,7 @@ class Immediate { public:
     // Unions are initialized based off the first element, so we need to have
     // the largest thing first to make sure it is all zero initialized
 
-    // complex values
+    // complex values - only used for the type's default value
     complex128 v_complex128;
     complex64  v_complex64;
 
@@ -122,9 +137,11 @@ class Immediate { public:
   uint64_t uint_value( void)    const;
   uint64_t bool_value( void)    const;
   const char* string_value( void)const;
+  double real_value( void)const;
   // calls int_value, uint_value, or bool_value as appropriate.
   int64_t  to_int( void)        const;
   uint64_t to_uint( void)       const;
+  std::string to_string(void)   const;
 
   Immediate& operator=(const Immediate&);
   Immediate& operator=(bool b) {
@@ -186,9 +203,23 @@ inline const char*
 Immediate::string_value( void) const {
   INT_ASSERT(const_kind == CONST_KIND_STRING);
   INT_ASSERT(string_kind == STRING_KIND_STRING ||
+             string_kind == STRING_KIND_BYTES ||
              string_kind == STRING_KIND_C_STRING);
 
   return v_string;
+}
+
+inline double
+Immediate::real_value( void) const {
+  double val = 0.0;
+  INT_ASSERT(const_kind == NUM_KIND_REAL || const_kind == NUM_KIND_IMAG);
+  switch (num_index) {
+  case FLOAT_SIZE_32: val = v_float32; break;
+  case FLOAT_SIZE_64: val = v_float64; break;
+  default:
+    INT_FATAL("unknown real size");
+  }
+  return val;
 }
 
 
@@ -242,6 +273,41 @@ Immediate::to_uint( void) const {
   return val;
 }
 
+inline std::string Immediate::to_string(void) const {
+  std::stringstream ss;
+  switch(const_kind) {
+  case NUM_KIND_INT: ss << int_value(); break;
+  case NUM_KIND_BOOL: ss << bool_value(); break;
+  case NUM_KIND_UINT: ss << uint_value(); break;
+  case CONST_KIND_STRING: return string_value();
+  case NUM_KIND_REAL: {
+    if (num_index == FLOAT_SIZE_32) {
+      ss << v_float32;
+    } else if (num_index == FLOAT_SIZE_64) {
+      ss << v_float64;
+    } else {
+      INT_FATAL("Unexpected real size");
+    }
+    break;
+  }
+  case NUM_KIND_COMPLEX: {
+    // Not expected to execute except for the type's
+    // default value
+    if (num_index == COMPLEX_SIZE_64) {
+      ss << v_complex64.r << "+ " << v_complex64.i;
+    } else if (num_index == COMPLEX_SIZE_128) {
+      ss << v_complex128.r << "+ " << v_complex128.i;
+    } else {
+      INT_FATAL("Unexpected complex size");
+    }
+    ss << "i";
+    break;
+  }
+  default: INT_FATAL("Unexpected type to convert to string"); break;
+  } // Closes switch statement
+  return ss.str();
+}
+
 class ImmHashFns { public:
   static unsigned int hash(Immediate *);
   static int equal(Immediate *, Immediate *);
@@ -251,7 +317,7 @@ class ImmHashFns { public:
 IFA_EXTERN int int_type_precision[5] IFA_EXTERN_INIT(CPP_IS_LAME);
 #undef CPP_IS_LAME
 
-#define CPP_IS_LAME {16,32,48,64,80,96,112,128}
+#define CPP_IS_LAME {32,64}
 IFA_EXTERN int float_type_precision[8] IFA_EXTERN_INIT(CPP_IS_LAME);
 #undef CPP_IS_LAME
 
@@ -260,16 +326,16 @@ IFA_EXTERN const char *num_kind_string[4][8] IFA_EXTERN_INIT(CPP_IS_LAME);
 #undef CPP_IS_LAME
 
 inline Immediate& Immediate::operator=(const Immediate& imm) {
-  memcpy(this, &imm, sizeof(imm));
+  memcpy((void*)this, &imm, sizeof(imm));
   return *this;
 }
 
 inline Immediate::Immediate(const Immediate& imm) {
-  memcpy(this, &imm, sizeof(imm));
+  memcpy((void*)this, &imm, sizeof(imm));
 }
 
 inline Immediate::Immediate() {
-  memset(this, 0, sizeof(*this));
+  memset((void*)this, 0, sizeof(*this));
 }
 
 inline unsigned int
@@ -287,13 +353,15 @@ ImmHashFns::equal(Immediate *imm1, Immediate *imm2) {
 
 int fprint_imm(FILE *fp, const Immediate &imm, bool showType = false);
 int snprint_imm(char *s, size_t max, const Immediate &imm);
-int snprint_imm(char *str, size_t max, char *control_string, const Immediate &imm);
 void coerce_immediate(Immediate *from, Immediate *to);
 void fold_result(Immediate *imm1, Immediate *imm2, Immediate *imm);
 void fold_constant(int op, Immediate *im1, Immediate *im2, Immediate *imm);
 void convert_string_to_immediate(const char *str, Immediate *imm);
 const char* istrFromUserUint(long long unsigned int i);
 const char* istrFromUserInt(long long int i);
+const char* istrFromUserDouble(double i);
+const char* istrFromUserImag(double i);
+const char* istrFromUserComplex(double re, double im);
 
 #endif
 

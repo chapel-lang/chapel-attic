@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2018 Cray Inc.
+ * Copyright 2004-2019 Cray Inc.
  * Other additional copyright holders may be indicated within.
  *
  * The entirety of this work is licensed under the Apache License,
@@ -93,36 +93,51 @@ void checkReturnTypesHaveRefTypes();
 
 // buildDefaultFunctions.cpp
 void buildDefaultDestructor(AggregateType* ct);
-void buildNearScopeEnumFunctions(EnumType* et);
-void buildFarScopeEnumFunctions(EnumType* et);
-
-// callDestructors.cpp
-void insertReferenceTemps(CallExpr* call);
-
-// createTaskFunctions.cpp -> implementForallIntents.cpp
-extern Symbol* markPruned;
-extern Symbol* markUnspecified;
-void replaceVarUses(Expr* topAst, SymbolMap& vars);
-void pruneOuterVars(Symbol* parent, SymbolMap& uses);
+void buildEnumFunctions(EnumType* et);
+FnSymbol* build_accessor(AggregateType* ct, Symbol* field,
+                         bool setter, bool typeMethod);
 
 // deadCodeElimination.cpp
 void deadBlockElimination();
 
 // flattenFunctions.cpp
 void flattenNestedFunction(FnSymbol* nestedFunction);
-void flattenNestedFunctions(Vec<FnSymbol*>& nestedFunctions);
+// When fastCCS=true, call sites are computed only for the functions that
+// are looked at. Such functions must not have dispatch parents/children.
+void flattenNestedFunctions(Vec<FnSymbol*>& nestedFunctions,
+                            bool fastCCS = false);
+
+// foralls.cpp
+void checkTypeParamTaskIntent(SymExpr* outerSE);
 
 // inlineFunctions.cpp
 BlockStmt* copyFnBodyForInlining(CallExpr* call, FnSymbol* fn, Expr* anchor);
 
+// iterator.cpp
+CallExpr* setIteratorRecordShape(Expr* ref, Symbol* ir, Symbol* shapeSpec,
+                                 bool fromForExpr);
+void setIteratorRecordShape(CallExpr* call);
+bool checkIteratorFromForExpr(Expr* ref, Symbol* shape);
+
+// lowerIterators.cpp, lowerForalls.cpp
+void lowerForallStmtsInline();
+void handleChplPropagateErrorCall(CallExpr* call);
+void fixupErrorHandlingExits(BlockStmt* body, bool& adjustCaller);
+void addDummyErrorArgumentToCall(CallExpr* call);
+bool isVirtualIterator(FnSymbol* iterFn);
+
 // normalize.cpp
 void normalize(FnSymbol* fn);
 void normalize(Expr* expr);
+void checkUseBeforeDefs(FnSymbol* fn);
 
 // parallel.cpp
 Type* getOrMakeRefTypeDuringCodegen(Type* type);
 Type* getOrMakeWideTypeDuringCodegen(Type* refType);
 CallExpr* findDownEndCount(FnSymbol* fn);
+
+// resolution
+Expr*     resolveExpr(Expr* expr);
 
 // type.cpp
 void initForTaskIntents();

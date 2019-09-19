@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2018 Cray Inc.
+ * Copyright 2004-2019 Cray Inc.
  * Other additional copyright holders may be indicated within.
  *
  * The entirety of this work is licensed under the Apache License,
@@ -255,7 +255,7 @@ static bool isInCForLoopHeader(Expr* expr) {
 *                                                                             *
 ************************************** | *************************************/
 
-static bool isDeadStringLiteral(VarSymbol* string);
+static bool isDeadStringOrBytesLiteral(VarSymbol* string);
 static void removeDeadStringLiteral(DefExpr* defExpr);
 
 static void deadStringLiteralElimination() {
@@ -274,7 +274,7 @@ static void deadStringLiteralElimination() {
 
       if (DefExpr* defExpr = toDefExpr(stmt)) {
         if (VarSymbol* symbol = toVarSymbol(defExpr->sym)) {
-          if (isDeadStringLiteral(symbol) == true) {
+          if (isDeadStringOrBytesLiteral(symbol) == true) {
             removeDeadStringLiteral(defExpr);
 
             numDeadLiteral = numDeadLiteral + 1;
@@ -301,10 +301,11 @@ static void deadStringLiteralElimination() {
 }
 
 // Noakes 2017/03/04: All literals have 1 def. Dead literals have 0 uses.
-static bool isDeadStringLiteral(VarSymbol* string) {
+static bool isDeadStringOrBytesLiteral(VarSymbol* string) {
   bool retval = false;
 
-  if (string->hasFlag(FLAG_CHAPEL_STRING_LITERAL) == true) {
+  if (string->hasFlag(FLAG_CHAPEL_STRING_LITERAL) == true ||
+      string->hasFlag(FLAG_CHAPEL_BYTES_LITERAL) == true) {
     int numDefs = string->countDefs();
     int numUses = string->countUses();
 
@@ -316,53 +317,31 @@ static bool isDeadStringLiteral(VarSymbol* string) {
   return retval;
 }
 
+// The current pattern to initialize a string literal,
+// a VarSymbol _str_literal_NNN, is approximately
 //
-// Noakes 2017/03/04
+//   def  new_temp  : string; // defTemp
 //
-// The current pattern to initialize a string literal is approximately
+//   call createStringWithBorrowedBuffer(new_temp,c"literal",...); //factoryCall
 //
-//   var  call_tmp : c_ptr;
+//   move _str_literal_NNN, new_temp;  // this is 'defn' - the single def
 //
-//   move call_tmp, cast(c_ptr(uint(8)), c"literal string")
-//
-//   var  ret_tmp  : string;
-//   ref  ref_tmp  : string;
-//
-//   move ref_tmp,  addrOf(ret_tmp);
-//
-//   _construct_string(call_tmp, ... , ref_tmp);
-//
-//   move the_str,  ret_tmp       // This is the single def
-//
-
 static void removeDeadStringLiteral(DefExpr* defExpr) {
   SymExpr*   defn  = toVarSymbol(defExpr->sym)->getSingleDef();
 
-  // Step backwards from the def of 'the_str'
-  Expr*      stmt7 = defn->getStmtExpr();         // move the_str, ret_tmp
-  Expr*      stmt6 = stmt7 ? stmt7->prev : NULL;  // _construct_string
-  Expr*      stmt5 = stmt6 ? stmt6->prev : NULL;  // move ref_tmp, addrOf(..)
-  Expr*      stmt4 = stmt5 ? stmt5->prev : NULL;  // ref  ref_tmp
-  Expr*      stmt3 = stmt4 ? stmt4->prev : NULL;  // var  ret_tmp
-  Expr*      stmt2 = stmt3 ? stmt3->prev : NULL;  // move call_tmp, cast(..)
-  Expr*      stmt1 = stmt2 ? stmt2->prev : NULL;  // var  call_tmp
+  // Step backwards from 'defn'
+  Expr* lastMove = defn->getStmtExpr();
+  Expr* factoryCall = lastMove->prev;
+  Expr* defTemp = factoryCall->prev;
 
   // Simple sanity checks
-  INT_ASSERT(isDefExpr (stmt1));
-  INT_ASSERT(isCallExpr(stmt2));
-  INT_ASSERT(isDefExpr (stmt3));
-  INT_ASSERT(isDefExpr (stmt4));
-  INT_ASSERT(isCallExpr(stmt5));
-  INT_ASSERT(isCallExpr(stmt6));
-  INT_ASSERT(isCallExpr(stmt7));
+  INT_ASSERT(isDefExpr(defTemp));
+  INT_ASSERT(isCallExpr(factoryCall));
+  INT_ASSERT(isCallExpr(lastMove));
 
-  stmt7->remove();
-  stmt6->remove();
-  stmt5->remove();
-  stmt4->remove();
-  stmt3->remove();
-  stmt2->remove();
-  stmt1->remove();
+  lastMove->remove();
+  factoryCall->remove();
+  defTemp->remove();
 
   defExpr->remove();
 }
@@ -458,7 +437,7 @@ static void deadModuleElimination() {
       // Inform every module about the dead module
       forv_Vec(ModuleSymbol, modThatMightUse, allModules) {
         if (modThatMightUse != mod) {
-          modThatMightUse->moduleUseRemove(mod);
+          modThatMightUse->deadCodeModuleUseRemove(mod);
         }
       }
     }

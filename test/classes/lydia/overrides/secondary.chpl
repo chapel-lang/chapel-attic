@@ -8,16 +8,13 @@ class A {
 class B: A {
 
 }
-proc B.foo(x) {
+override proc B.foo(x) {
   super.foo(x);
   writeln("in B.foo() with arg ", x);
 }
 
-var a = new A();
-var b = new B();
+var a = new owned A();
+var b = new owned B();
 
 a.foo(3);
 b.foo(2);
-
-delete b;
-delete a;

@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2018 Cray Inc.
+ * Copyright 2004-2019 Cray Inc.
  * Other additional copyright holders may be indicated within.
  * 
  * The entirety of this work is licensed under the Apache License,
@@ -211,6 +211,61 @@ void chpl_error_explicit(const char *message, int32_t lineno,
   chpl_exit_any(1);
 }
 
+
+static
+void msg_explicit_vs(char *restrict, size_t,
+                     int32_t, const char *restrict,
+                     const char *restrict,
+                     const char *restrict, va_list)
+       __attribute__((format(printf, 5, 0)));
+
+static
+void msg_explicit_vs(char *restrict str, size_t size,
+                     int32_t lineno, const char *restrict filename,
+                     const char *restrict severity,
+                     const char *restrict format, va_list ap) {
+  int len;
+
+  if (lineno > 0)
+    len = snprintf(str, size, "%s:%" PRId32 ": %s: ", filename, lineno,
+                   severity);
+  else if (filename)
+    len = snprintf(str, size, "%s: %s: ", filename, severity);
+  else
+    len = snprintf(str, size, "%s: ", severity);
+
+  if (len < size) {
+    str += len;
+    size -= len;
+
+    len = vsnprintf(str, size, format, ap);
+
+    if (len < size) {
+      str[len] = '\n';
+      str[len + 1] = '\0';
+    }
+  }
+}
+
+
+static
+void msg_explicit_v(FILE*,
+                    int32_t, const char *restrict,
+                    const char *restrict,
+                    const char *restrict, va_list)
+       __attribute__((format(printf, 5, 0)));
+
+static
+void msg_explicit_v(FILE* f,
+                    int32_t lineno, const char *restrict filename,
+                    const char *restrict severity,
+                    const char *restrict format, va_list ap) {
+  char buf[1024];
+  msg_explicit_vs(buf, sizeof(buf), lineno, filename, severity, format, ap);
+  fputs(buf, f);
+}
+
+
 void chpl_error_preformatted(const char* message) {
   spinhaltIfAlreadyExiting();
   fflush(stdout);
@@ -235,6 +290,19 @@ void chpl_internal_error(const char* message) {
   spinhaltIfAlreadyExiting();
   fflush(stdout);
   fprintf(stderr, "internal error: %s\n", message);
+  chpl_exit_any(2);
+}
+
+
+void chpl_internal_error_v(const char *restrict format, ...) {
+  spinhaltIfAlreadyExiting();
+  fflush(stdout);
+
+  va_list ap;
+  va_start(ap, format);
+  msg_explicit_v(stderr, 0, NULL, "internal error", format, ap);
+  va_end(ap);
+
   chpl_exit_any(2);
 }
 

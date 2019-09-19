@@ -5,8 +5,9 @@ module M {
 }
 
 module Y {
+  use M only;
   proc main() {
-    var y = new M.X(1);
+    var y = new unmanaged M.X(1);
 
     writeln('y = ', y);
 

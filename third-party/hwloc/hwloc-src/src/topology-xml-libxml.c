@@ -1,6 +1,6 @@
 /*
  * Copyright © 2009 CNRS
- * Copyright © 2009-2017 Inria.  All rights reserved.
+ * Copyright © 2009-2018 Inria.  All rights reserved.
  * Copyright © 2009-2011 Université Bordeaux
  * Copyright © 2009-2011 Cisco Systems, Inc.  All rights reserved.
  * See COPYING in top-level directory.
@@ -138,7 +138,7 @@ hwloc__libxml_import_get_content(hwloc__xml_import_state_t state,
   if (!child || child->type != XML_TEXT_NODE) {
     if (expected_length)
       return -1;
-    *beginp = "";
+    *beginp = (char *) "";
     return 0;
   }
 
@@ -447,6 +447,11 @@ hwloc_libxml_export_buffer(hwloc_topology_t topology, char **xmlbuffer, int *buf
   doc = hwloc__libxml2_prepare_export(topology);
   xmlDocDumpFormatMemoryEnc(doc, (xmlChar **)xmlbuffer, buflen, "UTF-8", 1);
   xmlFreeDoc(doc);
+  if (!*xmlbuffer) {
+    *buflen = 0;
+    return -1;
+  }
+  *buflen += 1; /* ending \0 was added but not counted in the length */
   return 0;
 }
 
@@ -514,6 +519,11 @@ hwloc_libxml_export_diff_buffer(hwloc_topology_diff_t diff, const char *refname,
   doc = hwloc__libxml2_prepare_export_diff(diff, refname);
   xmlDocDumpFormatMemoryEnc(doc, (xmlChar **)xmlbuffer, buflen, "UTF-8", 1);
   xmlFreeDoc(doc);
+  if (!*xmlbuffer) {
+    *buflen = 0;
+    return -1;
+  }
+  *buflen += 1; /* ending \0 was added but not counted in the length */
   return 0;
 }
 

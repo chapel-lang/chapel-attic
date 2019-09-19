@@ -44,8 +44,8 @@ class localePrivateData {
   }
 }
 
-var localePrivate: [PrivateSpace] localePrivateData(taskPrivateData);
-forall l in localePrivate do l = new localePrivateData(taskPrivateData);
+var localePrivate: [PrivateSpace] unmanaged localePrivateData(taskPrivateData)?;
+forall l in localePrivate do l = new unmanaged localePrivateData(taskPrivateData);
 
 // an example use
 config param nPerLocale = 113;
@@ -66,7 +66,7 @@ forall d in D {
 
 }
 
-if printTemps then writeln(localePrivate.temps);
+if printTemps then writeln(localePrivate!.temps);
 
 const numTasks = if dataParTasksPerLocale==0 then here.maxTaskPar
   else dataParTasksPerLocale;

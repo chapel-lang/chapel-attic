@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2018 Cray Inc.
+ * Copyright 2004-2019 Cray Inc.
  * Other additional copyright holders may be indicated within.
  * 
  * The entirety of this work is licensed under the Apache License,
@@ -94,7 +94,7 @@ module MatrixMarket {
 
       proc init(type eltype, const fname:string) {
          this.eltype = eltype;
-         fd = open(fname, iomode.cw, iokind.native);
+         fd = open(fname, iomode.cw);
          fout = fd.writer(start=0);
          headers_written=false;
       }
@@ -123,7 +123,12 @@ module MatrixMarket {
       }
 
       proc fake_headers(nrows, ncols, nnz) {
-         var tfout = fd.writer(start=HEADER_LINE.length);
+        // Update the headers written in write_headers
+        // since fout might still have buffered data, flush it
+        // before we try to update it with a separate channel.
+        fout.flush();
+
+         var tfout = fd.writer(start=HEADER_LINE.numBytes);
          tfout.writef("%i %i %i", nrows, ncols, nnz);
          tfout.close();
       }
@@ -162,7 +167,7 @@ module MatrixMarket {
    }
 
 proc mmwrite(const fname:string, mat:[?Dmat] ?T) where mat.domain.rank == 2 {
-   var mw = new MMWriter(T, fname);
+   var mw = new unmanaged MMWriter(T, fname);
    mw.write_headers(-1,-1,-1);
 
    var (ncols, nnz) = (0,0);
@@ -395,7 +400,7 @@ class MMReader {
      :type type eltype
  */
 proc mmread(type eltype, const fname:string) {
-   var mr = new MMReader(fname);
+   var mr = new unmanaged MMReader(fname);
    var toret = mr.read_array_from_file(eltype);
    delete mr;
    return toret;
@@ -406,7 +411,7 @@ proc mmread(type eltype, const fname:string) {
      :type type eltype
  */
 proc mmreadsp(type eltype, const fname:string) {
-   var mr = new MMReader(fname);
+   var mr = new unmanaged MMReader(fname);
    var toret = mr.read_sp_array_from_file(eltype);
    delete mr;
    return toret;

@@ -120,7 +120,7 @@ module Graph500_defs
       proc init (my_vertices, Histogram){
         this.my_vertices = my_vertices;
         this.Histogram = Histogram;
-        this.initDone();
+        this.complete();
          forall i in my_vertices {
             Vertices[i].nd = {1..Histogram[i]};
          }
@@ -139,7 +139,7 @@ module Graph500_defs
 class Level_Set {
   type Vertex_List;
   var Members: Vertex_List;
-  var previous: Level_Set (Vertex_List);
+  var previous: unmanaged Level_Set (Vertex_List)?;
 }
 
 

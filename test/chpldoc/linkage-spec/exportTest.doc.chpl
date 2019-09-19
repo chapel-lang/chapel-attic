@@ -154,3 +154,36 @@ export proc allThreeCommentless2(val: int): int {
   writeln("MAKE ME A PIZZA");
   return 11;
 }
+
+/* Commenting withExternCNameComment */
+export "test_name" proc withExternCNameComment() {
+}
+
+export "test_name" proc withExternCName() {
+}
+
+/* test param method for withParamExternCName */
+proc getName() param {
+  return "name";
+}
+
+export "test"+getName() proc withParamExternCName() {
+}
+
+export record exportRecordNoComment { }
+
+/* Commenting exportRecordComment */
+export record exportRecordComment {
+  /* Commenting a field */
+  var field:int;
+}
+
+export "c_name1" record exportRecordRenamedNoComment { }
+
+/* Commenting exportRecordRenamedComment */
+export "c_name2" record exportRecordRenamedComment {
+  /* Commenting a field */
+  var field:int;
+}
+
+proc end() { }

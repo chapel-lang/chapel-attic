@@ -5,11 +5,10 @@ class Foo {
   type t = int;
 
   proc init() {
-    this.initDone();
+    this.complete();
     t = int; // This should fail
   }
 }
 
-var foo = new Foo();
+var foo = new owned Foo();
 writeln(foo);
-delete foo;

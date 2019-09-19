@@ -1,21 +1,21 @@
 pragma "safe"
 module borrowescapes {
 
-use OwnedObject;
+
 
 class MyClass {
   var data:int;
 }
 
 record R {
-  // TODO - get init with owned fields working
-  var c:Owned(MyClass);// = new Owned(nil:MyClass);
+
+  var c = new owned MyClass(234);
   proc init() {
-    //var tmp = new Owned(new MyClass(data));
-    //c = tmp;
-    //c.retain(new MyClass(data));
+    // A whole lot of nothing.
+    // To preserve the line numbers
+    // in the .good file for this test
   }
-  proc get(): MyClass {
+  proc get(): borrowed MyClass {
     return c.borrow();
   }
 }
@@ -25,35 +25,35 @@ record MyCollection {
   var b: R;
   proc init() {
   }
-  proc this(i:int): MyClass {
+  proc this(i:int): borrowed MyClass {
     if i == 1 then
       return a.get();
     else
       return b.get();
   }
-  iter these(): MyClass {
+  iter these(): borrowed MyClass {
     yield a.get();
     yield b.get();
   }
   proc returnsNil() {
-    return nil:MyClass;
+    return nil:borrowed MyClass?;
   }
 }
 
-var global:MyClass;
+var global:borrowed MyClass?;
 
 proc bad1() {
   var r:R;
-  r.c.retain(new MyClass(1));
+  r.c.retain(new unmanaged MyClass(1));
   global = r.get();
   // r.c deleted here
 }
 
 proc bad2() {
-  var outer:MyClass;
+  var outer:borrowed MyClass?;
   {
     var r:R;
-    r.c.retain(new MyClass(1));
+    r.c.retain(new unmanaged MyClass(1));
     outer = r.get();
     // r.c deleted here
   }
@@ -62,29 +62,29 @@ proc bad2() {
 
 proc bad3() {
   var group:MyCollection;
-  group.a.c.retain(new MyClass(1));
-  group.b.c.retain(new MyClass(2));
+  group.a.c.retain(new unmanaged MyClass(1));
+  group.b.c.retain(new unmanaged MyClass(2));
   global = group.this(1);
   global = group.this(2);
   // group.{a.b}.c deleted here
 }
 
 
-proc bad10() : MyClass {
+proc bad10() : borrowed MyClass {
   //var r = new R(1);
   //var tmp = new Owned(new MyClass(1));
   //r.c = tmp;
   var r:R;
-  r.c.retain(new MyClass(1));
+  r.c.retain(new unmanaged MyClass(1));
   return r.get();
   // r.c deleted here
 }
 
 proc bad21() {
-  var outer:MyClass = nil;
+  var outer:borrowed MyClass? = nil;
   {
     var r:R;
-    r.c.retain(new MyClass(1));
+    r.c.retain(new unmanaged MyClass(1));
     outer = r.get();
     // r.c deleted here
   }
@@ -92,11 +92,11 @@ proc bad21() {
 }
 
 proc bad22() {
-  var outer:MyClass = new MyClass(1);
+  var outer:borrowed MyClass = new borrowed MyClass(1);
   {
     var r:R;
-    r.c.retain(new MyClass(1));
-    delete outer;
+    r.c.retain(new unmanaged MyClass(1));
+
     outer = r.get();
     // r.c deleted here
   }
@@ -104,51 +104,51 @@ proc bad22() {
 }
 
 proc bad23() {
-  var outer:MyClass;
+  var outer:borrowed MyClass?;
   {
     var r:R;
-    r.c.retain(new MyClass(1));
+    r.c.retain(new unmanaged MyClass(1));
     outer = r.get();
     // r.c deleted here
   }
   writeln(outer);
-  outer = new MyClass(1);
-  delete outer;
+  outer = new borrowed MyClass(1);
 }
 
 
 proc ok1() {
-  global = new MyClass(10);
-  var a:MyClass = global; // OK: lifetime global > lifetime a
+  var unm = new unmanaged MyClass(10);
+  global = unm;
+  var a:borrowed MyClass? = global; // OK: lifetime global > lifetime a
   a = global;
   {
     var x = a; // OK: x has shorter lifetime than a
   }
-  delete global;
+  delete unm;
 }
 
 proc ok2() {
   var group:MyCollection;
-  group.a.c.retain(new MyClass(1));
-  group.b.c.retain(new MyClass(2));
+  group.a.c.retain(new unmanaged MyClass(1));
+  group.b.c.retain(new unmanaged MyClass(2));
   var x = group.returnsNil();
 }
 
 proc ok3() {
-  var x:MyClass = nil;
+  var x:borrowed MyClass? = nil;
 
   var r:R;
-  r.c.retain(new MyClass(1));
+  r.c.retain(new unmanaged MyClass(1));
  
   x = r.get();
 }
 
 proc ok4() {
   var group:MyCollection;
-  group.a.c.retain(new MyClass(1));
-  group.b.c.retain(new MyClass(2));
+  group.a.c.retain(new unmanaged MyClass(1));
+  group.b.c.retain(new unmanaged MyClass(2));
 
-  var first:MyClass = nil;
+  var first:borrowed MyClass? = nil;
 
   for i in 1..2 {
     var cur = group[i];
@@ -159,10 +159,10 @@ proc ok4() {
 
 proc ok5() {
   var group:MyCollection;
-  group.a.c.retain(new MyClass(1));
-  group.b.c.retain(new MyClass(2));
+  group.a.c.retain(new unmanaged MyClass(1));
+  group.b.c.retain(new unmanaged MyClass(2));
 
-  var first:MyClass = nil;
+  var first:borrowed MyClass? = nil;
 
   for i in group {
     if first == nil then

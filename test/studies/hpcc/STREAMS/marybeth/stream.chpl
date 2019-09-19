@@ -14,7 +14,7 @@ const memInBytes = memInMBs*MB;
 
 type elemType = real(64);
 const elemSizeInBytes = numBits(elemType)/bitsPerByte;
-const bytes = 3*elemSizeInBytes;
+const nBytes = 3*elemSizeInBytes;
 
 const maxIntBits2 = numBits(int) - 2;
 const maxPossibleElems = (memInBytes/elemSizeInBytes)/numVectors;
@@ -71,15 +71,13 @@ proc main() {
 }
 
 proc initStreamVectors() {
-  var randlist = new NPBRandomStream(eltType=real, seed=seed);
+  var randlist = new borrowed NPBRandomStream(eltType=real, seed=seed);
 
   randlist.fillRandom(A);
   randlist.fillRandom(B);
   randlist.fillRandom(C);
 
   A = 2.0 * A;
-
-  delete randlist;
 }
 
 proc computeStreamResults() {
@@ -91,7 +89,7 @@ proc computeStreamResults() {
 
 
 proc checkSTREAMresults() {
-  var randlist = new NPBRandomStream(real, seed);
+  var randlist = new unmanaged NPBRandomStream(real, seed);
 
   var Aref, Bref, Cref, error : [VecDomain] elemType;
 
@@ -150,7 +148,7 @@ proc writeStreamData() {
 proc writeStreamResults() {
   writeln( "Function\tRate (GB/s)\tAvg time\tMin time\tMax time");
   curGBs = mintime;
-  curGBs *= 1.0e-9 * bytes * vectorSize;
+  curGBs *= 1.0e-9 * nBytes * vectorSize;
   avgtime = sumtime/(numIters-1);  // skipped the 1st iteration
   writeln( "Triad    \t", curGBs, "\t", avgtime, "\t", mintime, "\t", maxtime);
 }

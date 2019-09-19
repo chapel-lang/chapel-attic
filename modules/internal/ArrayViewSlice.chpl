@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2018 Cray Inc.
+ * Copyright 2004-2019 Cray Inc.
  * Other additional copyright holders may be indicated within.
  *
  * The entirety of this work is licensed under the Apache License,
@@ -25,13 +25,29 @@
 module ArrayViewSlice {
   use ChapelStandard;
 
+  config param chpl_debugSerializeSlice = false,
+               chpl_serializeSlices = false;
+
+  private proc buildIndexCacheHelper(arr, dom) {
+    param isRankChangeReindex = arr.isRankChangeArrayView() ||
+                                arr.isReindexArrayView() ||
+                                (chpl__isArrayView(arr) && arr._containsRCRE());
+    if chpl__isDROrDRView(arr) && isRankChangeReindex {
+      if chpl__isArrayView(arr) then
+        return arr.indexCache.toSlice(dom);
+      else
+        return arr.dsiGetRAD().toSlice(dom);
+    } else {
+      return false;
+    }
+  }
+
   //
   // The class representing a slice of an array.  Like other array
   // class implementations, it supports the standard dsi interface.
   //
-  class ArrayViewSliceArr: BaseArr {
-    type eltType;  // see note on commented-out proc eltType below...
-
+  pragma "aliasing array"
+  class ArrayViewSliceArr: AbsBaseArr {
     // the representation of the slicing domain
     //
     // TODO: Can we privatize upon creation of the array-view slice and cache
@@ -47,11 +63,75 @@ module ArrayViewSlice {
     // (eventually...), the indexCache provides a mean of directly
     // accessing the array's ddata to avoid indirection overheads
     // through the array field above.
-    const indexCache = buildIndexCache();
+    //const indexCache = buildIndexCache();
+    const indexCache;
+
+    proc init(type eltType, const _DomPid, const dom, const _ArrPid, const _ArrInstance) {
+      super.init(eltType = eltType);
+      this._DomPid      = _DomPid;
+      this.dom          = dom;
+      this._ArrPid      = _ArrPid;
+      this._ArrInstance = _ArrInstance;
+
+      this.indexCache = buildIndexCacheHelper(_ArrInstance, dom);
+    }
 
     forwarding arr except these,
                       doiBulkTransferFromKnown, doiBulkTransferToKnown,
-                      doiBulkTransferFromAny,  doiBulkTransferToAny;
+                      doiBulkTransferFromAny,  doiBulkTransferToAny,
+                      chpl__serialize, chpl__deserialize;
+
+
+    //
+    // A helper routine to encode logic about when slices should be RVF'd.
+    // Currently we RVF slices whose domains and arrays are privatized
+    // (since doing so involves RVFing their PIDs) and that support the
+    // chpl__serialize() routine (and, we assume, chpl__deserialize())
+    //
+    proc chpl__rvfMe() param {
+      use Reflection;
+
+      if chpl_serializeSlices == false then
+        return false;
+      if (dom.dsiSupportsPrivatization() && arr.dsiSupportsPrivatization() &&
+          canResolveMethod(dom, "chpl__serialize") &&
+          canResolveMethod(arr, "chpl__serialize")) {
+        return true;
+      } else {
+        return false;
+      }
+    }
+
+    //
+    // Serialize a slice (when chpl__rvfMe() says to) by serializing its
+    // domain and array
+    //
+    proc chpl__serialize() where chpl__rvfMe() {
+      if chpl_debugSerializeSlice {
+        // use printf to avoid messing up tests checking comm counts
+        extern proc printf(x...);
+        printf("%d serializing a slice\n", here.id:c_int);
+      }
+      return (_to_borrowed(dom).chpl__serialize(),
+              _to_borrowed(arr).chpl__serialize());
+    }
+
+    //
+    // Deserialize a slice by deserializing its domain / array components
+    // and then returning a new ArrayViewSliceArr() instance referring
+    // to them.
+    //
+    proc type chpl__deserialize(data) {
+      type domType = __primitive("static field type", this, "dom");
+      type arrType = __primitive("static field type", this, "_ArrInstance");
+      const dom = _to_borrowed(domType).chpl__deserialize(data(1));
+      const arr = _to_borrowed(arrType).chpl__deserialize(data(2));
+      return new unmanaged ArrayViewSliceArr(eltType=arr.eltType,
+                                             _DomPid=data(1),
+                                             dom = dom,
+                                             _ArrPid=data(2),
+                                             _ArrInstance=arr);
+    }
 
 
     //
@@ -96,7 +176,8 @@ module ArrayViewSlice {
     iter these(param tag: iterKind) ref
       where tag == iterKind.standalone && !localeModelHasSublocales &&
            __primitive("method call resolves", privDom, "these", tag) {
-      forall i in privDom do yield arr.dsiAccess(i);
+      const ref myarr = arr;
+      forall i in privDom do yield myarr.dsiAccess(i);
     }
 
     iter these(param tag: iterKind) where tag == iterKind.leader {
@@ -107,8 +188,9 @@ module ArrayViewSlice {
 
     iter these(param tag: iterKind, followThis) ref
       where tag == iterKind.follower {
+      const ref myarr = arr;
       for i in privDom.these(tag, followThis) {
-        yield arr.dsiAccess[i];
+        yield myarr.dsiAccess[i];
       }
     }
 
@@ -125,7 +207,7 @@ module ArrayViewSlice {
       chpl_serialReadWriteRectangular(f, arr, privDom);
     }
 
-    proc dsiDisplayRepresentation() {
+    override proc dsiDisplayRepresentation() {
       writeln("Slice view");
       writeln("----------");
       writeln("of domain:");
@@ -200,8 +282,8 @@ module ArrayViewSlice {
     proc dsiHasSingleLocalSubdomain() param
       return privDom.dsiHasSingleLocalSubdomain();
 
-    proc dsiLocalSubdomain() {
-      return privDom.dsiLocalSubdomain();
+    proc dsiLocalSubdomain(loc: locale) {
+      return privDom.dsiLocalSubdomain(loc);
     }
 
 
@@ -209,17 +291,22 @@ module ArrayViewSlice {
     // privatization
     //
 
+    // If we're serializing slices then we don't want to privatize
+    // them proactively anymore.  If we're not serializing them, then we:
     // Don't want to privatize a DefaultRectangular, so pass the query on to
     // the wrapped array
     proc dsiSupportsPrivatization() param
+    {
+      if chpl_serializeSlices then return false;
       return _ArrInstance.dsiSupportsPrivatization();
+    }
 
     proc dsiGetPrivatizeData() {
       return (_DomPid, dom, _ArrPid, _ArrInstance);
     }
 
     proc dsiPrivatize(privatizeData) {
-      return new ArrayViewSliceArr(eltType=this.eltType,
+      return new unmanaged ArrayViewSliceArr(eltType=this.eltType,
                                    _DomPid=privatizeData(1),
                                    dom=privatizeData(2),
                                    _ArrPid=privatizeData(3),
@@ -271,7 +358,7 @@ module ArrayViewSlice {
     }
 
     // not sure what this is, but everyone seems to have one...
-    inline proc dsiGetBaseDom() {
+    override proc dsiGetBaseDom() {
       return dom;
     }
 

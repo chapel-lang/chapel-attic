@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2018 Cray Inc.
+ * Copyright 2004-2019 Cray Inc.
  * Other additional copyright holders may be indicated within.
  *
  * The entirety of this work is licensed under the Apache License,
@@ -25,31 +25,20 @@
  */
 module ChapelError {
   use ChapelStandard;
+  private use ChapelLocks;
 
   // Base class for errors
   // TODO: should Error include list pointers for TaskErrors?
   /* :class:`Error` is the base class for errors */
   class Error {
     pragma "no doc"
-    var _next: Error = nil; // managed by lock in record TaskErrorsRecord
+    var _next: unmanaged Error? = nil; // managed by lock in record TaskErrorsRecord
 
     // These fields save the line/file where the error was thrown.
     pragma "no doc"
     var thrownLine:int;
     pragma "no doc"
     var thrownFileId:int(32);
-
-    pragma "no doc"
-    proc msg: string {
-      compilerError("msg field in Error is no longer available");
-      return "";
-    }
-
-    pragma "no doc"
-    proc init(_msg:string) {
-      _next = nil;
-      compilerError("Error constructor accepting a string is no longer available");
-    }
 
     /* Construct an Error */
     proc init() {
@@ -67,7 +56,7 @@ module ChapelError {
        show information about the error including the result
        of calling :proc:`Error.message`.
      */
-    proc writeThis(f) {
+    override proc writeThis(f) {
       var description = chpl_describe_error(this);
       f <~> description;
     }
@@ -77,11 +66,24 @@ module ChapelError {
      If a `nil` :class:`Error` is thrown, :class:`NilThrownError`
      will be thrown instead.
    */
-  pragma "use default init"
   class NilThrownError : Error {
     pragma "no doc"
-    proc message() {
+    override proc message() {
       return "thrown error was nil";
+    }
+  }
+
+  class NilClassError : Error {
+    pragma "no doc"
+    override proc message() {
+      return "cannot convert nil class to non nilable type";
+    }
+  }
+
+  class ClassCastError : Error {
+    pragma "no doc"
+    override proc message() {
+      return "cannot cast class to type - runtime types not compatible";
     }
   }
 
@@ -101,8 +103,8 @@ module ChapelError {
       this.info   = info;
     }
 
-    proc message() {
-      if formal.isEmptyString() then
+    override proc message() {
+      if formal.isEmpty() then
         return info;
       else
         return "illegal argument '" + formal + "': " + info;
@@ -117,31 +119,19 @@ module ChapelError {
   // to be parallel-safe.
   pragma "no doc"
   record chpl_TaskErrors {
-    var _head: Error;
-    var _errorsLock: atomicbool;
-    // this atomic controls:
-    //  - _head
-    //  - all list elements ->_next
+    var _head: unmanaged Error? = nil;
+    var _errorsLock: chpl_LocalSpinlock;
 
-    inline proc _lockErrors() {
-      // WARNING: If you are calling this function directly from
-      // a remote locale, you should consider wrapping the call in
-      // an on clause to avoid excessive remote forks due to the
-      // testAndSet()
-      while (_errorsLock.testAndSet()) do chpl_task_yield();
-    }
-    inline proc _unlockErrors() {
-      _errorsLock.clear();
-    }
-    proc append(err: Error) {
+    proc append(err: unmanaged Error) {
       on this {
-        _lockErrors();
+        _errorsLock.lock();
         var tmp = _head;
         err._next = tmp;
         _head = err;
-        _unlockErrors();
+        _errorsLock.unlock();
       }
     }
+
     proc empty() {
       return _head == nil;
     }
@@ -163,40 +153,63 @@ module ChapelError {
 
    */
   class TaskErrors : Error {
+
+    // This could use a regular array but uses a c_ptr
+    // instead to work around order-of-resolution issues
+    // with the parallel array initialization code.
     pragma "no doc"
-    var _head: Error = nil;
+    var nErrors: int;
+    pragma "no doc"
+    var errorsArray: c_ptr(owned Error);
 
     pragma "no doc"
     proc init(ref group:chpl_TaskErrors) {
-      var cur:Error = group._head;
+      var head: unmanaged Error? = group._head;
       group._head = nil;
-      _head = nil;
-      this.initDone();
+      this.complete();
 
-      // Flatten nested TaskErrors
+      var cur: unmanaged Error?;
 
+      // Count the number of errors, including from nested errors
+      var n = 0;
+      cur = head;
       while cur != nil {
-        // remove it from that list
-        var curnext = cur._next;
-        cur._next = nil;
-
-        // Add head / errors in it to this list
-        var asTaskErr:TaskErrors = cur:TaskErrors;
+        var curnext = cur!._next;
+        var asTaskErr: unmanaged TaskErrors? = cur: unmanaged TaskErrors?;
         if asTaskErr == nil {
-          append(cur);
+          n += 1;
         } else {
-          // Remove & add errors in the sub-list
-          var sub:Error = asTaskErr._head;
-          asTaskErr._head = nil;
-          while sub != nil {
-            // remove it from that list
-            var subnext = sub._next;
-            sub._next = nil;
+          for e in asTaskErr! {
+            if e != nil then
+              n += 1;
+          }
+        }
+        cur = curnext;
+      }
 
-            // add it to this list
-            append(sub);
+      // Allocate the array to the appropriate size
+      // (Note, this assumes that owned Error can be zero'd
+      //  and that is valid initialization)
+      nErrors = n;
+      errorsArray = c_calloc(owned Error, n);
 
-            sub = subnext;
+      // Gather the errors into errorsArray starting at index idx
+      var idx = 0;
+      cur = head;
+      while cur != nil {
+        var curnext = cur!._next;
+        cur!._next = nil; // remove from any lists
+        var asTaskErr: unmanaged TaskErrors? = cur: unmanaged TaskErrors?;
+        if asTaskErr == nil {
+          errorsArray[idx].retain(cur!);
+          idx += 1;
+        } else {
+          for e in asTaskErr! {
+            // e is an owned error
+            if e != nil {
+              errorsArray[idx] = e;
+              idx += 1;
+            }
           }
           delete asTaskErr;
         }
@@ -204,23 +217,28 @@ module ChapelError {
       }
     }
 
-    /*
-       append a single error to the group
-     */
-    proc append(err:Error) {
-      var tmp = _head;
-      err._next = tmp;
-      _head = err;
-    }
-
     /* Create a :class:`TaskErrors` containing only the passed error */
-    proc init(err: Error) {
-      _head = err;
+    proc init(err: unmanaged Error) {
+      nErrors = 1;
+      errorsArray = c_calloc(owned Error, 1);
+      this.complete();
+      err._next = nil;
+      errorsArray[0].retain(err);
     }
 
     /* Create a :class:`TaskErrors` not containing any errors */
     proc init() {
-      _head = nil;
+      nErrors = 0;
+      errorsArray = nil;
+    }
+
+    proc deinit() {
+      if errorsArray {
+        for i in 0..#nErrors {
+          errorsArray[i].clear();
+        }
+        c_free(errorsArray);
+      }
     }
 
     /* Iterate over the errors contained in this :class:`TaskErrors`.
@@ -234,23 +252,21 @@ module ChapelError {
            }
 
      */
-    iter these() {
-      var e = _head;
-      while e != nil {
-        yield e;
-        e = e._next;
-      }
+    iter these() ref : owned Error {
+      for i in 0..#nErrors do
+        yield errorsArray[i];
     }
 
-    pragma "no doc"
-    proc deinit() {
-      var e = _head;
-      var todelete: Error;
-      while e != nil {
-        todelete = e;
-        e = e._next;
-        delete todelete;
+    /* Returns the first non-nil error contained in this TaskErrors group */
+    proc first() ref : owned Error {
+      var first = 0;
+      for i in 0..#nErrors {
+        if errorsArray[i] != nil {
+          first = i;
+          break;
+        }
       }
+      return errorsArray[first];
     }
 
     /*
@@ -260,13 +276,13 @@ module ChapelError {
        grow arbitrarily long if the :class:`TaskErrors` contains many errors.
 
      */
-    proc message() : string {
+    override proc message() : string {
       var n = 0;
 
       var minMsg:string;
       var maxMsg:string;
-      var first:Error;
-      var last:Error;
+      var first:borrowed Error?;
+      var last:borrowed Error?;
 
       for e in these() {
         if minMsg == "" || e.message() < minMsg then
@@ -295,12 +311,12 @@ module ChapelError {
         }
       }
 
-      var ret = n + " errors: ";
+      var ret = n:string + " errors: ";
 
-      if first != last then
-        ret += chpl_describe_error(first) + " ... " + chpl_describe_error(last);
-      else
-        ret += chpl_describe_error(first);
+      if first != nil && last != nil && first != last then
+        ret += chpl_describe_error(first!) + " ... " + chpl_describe_error(last!);
+      else if first != nil then
+        ret += chpl_describe_error(first!);
 
       return ret;
     }
@@ -309,11 +325,11 @@ module ChapelError {
        Iterate over those errors contained that are the passed type
        or a subclass of that type.
      */
-    iter filter(type t) where t:Error {
+    iter filter(type t) where isSubtype(_to_borrowed(t), borrowed Error) {
       for e in these() {
-        var tmp = e:t;
+        var tmp = _to_unmanaged(e):_to_nilable(_to_unmanaged(t));
         if tmp then
-          yield tmp;
+          yield _to_nonnil(tmp);
       }
     }
     pragma "no doc"
@@ -331,42 +347,91 @@ module ChapelError {
   }
 
   pragma "no doc"
-  proc chpl_error_type_name(err: Error) : string {
+  proc chpl_error_type_name(err: borrowed Error) : string {
     var cid =  __primitive("getcid", err);
     var nameC: c_string = __primitive("class name by id", cid);
     var nameS = nameC:string;
     return nameS;
   }
   pragma "no doc"
-  proc chpl_describe_error(err: Error) : string {
+  proc chpl_describe_error(err: borrowed Error) : string {
     var nameS = chpl_error_type_name(err);
 
     var ret = nameS + ": " + err.message();
 
     return ret;
   }
+
   pragma "no doc"
   pragma "insert line file info"
-  proc chpl_fix_thrown_error(err: Error): Error {
-    var fixErr: Error = err;
+  pragma "always propagate line file info"
+  proc chpl_do_fix_thrown_error(err: unmanaged Error?): unmanaged Error {
+
+    var fixErr: unmanaged Error? = err;
     if fixErr == nil then
-      fixErr = new NilThrownError();
+      fixErr = new unmanaged NilThrownError();
 
     const line = __primitive("_get_user_line");
     const fileId = __primitive("_get_user_file");
-    fixErr.thrownLine = line;
-    fixErr.thrownFileId = fileId;
+    fixErr!.thrownLine = line;
+    fixErr!.thrownFileId = fileId;
 
-    return fixErr;
+    return _to_nonnil(fixErr);
   }
+
   pragma "no doc"
-  proc chpl_delete_error(err: Error) {
+  pragma "insert line file info"
+  pragma "always propagate line file info"
+  proc chpl_fix_thrown_error(in err: owned Error?): unmanaged Error {
+    return chpl_do_fix_thrown_error(err.release());
+  }
+
+  pragma "no doc"
+  pragma "insert line file info"
+  pragma "always propagate line file info"
+  proc chpl_fix_thrown_error(in err: owned Error): unmanaged Error {
+    return chpl_do_fix_thrown_error(err.release());
+  }
+
+  pragma "no doc"
+  pragma "insert line file info"
+  pragma "always propagate line file info"
+  proc chpl_fix_thrown_error(err: _nilType) {
+    return chpl_do_fix_thrown_error(nil);
+  }
+
+  pragma "no doc"
+  pragma "last resort"
+  proc chpl_fix_thrown_error(err) {
+    type t = err.type;
+    if isCoercible(t, borrowed Error?) {
+      compilerError("Cannot throw an instance of type \'", t:string,
+                    "\' - please throw owned", 1);
+    } else if isClassType(t) {
+      compilerError("Cannot throw an instance of type \'",
+                    (t: borrowed): string,
+                    "\', not a subtype of Error");
+    } else {
+      compilerError("Cannot throw an instance of type \'", t: string,
+                    "\', not a subtype of Error");
+    }
+  }
+
+  pragma "no doc"
+  pragma "last resort"
+  proc chpl_fix_thrown_error(type errType) {
+    compilerError("Cannot throw a type: '", errType:string, "'. Did you forget the keyword 'new'?");
+  }
+
+  pragma "no doc"
+  proc chpl_delete_error(err: unmanaged Error?) {
     if err != nil then delete err;
   }
   pragma "no doc"
   pragma "function terminates program"
   pragma "insert line file info"
-  proc chpl_uncaught_error(err: Error) {
+  pragma "always propagate line file info"
+  proc chpl_uncaught_error(err: unmanaged Error) {
     extern proc chpl_error_preformatted(c_string);
 
     const myFileC:c_string = __primitive("chpl_lookupFilename",
@@ -380,8 +445,8 @@ module ChapelError {
     const thrownLine = err.thrownLine;
 
     var s = "uncaught " + chpl_describe_error(err) +
-            "\n  " + thrownFileS + ":" + thrownLine + ": thrown here" +
-            "\n  " + myFileS + ":" + myLine + ": uncaught here";
+            "\n  " + thrownFileS + ":" + thrownLine:string + ": thrown here" +
+            "\n  " + myFileS + ":" + myLine:string + ": uncaught here";
     chpl_error_preformatted(s.c_str());
   }
   // This is like the above, but it is only ever added by the
@@ -390,7 +455,7 @@ module ChapelError {
   pragma "no doc"
   pragma "insert line file info"
   pragma "always propagate line file info"
-  proc chpl_propagate_error(err: Error) {
+  proc chpl_propagate_error(err: unmanaged Error) {
     chpl_uncaught_error(err);
   }
   // This function is called to "normalize" the error returned
@@ -398,11 +463,11 @@ module ChapelError {
   // (since the author of the forall loop shouldn't need to know
   //  how many tasks were run in that loop).
   pragma "no doc"
-  proc chpl_forall_error(err: Error):Error {
-    if err:TaskErrors then
+  proc chpl_forall_error(err: unmanaged Error) : unmanaged Error {
+    if err:unmanaged TaskErrors? then
       return err;
     // If err wasn't a taskError, wrap it in one
-    return new TaskErrors(err);
+    return new unmanaged TaskErrors(err);
   }
 
   // The compiler generates functions to cast from strings to enums. This
@@ -411,9 +476,9 @@ module ChapelError {
   pragma "insert line file info"
   pragma "always propagate line file info"
   proc chpl_enum_cast_error(casted: string, enumName: string) throws {
-    if casted.isEmptyString() then
-      throw new IllegalArgumentError("bad cast from empty string to " + enumName);
+    if casted.isEmpty() then
+      throw new owned IllegalArgumentError("bad cast from empty string to " + enumName);
     else
-      throw new IllegalArgumentError("bad cast from string '" + casted + "' to " + enumName);
+      throw new owned IllegalArgumentError("bad cast from string '" + casted + "' to " + enumName);
   }
 }

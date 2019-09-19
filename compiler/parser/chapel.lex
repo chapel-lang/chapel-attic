@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2018 Cray Inc.
+ * Copyright 2004-2019 Cray Inc.
  * Other additional copyright holders may be indicated within.
  *
  * The entirety of this work is licensed under the Apache License,
@@ -64,7 +64,8 @@
 static int  processIdentifier(yyscan_t scanner);
 static int  processToken(yyscan_t scanner, int t);
 static int  processStringLiteral(yyscan_t scanner, const char* q, int type);
-static int  processMultilineStringLiteral(yyscan_t scanner, const char* q);
+static int  processMultilineStringLiteral(yyscan_t scanner, const char* q,
+                                          int type);
 
 static int  processExtern(yyscan_t scanner);
 static int  processExternCode(yyscan_t scanner);
@@ -89,21 +90,24 @@ letter           [_a-zA-Z]
 
 ident            {letter}({letter}|{digit}|"$")*
 
-binaryLiteral    0[bB]{bit}+
-octalLiteral     0[oO]{octDigit}+
-hexLiteral       0[xX]{hexDigit}+
-intLiteral       {digit}+|{binaryLiteral}|{octalLiteral}|{hexLiteral}
+binaryLiteral    0[bB]{bit}(_|{bit})*
+octalLiteral     0[oO]{octDigit}(_|{octDigit})*
+decimalLiteral   {digit}(_|{digit})*
+hexLiteral       0[xX]{hexDigit}(_|{hexDigit})*
+intLiteral       {binaryLiteral}|{octalLiteral}|{decimalLiteral}|{hexLiteral}
 
-exponent         [Ee][\+\-]?{digit}+
-floatLiteral1    {digit}*"."{digit}+({exponent})?
-floatLiteral2    {digit}+"."{exponent}
-floatLiteral3    {digit}+{exponent}
+digitsOrSeps     {digit}(_|{digit})*
+exponent         [Ee][\+\-]?{digitsOrSeps}
+floatLiteral1    {digitsOrSeps}?"."{digitsOrSeps}({exponent})?
+floatLiteral2    {digitsOrSeps}"."{exponent}
+floatLiteral3    {digitsOrSeps}{exponent}
 
 /* hex float literals, have decimal exponents indicating the power of 2 */
-hexDecExponent   [Pp][\+\-]?{digit}+
-floatLiteral4    0[xX]{hexDigit}*"."{hexDigit}+({hexDecExponent})?
-floatLiteral5    0[xX]{hexDigit}+"."{hexDecExponent}
-floatLiteral6    0[xX]{hexDigit}+{hexDecExponent}
+hexDigitsOrSeps  {hexDigit}(_|{hexDigit})*
+hexDecExponent   [Pp][\+\-]?{digitsOrSeps}
+floatLiteral4    0[xX]{hexDigitsOrSeps}?"."{hexDigitsOrSeps}({hexDecExponent})?
+floatLiteral5    0[xX]{hexDigitsOrSeps}"."{hexDecExponent}
+floatLiteral6    0[xX]{hexDigitsOrSeps}{hexDecExponent}
 
 decFloatLiteral  {floatLiteral1}|{floatLiteral2}|{floatLiteral3}
 hexFloatLiteral  {floatLiteral4}|{floatLiteral5}|{floatLiteral6}
@@ -118,12 +122,16 @@ align            return processToken(yyscanner, TALIGN);
 as               return processToken(yyscanner, TAS);
 atomic           return processToken(yyscanner, TATOMIC);
 begin            return processToken(yyscanner, TBEGIN);
+bool             return processToken(yyscanner, TBOOL);
+borrowed         return processToken(yyscanner, TBORROWED);
 break            return processToken(yyscanner, TBREAK);
 by               return processToken(yyscanner, TBY);
+bytes            return processToken(yyscanner, TBYTES);
 catch            return processToken(yyscanner, TCATCH);
 class            return processToken(yyscanner, TCLASS);
 cobegin          return processToken(yyscanner, TCOBEGIN);
 coforall         return processToken(yyscanner, TCOFORALL);
+complex          return processToken(yyscanner, TCOMPLEX);
 config           return processToken(yyscanner, TCONFIG);
 const            return processToken(yyscanner, TCONST);
 continue         return processToken(yyscanner, TCONTINUE);
@@ -137,27 +145,36 @@ enum             return processToken(yyscanner, TENUM);
 export           return processToken(yyscanner, TEXPORT);
 except           return processToken(yyscanner, TEXCEPT);
 extern           return processExtern(yyscanner);
+false            return processToken(yyscanner, TFALSE);
 for              return processToken(yyscanner, TFOR);
 forall           return processToken(yyscanner, TFORALL);
 forwarding       return processToken(yyscanner, TFORWARDING);
 if               return processToken(yyscanner, TIF);
+imag             return processToken(yyscanner, TIMAG);
 in               return processToken(yyscanner, TIN);
 index            return processToken(yyscanner, TINDEX);
 inline           return processToken(yyscanner, TINLINE);
 inout            return processToken(yyscanner, TINOUT);
+int              return processToken(yyscanner, TINT);
 iter             return processToken(yyscanner, TITER);
 label            return processToken(yyscanner, TLABEL);
 lambda           return processToken(yyscanner, TLAMBDA);
 let              return processToken(yyscanner, TLET);
+lifetime         return processToken(yyscanner, TLIFETIME);
 local            return processToken(yyscanner, TLOCAL);
+locale           return processToken(yyscanner, TLOCALE);
 module           return processToken(yyscanner, TMODULE);
 new              return processToken(yyscanner, TNEW);
 nil              return processToken(yyscanner, TNIL);
 noinit           return processToken(yyscanner, TNOINIT);
+none             return processToken(yyscanner, TNONE);
+nothing          return processToken(yyscanner, TNOTHING);
 on               return processToken(yyscanner, TON);
 only             return processToken(yyscanner, TONLY);
 otherwise        return processToken(yyscanner, TOTHERWISE);
 out              return processToken(yyscanner, TOUT);
+override         return processToken(yyscanner, TOVERRIDE);
+owned            return processToken(yyscanner, TOWNED);
 param            return processToken(yyscanner, TPARAM);
 pragma           return processToken(yyscanner, TPRAGMA);
 __primitive      return processToken(yyscanner, TPRIMITIVE);
@@ -165,6 +182,7 @@ private          return processToken(yyscanner, TPRIVATE);
 proc             return processToken(yyscanner, TPROC);
 prototype        return processToken(yyscanner, TPROTOTYPE);
 public           return processToken(yyscanner, TPUBLIC);
+real             return processToken(yyscanner, TREAL);
 record           return processToken(yyscanner, TRECORD);
 reduce           return processToken(yyscanner, TREDUCE);
 ref              return processToken(yyscanner, TREF);
@@ -173,19 +191,26 @@ return           return processToken(yyscanner, TRETURN);
 scan             return processToken(yyscanner, TSCAN);
 select           return processToken(yyscanner, TSELECT);
 serial           return processToken(yyscanner, TSERIAL);
+shared           return processToken(yyscanner, TSHARED);
 single           return processToken(yyscanner, TSINGLE);
 sparse           return processToken(yyscanner, TSPARSE);
+string           return processToken(yyscanner, TSTRING);
 subdomain        return processToken(yyscanner, TSUBDOMAIN);
 sync             return processToken(yyscanner, TSYNC);
 then             return processToken(yyscanner, TTHEN);
+this             return processToken(yyscanner, TTHIS);
 throw            return processToken(yyscanner, TTHROW);
 throws           return processToken(yyscanner, TTHROWS);
+true             return processToken(yyscanner, TTRUE);
 try              return processToken(yyscanner, TTRY);
 "try!"           return processToken(yyscanner, TTRYBANG);
 type             return processToken(yyscanner, TTYPE);
+uint             return processToken(yyscanner, TUINT);
 union            return processToken(yyscanner, TUNION);
+unmanaged        return processToken(yyscanner, TUNMANAGED);
 use              return processToken(yyscanner, TUSE);
 var              return processToken(yyscanner, TVAR);
+void             return processToken(yyscanner, TVOID);
 when             return processToken(yyscanner, TWHEN);
 where            return processToken(yyscanner, TWHERE);
 while            return processToken(yyscanner, TWHILE);
@@ -211,6 +236,8 @@ zip              return processToken(yyscanner, TZIP);
 ">>="            return processToken(yyscanner, TASSIGNSR);
 "reduce="        return processToken(yyscanner, TASSIGNREDUCE);
 
+"init="          return processToken(yyscanner, TINITEQUALS);
+
 "=>"             return processToken(yyscanner, TALIAS);
 
 "<=>"            return processToken(yyscanner, TSWAP);
@@ -221,7 +248,7 @@ zip              return processToken(yyscanner, TZIP);
 
 "&&"             return processToken(yyscanner, TAND);
 "||"             return processToken(yyscanner, TOR);
-"!"              return processToken(yyscanner, TNOT);
+"!"              return processToken(yyscanner, TBANG);
 
 "&"              return processToken(yyscanner, TBAND);
 "|"              return processToken(yyscanner, TBOR);
@@ -269,10 +296,14 @@ zip              return processToken(yyscanner, TZIP);
 {floatLiteral}i  return processToken(yyscanner, IMAGLITERAL);
 
 {ident}          return processIdentifier(yyscanner);
-"\"\"\""         return processMultilineStringLiteral(yyscanner, "\"");
-"'''"            return processMultilineStringLiteral(yyscanner, "'");
+"\"\"\""         return processMultilineStringLiteral(yyscanner, "\"", STRINGLITERAL);
+"'''"            return processMultilineStringLiteral(yyscanner, "'", STRINGLITERAL);
+"b\"\"\""        return processMultilineStringLiteral(yyscanner, "\"", BYTESLITERAL);
+"b'''"           return processMultilineStringLiteral(yyscanner, "'", BYTESLITERAL);
 "\""             return processStringLiteral(yyscanner, "\"", STRINGLITERAL);
 "\'"             return processStringLiteral(yyscanner, "\'", STRINGLITERAL);
+"b\""            return processStringLiteral(yyscanner, "\"", BYTESLITERAL);
+"b\'"            return processStringLiteral(yyscanner, "\'", BYTESLITERAL);
 "c\""            return processStringLiteral(yyscanner, "\"", CSTRINGLITERAL);
 "c\'"            return processStringLiteral(yyscanner, "\'", CSTRINGLITERAL);
 "//"             return processSingleLineComment(yyscanner);
@@ -373,7 +404,11 @@ static int processToken(yyscan_t scanner, int t) {
         t == TREF    ||
         t == TCOLON  ||
         t == TASSIGN ||
-        t == TRSBR) {
+        t == TRSBR ||
+        t == TBORROWED ||
+        t == TUNMANAGED ||
+        t == TOWNED ||
+        t == TSHARED) {
       captureString.push_back(' ');
     }
   }
@@ -414,7 +449,8 @@ static int processStringLiteral(yyscan_t scanner, const char* q, int type) {
   return type;
 }
 
-static int processMultilineStringLiteral(yyscan_t scanner, const char* q) {
+static int processMultilineStringLiteral(yyscan_t scanner, const char* q,
+                                         int type) {
   const char* yyText = yyget_text(scanner);
   YYSTYPE* yyLval = yyget_lval(scanner);
   yyLval->pch = eatMultilineStringLiteral(scanner, q);
@@ -426,7 +462,7 @@ static int processMultilineStringLiteral(yyscan_t scanner, const char* q) {
     captureString.append(yyLval->pch);
     captureString.append(yyText);
   }
-  return STRINGLITERAL;
+  return type;
 }
 
 static const char* eatStringLiteral(yyscan_t scanner, const char* startChar) {
@@ -937,6 +973,20 @@ static void addChar(char c) {
 // Escapes
 static void addCharEscapeNonprint(char c) {
   int escape  = !(isascii(c) && isprint(c));
+  //
+  // If the previous character sequence was a hex escape and the current
+  // character is a hex digit, escape it also.  Otherwise, conforming
+  // target C compilers interpret this character as a continuation of
+  // the previous hex escape.
+  //
+  if (isxdigit(c)) {
+    size_t len = stringBuffer.length();
+    if (len >= 4 && stringBuffer[len - 4] == '\\' &&
+        (stringBuffer[len - 3] == 'x' || stringBuffer[len - 3] == 'X') &&
+        isxdigit(stringBuffer[len - 2]) && isxdigit(stringBuffer[len - 1])) {
+      escape = 1;
+    }
+  }
 
   if (escape) {
     stringBuffer.push_back('\\');

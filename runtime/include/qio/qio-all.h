@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2018 Cray Inc.
+ * Copyright 2004-2019 Cray Inc.
  * Other additional copyright holders may be indicated within.
  * 
  * The entirety of this work is licensed under the Apache License,
@@ -28,7 +28,5 @@
 #include "qio_style.h"
 #include "bulkget.h"
 #include "sys.h"
-#include "qio_plugin_hdfs.h"
-#include "qio_plugin_curl.h"
 #include "qio_popen.h"
-
+#include "qio_plugin_api.h"

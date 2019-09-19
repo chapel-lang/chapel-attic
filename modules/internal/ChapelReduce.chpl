@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2018 Cray Inc.
+ * Copyright 2004-2019 Cray Inc.
  * Other additional copyright holders may be indicated within.
  *
  * The entirety of this work is licensed under the Apache License,
@@ -21,28 +21,51 @@
 //
 module ChapelReduce {
   use ChapelStandard;
+  private use ChapelLocks;
 
-  iter chpl__scanIteratorZip(op, data) {
-    for e in zip((...data)) {
-      op.accumulate(e);
-      yield op.generate();
-    }
-    delete op;
+  config param enableParScan = false;
+  if enableParScan then compilerWarning("'enableParScan' has been deprecated (it is now always enabled)");
+
+  proc chpl__scanStateResTypesMatch(op) param {
+    type resType = op.generate().type;
+    type stateType = op.identity.type;
+    return (resType == stateType);
   }
 
-  iter chpl__scanIterator(op, data) {
-    for e in data {
-      op.accumulate(e);
-      yield op.generate();
-    }
+  proc chpl__scanIteratorZip(op, data) {
+    compilerWarning("scan has been serialized (see issue #12482)");
+    var arr = for d in zip((...data)) do chpl__accumgen(op, d);
+
     delete op;
+    return arr;
+  }
+
+  proc chpl__scanIterator(op, data) {
+    use Reflection;
+    param supportsPar = isArray(data) && canResolveMethod(data, "_scan", op);
+    if (supportsPar) {
+      return data._scan(op);
+    } else {
+      compilerWarning("scan has been serialized (see issue #12482)");
+      var arr = for d in data do chpl__accumgen(op, d);
+
+      delete op;
+      return arr;
+    }
+  }
+
+  // helper routine to run the accumulate + generate steps of a scan
+  // in an expression context.
+  proc chpl__accumgen(op, d) {
+    op.accumulate(d);
+    return op.generate();
   }
 
   proc chpl__reduceCombine(globalOp, localOp) {
     on globalOp {
-      globalOp.lock();
+      globalOp.l.lock();
       globalOp.combine(localOp);
-      globalOp.unlock();
+      globalOp.l.unlock();
     }
   }
 
@@ -51,7 +74,45 @@ module ChapelReduce {
     delete localOp;
   }
 
+  // Return true for simple cases where x.type == (x+x).type.
+  // This should be true for the great majority of cases in practice.
+  // This proc helps us avoid run-time computations upon chpl__sumType().
+  // Which is important for costly cases ex. when 'eltType' is an array.
+  // It also allows us to accept 'eltType' that is the result of
+  // __primitive("static typeof"), i.e. with uninitialized _RuntimeTypeInfo.
+  //
+  proc chpl_sumTypeIsSame(type eltType) param {
+    if isNumeric(eltType) || isString(eltType) {
+      return true;
+
+    } else if isDomain(eltType) {
+      // Since it is a param function, this code will be squashed.
+      // It will not execute at run time.
+      var d: eltType;
+      // + preserves the type for associative domains.
+      // Todo: any other easy-to-compute cases?
+      return isAssociativeDom(d);
+
+    } else if isArray(eltType) {
+      // Follow the lead of chpl_buildStandInRTT. Thankfully, this code
+      // will not execute at run time. Otherwise we could get in trouble,
+      // as "static typeof" produces uninitialized _RuntimeTypeInfo values.
+      type arrInstType = __primitive("static field type", eltType, "_instance");
+      var instanceObj: arrInstType?;
+      type instanceEltType = __primitive("static typeof", instanceObj!.eltType);
+      return chpl_sumTypeIsSame(instanceEltType);
+
+    } else {
+      // Otherwise, let chpl__sumType() deal with it.
+      return false;
+    }
+  }
+
   proc chpl__sumType(type eltType) type {
+   if chpl_sumTypeIsSame(eltType) {
+    return eltType;
+   } else {
+    // The answer may or may not be 'eltType'.
     var x: eltType;
     if isArray(x) {
       type xET = x.eltType;
@@ -61,28 +122,19 @@ module ChapelReduce {
       else
         return [x.domain] xST;
     } else {
+      use Reflection;
+      if ! canResolve("+", x, x) then
+        // Issue a user-friendly error.
+        compilerError("+ reduce cannot be used on values of the type ",
+                      eltType:string);
       return (x + x).type;
     }
+   }
   }
 
   pragma "ReduceScanOp"
   class ReduceScanOp {
-    var l: atomicbool; // only accessed locally
-
-    proc lock() {
-      var lockAttempts = 0,
-          maxLockAttempts = (2**10-1);
-      while l.testAndSet() {
-        lockAttempts += 1;
-        if (lockAttempts & maxLockAttempts) == 0 {
-          maxLockAttempts >>= 1;
-          chpl_task_yield();
-        }
-      }
-    }
-    proc unlock() {
-      l.clear();
-    }
+    var l: chpl_LocalSpinlock;
   }
 
   class SumReduceScanOp: ReduceScanOp {
@@ -91,20 +143,20 @@ module ChapelReduce {
 
     // Rely on the default value of the desired type.
     // Todo: is this efficient when that is an array?
-    proc identity {
+    inline proc identity {
       var x: chpl__sumType(eltType); return x;
     }
-    proc accumulate(x) {
+    inline proc accumulate(x) {
       value += x;
     }
-    proc accumulateOntoState(ref state, x) {
+    inline proc accumulateOntoState(ref state, x) {
       state += x;
     }
-    proc combine(x) {
+    inline proc combine(x) {
       value += x.value;
     }
-    proc generate() return value;
-    proc clone() return new SumReduceScanOp(eltType=eltType);
+    inline proc generate() return value;
+    inline proc clone() return new unmanaged SumReduceScanOp(eltType=eltType);
   }
 
   class ProductReduceScanOp: ReduceScanOp {
@@ -122,7 +174,7 @@ module ChapelReduce {
       value *= x.value;
     }
     proc generate() return value;
-    proc clone() return new ProductReduceScanOp(eltType=eltType);
+    proc clone() return new unmanaged ProductReduceScanOp(eltType=eltType);
   }
 
   class MaxReduceScanOp: ReduceScanOp {
@@ -140,7 +192,7 @@ module ChapelReduce {
       value = max(value, x.value);
     }
     proc generate() return value;
-    proc clone() return new MaxReduceScanOp(eltType=eltType);
+    proc clone() return new unmanaged MaxReduceScanOp(eltType=eltType);
   }
 
   class MinReduceScanOp: ReduceScanOp {
@@ -158,12 +210,12 @@ module ChapelReduce {
       value = min(value, x.value);
     }
     proc generate() return value;
-    proc clone() return new MinReduceScanOp(eltType=eltType);
+    proc clone() return new unmanaged MinReduceScanOp(eltType=eltType);
   }
 
   class LogicalAndReduceScanOp: ReduceScanOp {
     type eltType;
-    var value = identity;
+    var value = _land_id(eltType);
 
     proc identity return _land_id(eltType);
     proc accumulate(x) {
@@ -176,12 +228,12 @@ module ChapelReduce {
       value &&= x.value;
     }
     proc generate() return value;
-    proc clone() return new LogicalAndReduceScanOp(eltType=eltType);
+    proc clone() return new unmanaged LogicalAndReduceScanOp(eltType=eltType);
   }
 
   class LogicalOrReduceScanOp: ReduceScanOp {
     type eltType;
-    var value = identity;
+    var value = _lor_id(eltType);
 
     proc identity return _lor_id(eltType);
     proc accumulate(x) {
@@ -194,7 +246,7 @@ module ChapelReduce {
       value ||= x.value;
     }
     proc generate() return value;
-    proc clone() return new LogicalOrReduceScanOp(eltType=eltType);
+    proc clone() return new unmanaged LogicalOrReduceScanOp(eltType=eltType);
   }
 
   class BitwiseAndReduceScanOp: ReduceScanOp {
@@ -212,7 +264,7 @@ module ChapelReduce {
       value &= x.value;
     }
     proc generate() return value;
-    proc clone() return new BitwiseAndReduceScanOp(eltType=eltType);
+    proc clone() return new unmanaged BitwiseAndReduceScanOp(eltType=eltType);
   }
 
   class BitwiseOrReduceScanOp: ReduceScanOp {
@@ -230,7 +282,7 @@ module ChapelReduce {
       value |= x.value;
     }
     proc generate() return value;
-    proc clone() return new BitwiseOrReduceScanOp(eltType=eltType);
+    proc clone() return new unmanaged BitwiseOrReduceScanOp(eltType=eltType);
   }
 
   class BitwiseXorReduceScanOp: ReduceScanOp {
@@ -248,57 +300,48 @@ module ChapelReduce {
       value ^= x.value;
     }
     proc generate() return value;
-    proc clone() return new BitwiseXorReduceScanOp(eltType=eltType);
+    proc clone() return new unmanaged BitwiseXorReduceScanOp(eltType=eltType);
   }
+
+  proc _maxloc_id(type eltType) return (min(eltType(1)), max(eltType(2)));
+  proc _minloc_id(type eltType) return max(eltType); // max() on both components
 
   class maxloc: ReduceScanOp {
     type eltType;
-    var value = min(eltType);
-    var uninitialized = true;
+    var value = _maxloc_id(eltType);
 
-    proc identity return min(eltType);
-    proc accumulate(x) {
-      if uninitialized || (x(1) > value(1)) ||
-        ((x(1) == value(1)) && (x(2) < value(2))) then
-        value = x;
-      uninitialized = false;
+    proc identity return _maxloc_id(eltType);
+    proc accumulate(x) { accumulateOntoState(value, x); }
+    proc accumulateOntoState(ref state, x) {
+      if x(1) > state(1) ||
+        ((x(1) == state(1)) && (x(2) < state(2))) ||
+        (gotNaN(x(1)) && ( (! gotNaN(state(1))) || (x(2) < state(2)) ))
+      then
+        state = x;
     }
-    proc combine(x) {
-      if uninitialized || (x.value(1) > value(1)) ||
-        ((x.value(1) == value(1)) && (x.value(2) < value(2))) {
-        if !x.uninitialized {
-          value = x.value;
-          uninitialized = false;
-        }
-      }
-    }
+    proc combine(x) { accumulateOntoState(value, x.value); }
     proc generate() return value;
-    proc clone() return new maxloc(eltType=eltType);
+    proc clone() return new unmanaged maxloc(eltType=eltType);
   }
 
   class minloc: ReduceScanOp {
     type eltType;
-    var value = max(eltType);
-    var uninitialized = true;
+    var value = _minloc_id(eltType);
 
-    proc identity return max(eltType);
-    proc accumulate(x) {
-      if uninitialized || (x(1) < value(1)) ||
-        ((x(1) == value(1)) && (x(2) < value(2))) then
-        value = x;
-      uninitialized = false;
+    proc identity return _minloc_id(eltType);
+    proc accumulate(x) { accumulateOntoState(value, x); }
+    proc accumulateOntoState(ref state, x) {
+      if x(1) < state(1) ||
+        ((x(1) == state(1)) && (x(2) < state(2))) ||
+        (gotNaN(x(1)) && ( (! gotNaN(state(1))) || (x(2) < state(2)) ))
+      then
+        state = x;
     }
-    proc combine(x) {
-      if uninitialized || (x.value(1) < value(1)) ||
-        ((x.value(1) == value(1)) && (x.value(2) < value(2))) {
-        if !x.uninitialized {
-          value = x.value;
-          uninitialized = false;
-        }
-      }
-    }
+    proc combine(x) { accumulateOntoState(value, x.value); }
     proc generate() return value;
-    proc clone() return new minloc(eltType=eltType);
+    proc clone() return new unmanaged minloc(eltType=eltType);
   }
 
+  private inline proc gotNaN(value) where isReal(value) return isnan(value);
+  private        proc gotNaN(value) param return false;
 }

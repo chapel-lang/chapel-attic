@@ -1,35 +1,35 @@
-enum NodeType { value, branch, none };
+enum NodeType { value, branch, noNode };
 
 class Node {
-  proc nodeType() : NodeType { return NodeType.none; }
+  proc nodeType() : NodeType { return NodeType.noNode; }
 }
 
 class ValueNode : Node {
   const val : int;
-  proc nodeType() : NodeType { return NodeType.value; }
+  override proc nodeType() : NodeType { return NodeType.value; }
 }
 
 class Branch : Node {
-  const left, right: Node;
-  proc nodeType() : NodeType { return NodeType.branch; }
+  const left, right: unmanaged Node;
+  override proc nodeType() : NodeType { return NodeType.branch; }
 }
 
-proc node(a:int, b:int) : Branch {
-  return new Branch(new ValueNode(a), new ValueNode(b));
+proc node(a:int, b:int) : unmanaged Branch {
+  return new unmanaged Branch(new unmanaged ValueNode(a), new unmanaged ValueNode(b));
 }
 
-proc node(a, b:Node) : Branch {
-  return new Branch(a, b);
+proc node(a, b:unmanaged Node) : unmanaged Branch {
+  return new unmanaged Branch(a, b);
 }
 
-iter leaves(tree : Node) : int {
+iter leaves(tree : unmanaged Node) : int {
   select tree.nodeType() {
     when NodeType.value do {
-      yield (tree:ValueNode).val;
+      yield (tree:unmanaged ValueNode).val;
     }
 
     when NodeType.branch do {
-      const node = tree:Branch;
+      const node = tree:unmanaged Branch;
 
       if (node.left != nil) {
         for leaf in leaves(node.left) do yield leaf;

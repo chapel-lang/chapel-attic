@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2018 Cray Inc.
+ * Copyright 2004-2019 Cray Inc.
  * Other additional copyright holders may be indicated within.
  *
  * The entirety of this work is licensed under the Apache License,
@@ -25,10 +25,6 @@
 module CString {
   use ChapelStandard;
 
-  // The following method is called by the compiler to determine the default
-  // value of a given type.
-  inline proc _defaultOf(type t) where t: c_string return c_nil:c_string;
-
   //inline proc c_string.c_str() return this;
 
   pragma "init copy fn"
@@ -36,7 +32,6 @@ module CString {
     return x;
   }
 
-  pragma "donor fn"
   pragma "auto copy fn"
   inline proc chpl__autoCopy(x: c_string) : c_string {
     return x;
@@ -95,106 +90,82 @@ module CString {
     __primitive("=", a, b.c_str());
   }
 
-  extern proc chpl_bool_to_c_string(x:bool) : c_string;
-  inline proc _cast(type t, x: bool(?w)) where t == c_string {
-    return chpl_bool_to_c_string(x:bool);
+  //
+  // casts from nil to c_string
+  //
+  inline proc _cast(type t:c_string, x: _nilType) {
+    return __primitive("cast", t, x);
   }
 
   //
   // casts from c_string to c_void_ptr
   //
-  inline proc _cast(type t, x: c_string) where t == c_void_ptr {
+  inline proc _cast(type t:c_void_ptr, x: c_string) {
     return __primitive("cast", t, x);
   }
   //
   // casts from c_void_ptr to c_string
   //
-  inline proc _cast(type t, x: c_void_ptr) where t == c_string {
+  inline proc _cast(type t:c_string, x: c_void_ptr) {
+    return __primitive("cast", t, x);
+  }
+
+  //
+  // casts from c_string to c_ptr(c_char/int(8)/uint(8))
+  //
+  inline proc _cast(type t:c_ptr, x: c_string)
+    where t.eltType == c_char || t.eltType == int(8) || t.eltType == uint(8)
+  {
+    return __primitive("cast", t, x);
+  }
+  //
+  // casts from c_ptr(c_char/int(8)/uint(8)) to c_string
+  //
+  inline proc _cast(type t:c_string, x: c_ptr)
+    where x.eltType == c_char || x.eltType == int(8) || x.eltType == uint(8)
+  {
     return __primitive("cast", t, x);
   }
 
   //
   // casts from c_string to bool types
   //
-  inline proc _cast(type t, x:c_string) throws where isBoolType(t)
+  inline proc _cast(type t:chpl_anybool, x:c_string) throws
     return try ((x:string).strip()): t;
 
   //
   // casts from c_string to integer types
   //
-  inline proc _cast(type t, x:c_string) throws where t == int(8) || t == int(16) || t == int(32) || t == int(64)
-    return try ((x:string).strip()): t;
-  inline proc _cast(type t, x:c_string) throws where t == uint(8) || t == uint(16) || t == uint(32) || t == uint(64)
+  inline proc _cast(type t:integral, x:c_string) throws
     return try ((x:string).strip()): t;
 
   //
   // casts from c_string to real/imag types
   //
-  inline proc _cast(type t, x:c_string) throws where t == real(32) || t == real(64)
+  inline proc _cast(type t:chpl_anyreal, x:c_string) throws
     return try ((x:string).strip()): t;
-  inline proc _cast(type t, x:c_string) throws where t == imag(32) || t == imag(64)
+  inline proc _cast(type t:chpl_anyimag, x:c_string) throws
     return try ((x:string).strip()): t;
 
   //
   // casts from c_string to complex types
   //
-  inline proc _cast(type t, x:c_string) throws where t == complex(64) || t == complex(128)
+  inline proc _cast(type t:chpl_anycomplex, x:c_string) throws
     return try ((x:string).strip()): t;
-
-  //
-  // casts from complex
-  //
-  inline proc _cast(type t, x: complex(?w)) where t == c_string {
-    if isnan(x.re) || isnan(x.im) then
-      return __primitive("string_copy", "nan");
-    var re = (x.re):c_string;
-    var im: c_string;
-    var op: c_string;
-    if x.im < 0 {
-      im = (-x.im):c_string;
-      op = " - ";
-    } else if im == "-0.0" {
-      im = "0.0":c_string;
-      op = " - ";
-    } else {
-      im = (x.im):c_string;
-      op = " + ";
-    }
-    // TODO: Add versions of the concatenation operator that consume their
-    // c_string arg or args.
-    const ts0 = re + op;
-    chpl_free_c_string(re);
-    const ts1 = ts0 + im;
-    chpl_free_c_string(ts0);
-    chpl_free_c_string(im);
-    const ret = ts1 + "i";
-    chpl_free_c_string(ts1);
-    return ret;
-  }
-
-  extern proc real_to_c_string(x:real(64), isImag: bool) : c_string;
-  //
-  // casts from real
-  //
-  inline proc _cast(type t, x:real(?w)) where t == c_string {
-    return real_to_c_string(x:real(64), false);
-  }
-
-  //
-  // casts from imag
-  //
-  inline proc _cast(type t, x:imag(?w)) where t == c_string {
-    // The Chapel version of the imag --> real cast smashes it flat rather than
-    // just stripping off the "i".  See ChapelBase:965.
-    var r = __primitive("cast", real(64), x);
-    return real_to_c_string(r, true);
-  }
 
   //
   // primitive c_string functions and methods
   //
-  inline proc ascii(a: c_string) return __primitive("ascii", a);
-  inline proc c_string.length return __primitive("string_length", this);
+
+  //
+  // Deprecated, no replacement needed.
+  //
+  inline proc ascii(a: c_string) {
+    compilerWarning("calling ascii() on a c_string is deprecated");
+    return __primitive("ascii", a);
+  }
+
+  inline proc c_string.length return __primitive("string_length_bytes", this);
   inline proc c_string.size return this.length;
 
   inline proc c_string.substring(i: int)
@@ -208,7 +179,7 @@ module CString {
 
   pragma "last resort" // avoids param string to c_string coercion
   inline proc param c_string.length param
-    return __primitive("string_length", this);
+    return __primitive("string_length_bytes", this);
   pragma "last resort" // avoids param string to c_string coercion
   inline proc _string_contains(param a: c_string, param b: c_string) param
     return __primitive("string_contains", a, b);
@@ -218,10 +189,13 @@ module CString {
   */
   inline proc c_string.indexOf(substring:c_string):int
     return string_index_of(this, substring);
+
+  pragma "fn synchronization free"
   extern proc string_index_of(haystack:c_string, needle:c_string):int;
 
   // Use with care.  Not for the weak.
   inline proc chpl_free_c_string(ref cs: c_string) {
+    pragma "fn synchronization free"
     pragma "insert line file info"
     extern proc chpl_rt_free_c_string(ref cs: c_string);
     if (cs != c_nil:c_string) then chpl_rt_free_c_string(cs);

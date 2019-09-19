@@ -1,18 +1,35 @@
 .. _chapel-archived-specs:
 
-Archived Language Specifications
-================================
+Documentation Archives
+======================
 
-**Latest Spec Version**
+Online Documentation Archives
+-----------------------------
+
+* `Chapel 1.19 <https://chapel-lang.org/docs/1.19/index.html>`_
+* `Chapel 1.18 <https://chapel-lang.org/docs/1.18/index.html>`_
+* `Chapel 1.17 <https://chapel-lang.org/docs/1.17/index.html>`_
+* `Chapel 1.16 <https://chapel-lang.org/docs/1.16/index.html>`_
+* `Chapel 1.15 <https://chapel-lang.org/docs/1.15/index.html>`_
+* `Chapel 1.14 <https://chapel-lang.org/docs/1.14/index.html>`_
+* `Chapel 1.13 <https://chapel-lang.org/docs/1.13/index.html>`_
+* `Chapel 1.12 <https://chapel-lang.org/docs/1.12/index.html>`_
+* `Chapel 1.11 <https://chapel-lang.org/docs/1.11/index.html>`_
+
+
+Language Specification Archives
+-------------------------------
+
+**Latest Version**
 
 * `Language Specification`_
 
-**Spec Version >= 0.981**
+**Versions corresponding to Chapel 1.13.0 and later**
 
-* Visit ``chapel-lang.org/docs/<X.YY>/language/spec.html``, where ``X.YY`` is
-  their associated Chapel release version
+* Visit ``https://chapel-lang.org/docs/<X.YY>/language/spec.html``,
+  where ``X.YY`` is the associated Chapel release version
 
-**Spec Version < 0.981**
+**Older Versions**
 
 Spec *<version>* (Chapel *<release in which specification was made available>*)
 
@@ -44,7 +61,7 @@ Spec *<version>* (Chapel *<release in which specification was made available>*)
 
 
 
-.. _Language Specification:     https://chapel-lang.org/docs/latest/language/spec.html
+.. _Language Specification:     https://chapel-lang.org/docs/language/spec.html
 .. _Spec 0.981 (Chapel 1.13.0): https://chapel-lang.org/docs/1.13/language/spec.html
 .. _Spec 0.98  (Chapel 1.12.0): https://chapel-lang.org/spec/spec-0.98.pdf
 .. _Spec 0.97  (Chapel 1.11.0): https://chapel-lang.org/spec/spec-0.97.pdf

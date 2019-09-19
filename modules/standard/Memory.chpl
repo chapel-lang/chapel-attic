@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2018 Cray Inc.
+ * Copyright 2004-2019 Cray Inc.
  * Other additional copyright holders may be indicated within.
  * 
  * The entirety of this work is licensed under the Apache License,
@@ -43,7 +43,7 @@
     leaked memory by invoking :proc:`printMemAllocsByType` implicitly
     when the program terminates normally.
 
-  ``memLeaksLog``: `c_string`:
+  ``memLeaksLog``: `string`:
     Enable memory tracking and append a report to the named file when
     the program terminates normally.
     The report contains the compilation command used to build the
@@ -56,7 +56,12 @@
   ``memStats``: `bool`:
     Enable memory tracking and produce summary memory statistics by
     invoking :proc:`printMemAllocStats` implicitly at normal program
-    termination.
+    termination.  Note that for a multi-locale run, each top-level
+    locale reports its own memory statistics and these reports may
+    appear in any order in the program output (and possibly even
+    interleaved, though we have gone to some effort to avoid that).
+    These statistics can be put in order by sorting the output lines
+    that begin with the string ``memStats:``.
 
   ``memMax``: `uint`:
     If the value is greater than 0 (zero), enable memory tracking
@@ -73,7 +78,7 @@
     If this is set to a value greater than 0 (zero), only allocation
     requests larger than this are tracked and/or reported.
 
-  ``memLog``: `c_string`:
+  ``memLog``: `string`:
     Memory reporting is written to this file.  By default it is the
     ``stdout`` associated with the process (not the Chapel channel
     with the same name).  Setting this config variable to a file path

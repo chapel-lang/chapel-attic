@@ -26,14 +26,6 @@ assertEqual(sparseDom.shape, (10, 10), msg='sparseDom:');
 var sparseArray: [sparseDom] int;
 assertEqual(sparseArray.shape, (10, 10), msg='sparseArray:');
 
-// OpaqueDom
-var opaqueDom: domain(opaque);
-for 1..10 do opaqueDom.create();
-assertEqual(opaqueDom.shape, (10,), msg='opaqueDom:');
-
-var opaqueArray: [opaqueDom] int;
-assertEqual(opaqueArray.shape, (10,), msg='opaqueArray:');
-
 // AssociativeDom
 var associativeDom: domain(int);
 for i in 1..10 do associativeDom += i;
@@ -44,7 +36,7 @@ assertEqual(associativeArray.shape, (10,), msg='associateArray:');
 
 // EnumDom (a flavor of AssociateDom)
 enum digits {zero, one, two, three, four, five, six, seven, eight, nine};
-var enumDom: domain(digits);
+var enumDom: domain(digits) = digits.zero..digits.nine;
 assertEqual(enumDom.shape, (10,), msg='enumDom:');
 
 var enumArray: [enumDom] int;

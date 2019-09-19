@@ -3,7 +3,7 @@ class MyClass {
   var rval: real;
 };
 
-var myClass: MyClass;
+var myClass: borrowed MyClass = new MyClass();
 
 proc f(i: int, r: real) {
   // First make sure we are looking inside the class object.
@@ -20,7 +20,7 @@ proc f(i: int, r: real) {
   // CHECK-SAME: !tbaa ![[REALVIACLS:[0-9]+]]
 }
 
-myClass = new MyClass;
+myClass = new MyClass();
 f(42, 3.14);
 writeln(myClass);
 
@@ -37,8 +37,8 @@ writeln(myClass);
 // CHECK-DAG: ![[REAL:[0-9]+]] = !{!"_real64", ![[UNIONS]], i64 0}
 //
 // Class object TBAA type descriptors:  reference to superclass and each field
-// CHECK-DAG: ![[OBJOBJ:[0-9]+]] = !{!"chpl_object_object", ![[INT32]], i64 0}
-// CHECK-DAG: ![[CLSOBJ:[0-9]+]] = !{!"chpl_MyClass_chpl_object", ![[OBJOBJ]], i64 0, ![[INT]], i64 {{[0-9]+}}, ![[REAL]], i64 {{[0-9]+}}}
+// CHECK-DAG: ![[OBJOBJ:[0-9]+]] = !{!"chpl_object{{[0-9]*}}_object", ![[INT32]], i64 0}
+// CHECK-DAG: ![[CLSOBJ:[0-9]+]] = !{!"chpl_MyClass_chpl{{[0-9]*}}_object", ![[OBJOBJ]], i64 0, ![[INT]], i64 {{[0-9]+}}, ![[REAL]], i64 {{[0-9]+}}}
 //
 // Now validate those access tags.
 // The int is not at offset zero because the object superclass comes first.

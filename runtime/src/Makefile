@@ -1,4 +1,4 @@
-# Copyright 2004-2018 Cray Inc.
+# Copyright 2004-2019 Cray Inc.
 # Other additional copyright holders may be indicated within.
 # 
 # The entirety of this work is licensed under the Apache License,
@@ -39,7 +39,8 @@ ifneq ($(MAKE_LAUNCHER),1)
 TARGETS = \
 	$(COMMON_OBJS) \
 	$(MAIN_OBJS) \
-        $(RUNTIME_MALLOC_OBJS) \
+	$(MAIN_MLI_OBJS) \
+	$(RUNTIME_MALLOC_OBJS) \
 
 SUBDIRS = \
 	comm \
@@ -47,12 +48,14 @@ SUBDIRS = \
 	tasks \
 	threads \
 	timers \
+	topo \
 	qio \
 
 else
 TARGETS = \
 	$(MAIN_LAUNCHER_OBJS) \
 	$(COMMON_LAUNCHER_OBJS) \
+	$(ONLY_LAUNCHER_OBJS)
 
 SUBDIRS = \
 	comm \

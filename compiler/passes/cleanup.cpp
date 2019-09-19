@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2018 Cray Inc.
+ * Copyright 2004-2019 Cray Inc.
  * Other additional copyright holders may be indicated within.
  *
  * The entirety of this work is licensed under the Apache License,
@@ -28,6 +28,7 @@
 
 #include "astutil.h"
 #include "build.h"
+#include "CatchStmt.h"
 #include "expr.h"
 #include "stlUtil.h"
 #include "stmt.h"
@@ -38,15 +39,14 @@ static void cleanup(ModuleSymbol* module);
 
 static void normalizeNestedFunctionExpressions(FnSymbol* fn);
 
-static void normalizeLoopIterExpressions(FnSymbol* fn);
-
 static void destructureTupleAssignment(CallExpr* call);
+
+static void replaceIsSubtypeWithPrimitive(CallExpr* call,
+                                          bool proper, bool coerce);
 
 static void flattenPrimaryMethod(TypeSymbol* ts, FnSymbol* fn);
 
 static void applyAtomicTypeToPrimaryMethod(TypeSymbol* ts, FnSymbol* fn);
-
-static void changeCastInWhere(FnSymbol* fn);
 
 static void fixupVoidReturnFn(FnSymbol* fn);
 
@@ -79,8 +79,6 @@ static void cleanup(ModuleSymbol* module) {
         if (fn->hasFlag(FLAG_COMPILER_NESTED_FUNCTION) == true) {
           normalizeNestedFunctionExpressions(fn);
 
-        } else if (strncmp("_iterator_for_loopexpr", fn->name, 22) == 0) {
-          normalizeLoopIterExpressions(fn);
         }
       }
     }
@@ -95,9 +93,14 @@ static void cleanup(ModuleSymbol* module) {
       }
 
     } else if (CallExpr* call = toCallExpr(ast)) {
-      if (call->isNamed("_build_tuple") == true) {
+      if (call->isNamed("_build_tuple"))
         destructureTupleAssignment(call);
-      }
+      else if (call->isNamed("isSubtype"))
+        replaceIsSubtypeWithPrimitive(call, false, false);
+      else if (call->isNamed("isProperSubtype"))
+        replaceIsSubtypeWithPrimitive(call, true, false);
+      else if (call->isNamed("isCoercible"))
+        replaceIsSubtypeWithPrimitive(call, false, true);
 
     } else if (DefExpr* def = toDefExpr(ast)) {
       if (FnSymbol* fn = toFnSymbol(def->sym)) {
@@ -107,9 +110,10 @@ static void cleanup(ModuleSymbol* module) {
           applyAtomicTypeToPrimaryMethod(ts, fn);
         }
 
-        changeCastInWhere(fn);
         fixupVoidReturnFn(fn);
       }
+    } else if (CatchStmt* catchStmt = toCatchStmt(ast)) {
+      catchStmt->cleanup();
     }
   }
 }
@@ -133,20 +137,12 @@ static void normalizeNestedFunctionExpressions(FnSymbol* fn) {
 
     ct->addDeclarations(def);
 
-  } else if (ArgSymbol* arg = toArgSymbol(def->parentSymbol)) {
-    if (fn->hasFlag(FLAG_IF_EXPR_FN) && arg->typeExpr == NULL) {
-      USR_FATAL_CONT(fn,
-                     "cannot currently use an if expression as the default "
-                     "value for an argument when the argument's type is "
-                     "inferred");
+  } else if (isArgSymbol(def->parentSymbol)) {
+    Expr* stmt = def->getStmtExpr();
 
-    } else {
-      Expr* stmt = def->getStmtExpr();
+    def->replace(new UnresolvedSymExpr(fn->name));
 
-      def->replace(new UnresolvedSymExpr(fn->name));
-
-      stmt->insertBefore(def);
-    }
+    stmt->insertBefore(def);
 
   } else {
     Expr* stmt = def->getStmtExpr();
@@ -157,41 +153,6 @@ static void normalizeNestedFunctionExpressions(FnSymbol* fn) {
   }
 }
 
-/************************************* | **************************************
-*                                                                             *
-*                                                                             *
-*                                                                             *
-************************************** | *************************************/
-
-static void normalizeLoopIterExpressions(FnSymbol* fn) {
-  DefExpr*  def    = fn->defPoint;
-  FnSymbol* parent = toFnSymbol(def->parentSymbol);
-  Symbol*   parSym = parent->defPoint->parentSymbol;
-
-  INT_ASSERT(strncmp("_parloopexpr", parent->name, 12) == 0 ||
-             strncmp("_seqloopexpr", parent->name, 12) == 0);
-
-  // Walk up through nested loop expressions
-  while (strncmp("_parloopexpr", parSym->name, 12) == 0  ||
-         strncmp("_seqloopexpr", parSym->name, 12) == 0) {
-    parent = toFnSymbol(parSym);
-    parSym = parent->defPoint->parentSymbol;
-  }
-
-  def->remove();
-
-  // Move the parent
-  if (TypeSymbol* ts = toTypeSymbol(parSym)) {
-    AggregateType* ct = toAggregateType(ts->type);
-
-    INT_ASSERT(ct);
-
-    ct->addDeclarations(def);
-
-  } else {
-    parent->defPoint->insertBefore(def);
-  }
-}
 
 /************************************* | **************************************
 *                                                                             *
@@ -217,7 +178,7 @@ static void destructureTupleAssignment(CallExpr* call) {
   CallExpr* parent = toCallExpr(call->parentExpr);
 
   if (parent               != NULL &&
-      parent->isNamedAstr(astrSequals) &&
+      parent->isNamedAstr(astrSassign) &&
       parent->get(1)       == call) {
     VarSymbol* rtmp = newTemp();
     Expr*      S1   = new CallExpr(PRIM_MOVE, rtmp, parent->get(2)->remove());
@@ -238,6 +199,20 @@ static void destructureTupleAssignment(CallExpr* call) {
   }
 }
 
+
+static void replaceIsSubtypeWithPrimitive(CallExpr* call,
+                                          bool proper, bool coerce) {
+  Expr* sub = call->get(1);
+  Expr* sup = call->get(2);
+  sub->remove();
+  sup->remove();
+
+  PrimitiveTag prim = proper ? PRIM_IS_PROPER_SUBTYPE : PRIM_IS_SUBTYPE;
+  if (coerce)
+    prim = PRIM_IS_COERCIBLE;
+
+  call->replace(new CallExpr(prim, sup, sub));
+}
 
 //
 // If call is an empty return statement, e.g. "return;"
@@ -376,33 +351,5 @@ static void flattenPrimaryMethod(TypeSymbol* ts, FnSymbol* fn) {
 static void applyAtomicTypeToPrimaryMethod(TypeSymbol* ts, FnSymbol* fn) {
   if (ts->hasFlag(FLAG_ATOMIC_TYPE)) {
     fn->addFlag(FLAG_ATOMIC_TYPE);
-  }
-}
-
-/************************************* | **************************************
-*                                                                             *
-*                                                                             *
-*                                                                             *
-************************************** | *************************************/
-
-static void changeCastInWhere(FnSymbol* fn) {
-  if (fn->where != NULL) {
-    std::vector<BaseAST*> asts;
-
-    collect_asts(fn->where, asts);
-
-    for_vector(BaseAST, ast, asts) {
-      if (CallExpr* call = toCallExpr(ast)) {
-        if (call->isCast() == true) {
-          Expr* to   = call->castTo();
-          Expr* from = call->castFrom();
-
-          to->remove();
-          from->remove();
-
-          call->replace(new CallExpr(PRIM_IS_SUBTYPE, to, from));
-        }
-      }
-    }
   }
 }

@@ -33,7 +33,8 @@ The goals of the launcher binary are:
    I/O.
 
 Executing a Chapel program using the verbose (``-v``) flag will typically
-print out the command(s) used to launch the program.
+print out the command(s) used to launch the program, along with any
+environment variables the launcher set on its behalf.
 
 Executing using the help (``-h``/``--help``) flag will typically print out
 any launcher-specific options in addition to the normal help message for
@@ -51,20 +52,21 @@ amudprun             GASNet launcher for programs running over UDP
 aprun                Cray application launcher using aprun                
 gasnetrun_ibv        GASNet launcher for programs running over Infiniband 
 gasnetrun_mpi        GASNet launcher for programs using the MPI conduit   
-gasnetrun_ofi        GASNet launcher for programs using the OFI conduit
-gasnetrun_psm        GASNet launcher for programs running over OmniPath
-lsf-gasnetrun_ibv    GASNet launcher using LSF (bsub) over Infiniband     
+mpirun4ofi           provisional launcher for ``CHPL_COMM=ofi`` on non-Cray X* systems
 pbs-aprun            Cray application launcher using PBS (qsub) + aprun   
 pbs-gasnetrun_ibv    GASNet launcher using PBS (qsub) over Infiniband     
 slurm-gasnetrun_ibv  GASNet launcher using SLURM over Infiniband          
+slurm-gasnetrun_mpi  GASNet launcher using SLURM over MPI
 slurm-srun           native SLURM launcher                                
 smp                  GASNet launcher for programs running over shared-memory
 none                 do not use a launcher                                
 ===================  ====================================================
 
 A specific launcher can be explicitly requested by setting the
-``CHPL_LAUNCHER`` environment variable. If left unset, a default is picked as
-follows:
+``CHPL_LAUNCHER`` environment variable. For the specific case of the
+``mpirun4ofi`` launcher, please see :ref:`readme-libfabric`.
+
+If ``CHPL_LAUNCHER`` is left unset, a default is picked as follows:
 
 
 * if ``CHPL_PLATFORM`` is cray-xc, cray-xe, or cray-xk:
@@ -86,8 +88,6 @@ follows:
   CHPL_COMM_SUBSTRATE=ibv  gasnetrun_ibv
   CHPL_COMM_SUBSTRATE=mpi  gasnetrun_mpi
   CHPL_COMM_SUBSTRATE=mxm  gasnetrun_ibv
-  CHPL_COMM_SUBSTRATE=ofi  gasnetrun_ofi
-  CHPL_COMM_SUBSTRATE=psm  gasnetrun_psm
   CHPL_COMM_SUBSTRATE=smp  smp
   CHPL_COMM_SUBSTRATE=udp  amudprun
   otherwise                none
@@ -108,6 +108,33 @@ forwarded to worker processes. However, this strategy is not always
 reliable. The remote system may override some environment variables, and
 some launchers might not correctly forward all environment variables.
 
+.. _chpl-rt-masterip:
+
+CHPL_RT_MASTERIP
+****************
+
+This environment variable is used to specify the IP address which should be used
+to connect.  By default, the node creating the connection will pass the result
+of ``gethostname()`` on to the nodes that need to connect to it, which will
+resolve that to an IP address using ``gethostbyname()``.
+
+When ``CHPL_COMM == gasnet``, this will also be used to set the value of
+``GASNET_MASTERIP``, which corresponds to the hostname of the master node (see
+https://gasnet.lbl.gov/dist/udp-conduit/README ).
+
+.. _chpl-rt-workerip:
+
+CHPL_RT_WORKERIP
+****************
+
+This environment variable is used to specify the IP address which should be used
+to communicate between worker nodes.  By default, worker nodes will communicate
+among themselves using the same interface used to connect to the master node
+(see :ref:`chpl-rt-masterip`, above).
+
+When ``CHPL_COMM == gasnet``, this will also be used to set the value of
+``GASNET_WORKERIP`` (see https://gasnet.lbl.gov/dist/udp-conduit/README ).
+
 .. _using-slurm:
 
 Using Slurm
@@ -119,9 +146,11 @@ To use native Slurm, set:
 
   export CHPL_LAUNCHER=slurm-srun
 
-On Cray systems, this will happen automatically if srun is found in your path,
-but not when both srun and aprun are found in your path. Native Slurm is the
-best option where it works, but at the time of this writing, there are problems with it when combined with UDP or InfiniBand conduits. So, for these configurations please see:
+On Cray systems, this will happen automatically if srun is found in your
+path, but not when both srun and aprun are found in your path. Native
+Slurm is the best option where it works, but at the time of this writing,
+there are problems with it when combined with ``CHPL_COMM=gasnet`` and the
+UDP or InfiniBand conduits. So, for these configurations please see:
 
   * :ref:`readme-infiniband` for information about using Slurm with
     InfiniBand.
@@ -133,39 +162,42 @@ best option where it works, but at the time of this writing, there are problems 
 Common Slurm Settings
 *********************
 
-Before running, you will need to set the amount of time to request
-from SLURM. For example, the following requests 15 minutes:
+* Optionally, you can  specify a node access mode by setting the environment
+  variable ``CHPL_LAUNCHER_NODE_ACCESS``. It will default to ``exclusive``
+  access, but can be overridden to:
 
-.. code-block:: bash
+    * ``shared`` to give shared access to nodes
+    * ``unset`` to use the system default and not specify a node access mode
+    * ``exclusive`` to give exclusive access to nodes (this is the default)
 
-  export CHPL_LAUNCHER_WALLTIME=00:15:00
+  For example, to grant shared node access, set:
 
-Another Slurm variable that usually needs to be set is the Slurm partition to
-use. For example, set the Slurm partition to 'debug' with the commands:
+  .. code-block:: bash
 
-.. code-block:: bash
+    export CHPL_LAUNCHER_NODE_ACCESS=shared
 
-  export SALLOC_PARTITION=debug
-  export SLURM_PARTITION=$SALLOC_PARTITION
+* Optionally, you can specify a slurm partition by setting the environment
+  variable ``CHPL_LAUNCHER_PARTITION``. For example, to use the 'debug'
+  partition, set:
 
-If needed, you can request a specific node feature from SLURM by putting
-it in the ``CHPL_LAUNCHER_CONSTRAINT`` environment variable. For example,
-to use nodes with the 'cal' feature (as defined in the slurm.conf
-file), set:
+  .. code-block:: bash
 
-.. code-block:: bash
+    export CHPL_LAUNCHER_PARTITION=debug
 
-  export CHPL_LAUNCHER_CONSTRAINT=cal
+* Optionally, you can specify a slurm constraint by setting the environment
+  variable ``CHPL_LAUNCHER_CONSTRAINT``. For example, to use nodes with the
+  'cal' feature (as defined in the slurm.conf file), set:
 
-If this environment variable is undefined, SLURM may use any node in
-the computer.
+  .. code-block:: bash
 
-If the environment variable ``CHPL_LAUNCHER_USE_SBATCH`` is defined then
-sbatch is used to launch the job to the queue system, rather than
-running it interactively as usual. In this mode, the output will be
-written by default to a file called <executableName>.<jobID>.out. The
-environment variable ``CHPL_LAUNCHER_SLURM_OUTPUT_FILENAME`` can be used
-to specify a different filename for the output.
+    export CHPL_LAUNCHER_CONSTRAINT=cal
+
+* If the environment variable ``CHPL_LAUNCHER_USE_SBATCH`` is defined then
+  sbatch is used to launch the job to the queue system, rather than
+  running it interactively as usual. In this mode, the output will be
+  written by default to a file called <executableName>.<jobID>.out. The
+  environment variable ``CHPL_LAUNCHER_SLURM_OUTPUT_FILENAME`` can be used
+  to specify a different filename for the output.
 
 
 .. _ssh-launchers-with-slurm:
@@ -264,16 +296,5 @@ that are not actively maintained but may still work.
 =============  ==========================================================
 Launcher Name  Description
 =============  ==========================================================
-loadleveler    launch using IBM loadleveler (still needs refining)
-marenostrum    launch using MareNostrum's mnsubmit script
 mpirun         launch using mpirun (no mpi comm currently) 
 =============  ==========================================================
-
-These launchers are the default for the following configurations: 
-
-============================  ===========================================
-If                            CHPL_LAUNCHER
-============================  ===========================================
-CHPL_PLATFORM=marenostrum     marenostrum
-============================  ===========================================
-

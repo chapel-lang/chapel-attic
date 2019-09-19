@@ -1,6 +1,6 @@
 /*
  * Copyright © 2009 CNRS
- * Copyright © 2009-2017 Inria.  All rights reserved.
+ * Copyright © 2009-2018 Inria.  All rights reserved.
  * Copyright © 2009-2012, 2015, 2017 Université Bordeaux
  * Copyright © 2009-2011 Cisco Systems, Inc.  All rights reserved.
  * See COPYING in top-level directory.
@@ -41,6 +41,12 @@
 #ifdef __MINGW32__
 # ifdef HAVE_CLOCK_GETTIME
 #  undef HAVE_CLOCK_GETTIME
+# endif
+#endif
+
+#ifdef HAVE_CLOCK_GETTIME
+# ifndef CLOCK_MONOTONIC /* HP-UX doesn't have CLOCK_MONOTONIC */
+#  define CLOCK_MONOTONIC CLOCK_REALTIME
 # endif
 #endif
 
@@ -154,7 +160,8 @@ static void add_process_objects(hwloc_topology_t topology)
 
     snprintf(name, sizeof(name), "%ld", local_pid_number);
 
-    local_pid = hwloc_pid_from_number(local_pid_number, 0);
+    if (hwloc_pid_from_number(&local_pid, local_pid_number, 0, 0 /* ignore failures */) < 0)
+      continue;
 
     proc_cpubind = hwloc_get_proc_cpubind(topology, local_pid, cpuset, 0) != -1;
 
@@ -357,7 +364,7 @@ lstopo_add_collapse_attributes(hwloc_topology_t topology)
   }
   if (collapsed > 1) {
     /* end this collapsing */
-    char text[10];
+    char text[11];
     snprintf(text, sizeof(text), "%u", collapsed);
     hwloc_obj_add_info(collapser, "lstopoCollapse", text);
   }
@@ -403,7 +410,7 @@ void usage(const char *name, FILE *where)
 #ifdef LSTOPO_HAVE_GRAPHICS
 #ifdef HWLOC_WIN_SYS
 		  "graphical"
-#elif CAIRO_HAS_XLIB_SURFACE && (defined HWLOC_HAVE_X11_KEYSYM)
+#elif (defined CAIRO_HAS_XLIB_SURFACE) && (defined HWLOC_HAVE_X11_KEYSYM)
 		  "graphical (X11) if DISPLAY is set, console otherwise"
 #else
 		  "console"
@@ -415,16 +422,16 @@ void usage(const char *name, FILE *where)
 
   fprintf (where, "Supported output file formats: console, ascii, fig"
 #ifdef LSTOPO_HAVE_GRAPHICS
-#if CAIRO_HAS_PDF_SURFACE
+#ifdef CAIRO_HAS_PDF_SURFACE
 		  ", pdf"
 #endif /* CAIRO_HAS_PDF_SURFACE */
-#if CAIRO_HAS_PS_SURFACE
+#ifdef CAIRO_HAS_PS_SURFACE
 		  ", ps"
 #endif /* CAIRO_HAS_PS_SURFACE */
-#if CAIRO_HAS_PNG_FUNCTIONS
+#ifdef CAIRO_HAS_PNG_FUNCTIONS
 		  ", png"
 #endif /* CAIRO_HAS_PNG_FUNCTIONS */
-#if CAIRO_HAS_SVG_SURFACE
+#ifdef CAIRO_HAS_SVG_SURFACE
 		  ", svg"
 #endif /* CAIRO_HAS_SVG_SURFACE */
 #endif /* LSTOPO_HAVE_GRAPHICS */
@@ -571,8 +578,8 @@ main (int argc, char *argv[])
   }
 
   /* enable verbose backends */
-  putenv("HWLOC_XML_VERBOSE=1");
-  putenv("HWLOC_SYNTHETIC_VERBOSE=1");
+  putenv((char *) "HWLOC_XML_VERBOSE=1");
+  putenv((char *) "HWLOC_SYNTHETIC_VERBOSE=1");
 
   /* Use localized time prints, and utf-8 characters in the ascii output */
 #ifdef HAVE_SETLOCALE
@@ -847,8 +854,8 @@ main (int argc, char *argv[])
   }
 
   if (lstopo_pid_number > 0) {
-    lstopo_pid = hwloc_pid_from_number(lstopo_pid_number, 0);
-    if (hwloc_topology_set_pid(topology, lstopo_pid)) {
+    if (hwloc_pid_from_number(&lstopo_pid, lstopo_pid_number, 0, 1 /* verbose */) < 0
+	|| hwloc_topology_set_pid(topology, lstopo_pid)) {
       perror("Setting target pid");
       return EXIT_FAILURE;
     }
@@ -881,7 +888,7 @@ main (int argc, char *argv[])
   if (input_format == HWLOC_UTILS_INPUT_XML
       && output_format == LSTOPO_OUTPUT_XML) {
     /* must be after parsing output format and before loading the topology */
-    putenv("HWLOC_XML_USERDATA_NOT_DECODED=1");
+    putenv((char *) "HWLOC_XML_USERDATA_NOT_DECODED=1");
     hwloc_topology_set_userdata_import_callback(topology, hwloc_utils_userdata_import_cb);
     hwloc_topology_set_userdata_export_callback(topology, hwloc_utils_userdata_export_cb);
   }
@@ -945,7 +952,7 @@ main (int argc, char *argv[])
   switch (output_format) {
     case LSTOPO_OUTPUT_DEFAULT:
 #ifdef LSTOPO_HAVE_GRAPHICS
-#if CAIRO_HAS_XLIB_SURFACE && defined HWLOC_HAVE_X11_KEYSYM
+#if (defined CAIRO_HAS_XLIB_SURFACE) && (defined HWLOC_HAVE_X11_KEYSYM)
       if (getenv("DISPLAY")) {
         if (loutput.logical == -1)
           loutput.logical = 0;
@@ -982,26 +989,26 @@ main (int argc, char *argv[])
       output_fig(&loutput, filename);
       break;
 #ifdef LSTOPO_HAVE_GRAPHICS
-# if CAIRO_HAS_PNG_FUNCTIONS
+# ifdef CAIRO_HAS_PNG_FUNCTIONS
     case LSTOPO_OUTPUT_PNG:
       output_png(&loutput, filename);
       break;
 # endif /* CAIRO_HAS_PNG_FUNCTIONS */
-# if CAIRO_HAS_PDF_SURFACE
+# ifdef CAIRO_HAS_PDF_SURFACE
     case LSTOPO_OUTPUT_PDF:
       output_pdf(&loutput, filename);
       break;
 # endif /* CAIRO_HAS_PDF_SURFACE */
-# if CAIRO_HAS_PS_SURFACE
+# ifdef CAIRO_HAS_PS_SURFACE
     case LSTOPO_OUTPUT_PS:
       output_ps(&loutput, filename);
       break;
-#endif /* CAIRO_HAS_PS_SURFACE */
-#if CAIRO_HAS_SVG_SURFACE
+# endif /* CAIRO_HAS_PS_SURFACE */
+# ifdef CAIRO_HAS_SVG_SURFACE
     case LSTOPO_OUTPUT_SVG:
       output_svg(&loutput, filename);
       break;
-#endif /* CAIRO_HAS_SVG_SURFACE */
+# endif /* CAIRO_HAS_SVG_SURFACE */
 #endif /* LSTOPO_HAVE_GRAPHICS */
     case LSTOPO_OUTPUT_XML:
       output_xml(&loutput, filename);

@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2018 Cray Inc.
+ * Copyright 2004-2019 Cray Inc.
  * Other additional copyright holders may be indicated within.
  *
  * The entirety of this work is licensed under the Apache License,
@@ -21,12 +21,14 @@
 #define _SCOPE_RESOLVE_H_
 
 class BaseAST;
+class DefExpr;
 class FnSymbol;
 class Symbol;
 
 #include <vector>
 
 void     addToSymbolTable(FnSymbol* fn);
+void     addToSymbolTable(DefExpr* def);
 
 Symbol*  lookup(const char*           name,
                 BaseAST*              context);
@@ -35,6 +37,15 @@ void     lookup(const char*           name,
                 BaseAST*              context,
                 std::vector<Symbol*>& symbols);
 
+Symbol*  lookupAndCount(const char*           name,
+                        BaseAST*              context,
+                        int&                  nSymbolsFound);
+
+
 BaseAST* getScope(BaseAST* ast);
+
+void resolveUnresolvedSymExprs(BaseAST* ast);
+
+void destroyModuleUsesCaches();
 
 #endif

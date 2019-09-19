@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2018 Cray Inc.
+ * Copyright 2004-2019 Cray Inc.
  * Other additional copyright holders may be indicated within.
  *
  * The entirety of this work is licensed under the Apache License,
@@ -25,6 +25,7 @@
 
 class Expr;
 class FnSymbol;
+class ForallStmt;
 class ForLoop;
 class Symbol;
 class Type;
@@ -62,6 +63,12 @@ the follower loop.
 Always uses the non-fast-follower version of the follower loop.
  */
 void gatherLoopDetails(ForLoop*  forLoop,
+                       bool&     isForall,
+                       IteratorDetails& leaderDetails,
+                       ForLoop*& followerForLoop,
+                       std::vector<IteratorDetails>& detailsVector);
+
+void gatherLoopDetails(ForallStmt*  fs,
                        bool&     isForall,
                        IteratorDetails& leaderDetails,
                        ForLoop*& followerForLoop,

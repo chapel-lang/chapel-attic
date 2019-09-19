@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2018 Cray Inc.
+ * Copyright 2004-2019 Cray Inc.
  * Other additional copyright holders may be indicated within.
  *
  * The entirety of this work is licensed under the Apache License,
@@ -48,7 +48,7 @@ void flattenNestedFunction(FnSymbol* nestedFunction) {
 
     nestedFunctions.add(nestedFunction);
 
-    flattenNestedFunctions(nestedFunctions);
+    flattenNestedFunctions(nestedFunctions, true);
   }
 }
 
@@ -80,8 +80,32 @@ static void markTaskFunctionsInIterators(Vec<FnSymbol*>& nestedFunctions) {
 //
 static bool
 isOuterVar(Symbol* sym, FnSymbol* fn, Symbol* parent = NULL) {
-  if (!parent)
+  if (!parent) {
     parent = fn->defPoint->parentSymbol;
+
+    // If the symbol is at module scope and the type should always be
+    // RVF'd and the symbol doesn't have the "locale private" flag
+    // applied to it then we should RVF it, so add it to the
+    // function's argument list so that it can be considered in the
+    // remoteValueForwarding pass (Otherwise, symbols at module scope
+    // tend not to be RVF'd... but maybe they should be?  A
+    // disadvantage to doing so is that they have to be added as
+    // arguments in the flattenFunctions pass to be considered, but if
+    // they're not going to be RVF'd, this is unnecessary...  And if
+    // they're const, they'll be broadcast proactively at module
+    // initialization time).)
+    //
+    // Why skip "locale private" variables?  Because these variables
+    // already have special handling to localize them, and RVFing them
+    // causes the `Locales` to be RVF'd which caused extra
+    // communications to take place (and generally seems confusing).
+    //
+    if (isModuleSymbol(sym->defPoint->parentSymbol) &&
+        sym->getValType()->symbol->hasFlag(FLAG_ALWAYS_RVF) &&
+        !sym->hasFlag(FLAG_LOCALE_PRIVATE)) {
+      return true;
+    }
+  }
 
   if (!isFnSymbol(parent))
     return false;
@@ -271,6 +295,8 @@ replaceVarUsesWithFormals(FnSymbol* fn, SymbolMap* vars) {
   std::vector<SymExpr*> symExprs;
 
   collectSymExprs(fn->body, symExprs);
+  if (fn->lifetimeConstraints)
+    collectSymExprs(fn->lifetimeConstraints, symExprs);
 
   form_Map(SymbolMapElem, e, *vars) {
     if (Symbol* sym = e->key) {
@@ -282,10 +308,7 @@ replaceVarUsesWithFormals(FnSymbol* fn, SymbolMap* vars) {
           if (type == sym->type) {
             se->setSymbol(arg);
 
-          } else {
-            CallExpr* call        = toCallExpr(se->parentExpr);
-            INT_ASSERT(call);
-
+          } else if (CallExpr* call = toCallExpr(se->parentExpr)) {
             FnSymbol* fnc         = call->resolvedFunction();
             bool      canPassToFn = false;
 
@@ -301,9 +324,10 @@ replaceVarUsesWithFormals(FnSymbol* fn, SymbolMap* vars) {
               }
             }
 
-            if ((call->isPrimitive(PRIM_MOVE)       && call->get(1) == se) ||
-                (call->isPrimitive(PRIM_ASSIGN)     && call->get(1) == se) ||
-                (call->isPrimitive(PRIM_SET_MEMBER) && call->get(1) == se) ||
+            if (( (call->isPrimitive(PRIM_MOVE)       ||
+                   call->isPrimitive(PRIM_ASSIGN)     ||
+                   call->isPrimitive(PRIM_SET_MEMBER) )
+                  && call->get(1) == se)                                   ||
                 (call->isPrimitive(PRIM_GET_MEMBER))                       ||
                 (call->isPrimitive(PRIM_GET_MEMBER_VALUE))                 ||
                 (call->isPrimitive(PRIM_WIDE_GET_LOCALE))                  ||
@@ -327,6 +351,13 @@ replaceVarUsesWithFormals(FnSymbol* fn, SymbolMap* vars) {
 
               se->setSymbol(tmp);
             }
+
+          } else {
+            // So far, the only other known case is when 'se' is some
+            // shadow variable's outer sym. If so, just replace the symbol.
+            ShadowVarSymbol* svar = toShadowVarSymbol(se->parentSymbol);
+            INT_ASSERT(svar && se == svar->outerVarSE);
+            se->setSymbol(arg);
           }
         }
       }
@@ -340,27 +371,23 @@ addVarsToActuals(CallExpr* call, SymbolMap* vars, bool outerCall) {
   form_Map(SymbolMapElem, e, *vars) {
     if (Symbol* sym = e->key) {
       SET_LINENO(sym);
-      if (!outerCall && passByRef(sym)) {
-        // This is only a performance issue.
-        INT_ASSERT(!sym->hasFlag(FLAG_SHOULD_NOT_PASS_BY_REF));
-        /* NOTE: See note above in addVarsToFormals() */
-        if (sym->isRef())
-          call->insertAtTail(sym);
-        else {
-          VarSymbol* tmp = newTemp(sym->type->getValType()->refType);
-          call->getStmtExpr()->insertBefore(new DefExpr(tmp));
-          call->getStmtExpr()->insertBefore(new CallExpr(PRIM_MOVE, tmp, new CallExpr(PRIM_ADDR_OF, sym)));
-          call->insertAtTail(tmp);
-        }
-      } else {
-        call->insertAtTail(sym);
-      }
+      call->insertAtTail(sym);
     }
   }
 }
 
-void flattenNestedFunctions(Vec<FnSymbol*>& nestedFunctions) {
-  compute_call_sites();
+static void deleteCalledby(FnSymbol* fn) {
+  if (fn->calledBy != NULL)  { delete fn->calledBy; fn->calledBy = NULL; }
+}
+static void deleteAllCalledby() {
+  for_alive_in_Vec(FnSymbol, fn, gFnSymbols)  deleteCalledby(fn);
+}
+
+void flattenNestedFunctions(Vec<FnSymbol*>& nestedFunctions, bool fastCCS) {
+  if (fastCCS)
+    { if (fVerify) deleteAllCalledby(); }
+  else
+    compute_call_sites();
 
   Vec<FnSymbol*> outerFunctionSet;
   Vec<FnSymbol*> nestedFunctionSet;
@@ -388,8 +415,12 @@ void flattenNestedFunctions(Vec<FnSymbol*>& nestedFunctions) {
     change = false;
 
     forv_Vec(FnSymbol, fn, nestedFunctions) {
-      std::vector<BaseAST*> asts;
+      if (fastCCS) {
+        if (!fVerify) deleteCalledby(fn);
+        compute_fn_call_sites(fn, false);
+      }
 
+      std::vector<BaseAST*> asts;
       collect_top_asts(fn, asts);
 
       SymbolMap* uses = args_map.get(fn);

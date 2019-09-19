@@ -35,16 +35,15 @@ class Child : Parent {
     inheritedMethod();
     foobar(this);
     multi(this, this);
-    this.initDone();
+    this.complete();
     writeln("----- phase two -----");
     foobar(this);
   }
 
-  proc inheritedMethod() {
+  override proc inheritedMethod() {
     writeln("Child.inheritedMethod()");
   }
 }
 
-var c = new Child();
+var c = new owned Child();
 writeln("c = ", c);
-delete c;

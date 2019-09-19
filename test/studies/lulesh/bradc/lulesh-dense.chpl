@@ -34,7 +34,8 @@
 
 
 use Time,       // to get timing routines for benchmarking
-    BlockDist;  // for block-distributed arrays
+    BlockDist,  // for block-distributed arrays
+    PeekPoke;   // for atomic peek/poke
 
 use luleshInit;   // initialization code for data set
 
@@ -203,11 +204,13 @@ var elemBC: [Elems] int,
 
 /* Nodal fields */
 
+type atomicReal = if useNetworkAtomics then atomic real
+                                       else chpl__processorAtomicType(real);
 var xd, yd, zd: [Nodes] real, // velocities
 
     xdd, ydd, zdd: [Nodes] real, // acceleration
 
-    fx, fy, fz: [Nodes] if useNetworkAtomics then atomic real else atomic_real64, // forces
+    fx, fy, fz: [Nodes] atomicReal, // forces
 
     nodalMass: [Nodes] real; // mass
 
@@ -243,7 +246,7 @@ proc main() {
     }
     if showProgress then
       writef("time = %er, dt=%er, %s", time, deltatime,
-             if doTiming then ", elapsed = " + (getCurrentTime()-iterTime) +"\n"
+             if doTiming then ", elapsed = " + (getCurrentTime()-iterTime):string +"\n"
                          else "\n");
   }
   if (cycle == maxcycles) {

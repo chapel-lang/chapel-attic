@@ -1,0 +1,16 @@
+.. default-domain:: chpl
+
+.. module:: privateClasses
+
+privateClasses
+==============
+**Usage**
+
+.. code-block:: chapel
+
+   use privateClasses;
+
+.. class: bar
+
+   ..attribute:: var showMe: bool
+

@@ -51,7 +51,7 @@ class Particle3D {
   var _n1, _ndx : [Dpart] int;
 
   proc init(npart1 : int, random : bool = false) {
-    this.initDone();
+    this.complete();
     npart = npart1;
     Darr = {ParticleAttrib, 0.. #npart};
     Dpart = {0.. #npart};
@@ -64,7 +64,7 @@ class Particle3D {
         arr[3,ii] = 1.0;
         arr[4,ii] = x**2 + y**2 + z**2;
       }
-      delete rng;
+
     }
   }
 
@@ -103,7 +103,7 @@ class Particle3D {
       jj = (rng.getNext()*(npart-ii)):int + ii;
       _ndx[jj] <=> _ndx[ii];
     }
-    delete rng;
+
 
     reorder(Dpart);
   }
@@ -120,9 +120,9 @@ proc countLines(fn : string) : int {
   return ipart;
 }
 
-proc readFile(fn : string) : Particle3D  {
+proc readFile(fn : string) : owned Particle3D  {
   var npart = countLines(fn);
-  var pp = new Particle3D(npart);
+  var pp = new owned Particle3D(npart);
 
   var ff = openreader(fn);
   var ipart = 0;
@@ -171,22 +171,16 @@ class KDNode {
   var dom : domain(1);
   var xcen : [DimSpace]real;
   var rcell : real;
-  var left, right : KDNode;
+  var left, right : owned KDNode?;
 
   proc isLeaf() : bool {
     return (left==nil) && (right==nil);
   }
-
-  proc deinit() {
-    if left then delete left;
-    if right then delete right;
-  }
-
 }
 
 
-proc BuildTree(pp : Particle3D, lo : int, hi : int, id : int) : KDNode  {
-  var me : KDNode = new KDNode();
+proc BuildTree(pp : Particle3D, lo : int, hi : int, id : int) : owned KDNode  {
+  var me : owned KDNode = new owned KDNode();
   me.lo = lo;
   me.hi = hi;
   me.dom = {lo..hi};
@@ -229,7 +223,7 @@ proc BuildTree(pp : Particle3D, lo : int, hi : int, id : int) : KDNode  {
   return me;
 }
 
-proc TreeAccumulate(hh : UniformBins, p1, p2 : Particle3D, node1, node2 : KDNode) {
+proc TreeAccumulate(hh : UniformBins, p1, p2 : Particle3D, node1, node2 :  KDNode) {
   // Compute the distance between node1 and node2
   var rr = sqrt (+ reduce(node1.xcen - node2.xcen)**2);
   var rmin = rr - (node1.rcell+node2.rcell);
@@ -245,24 +239,24 @@ proc TreeAccumulate(hh : UniformBins, p1, p2 : Particle3D, node1, node2 : KDNode
 
   // If one node is a leaf 
   if (node1.isLeaf()) {
-    TreeAccumulate(hh, p1, p2, node1, node2.left);
-    TreeAccumulate(hh, p1, p2, node1, node2.right);
+    TreeAccumulate(hh, p1, p2, node1, node2.left!);
+    TreeAccumulate(hh, p1, p2, node1, node2.right!);
     return;
   }
   if (node2.isLeaf()) {
-    TreeAccumulate(hh, p1, p2, node1.left, node2);
-    TreeAccumulate(hh, p1, p2, node1.right, node2);
+    TreeAccumulate(hh, p1, p2, node1.left!, node2);
+    TreeAccumulate(hh, p1, p2, node1.right!, node2);
     return;
   }
 
   // Split the larger case;
   if (node1.npart > node2.npart) {
-    TreeAccumulate(hh, p1, p2, node1.left, node2);
-    TreeAccumulate(hh, p1, p2, node1.right, node2);
+    TreeAccumulate(hh, p1, p2, node1.left!, node2);
+    TreeAccumulate(hh, p1, p2, node1.right!, node2);
     return;
   } else {
-    TreeAccumulate(hh, p1, p2, node1, node2.left);
-    TreeAccumulate(hh, p1, p2, node1, node2.right);
+    TreeAccumulate(hh, p1, p2, node1, node2.left!);
+    TreeAccumulate(hh, p1, p2, node1, node2.right!);
     return;
   }
 
@@ -301,18 +295,23 @@ proc doPairs() {
 
   // Read in the file
   tt.clear(); tt.start();
-  var pp1, pp2 : Particle3D;
+  var (pp1, pp2) = initialPP12();
+
+proc initialPP12() {
   if isPerf {
-    pp1 = new Particle3D(nParticles, true);
-    pp2 = new Particle3D(nParticles, true);
+    return (new Particle3D(nParticles, true),
+            new Particle3D(nParticles, true));
   } else {
-    pp1 = readFile(fn1);
-    pp2 = readFile(fn2);
+    var pp1 = readFile(fn1);
+    var pp2 = readFile(fn2);
     if !isTest {
       writef("Read in %i lines from file %s \n", pp1.npart, fn1);
       writef("Read in %i lines from file %s \n", pp2.npart, fn2);
     }
+    return (pp1, pp2);
   }
+}
+
   tt.stop();
   if !isTest {
     writef("Time to read : %r \n", tt.elapsed());
@@ -354,14 +353,5 @@ proc doPairs() {
     hh.set((0,0),0.0);
     writeHist(stdout,hh,"%20.5er ");
   }
-
-  //
-  // clean up
-  //
-  delete pp1;
-  delete pp2;
-  delete root1;
-  delete root2;
-  delete hh;
 }
 

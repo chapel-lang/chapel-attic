@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2018 Cray Inc.
+ * Copyright 2004-2019 Cray Inc.
  * Other additional copyright holders may be indicated within.
  *
  * The entirety of this work is licensed under the Apache License,
@@ -25,6 +25,7 @@
 
 #include "expr.h"
 #include "log.h"
+#include "LoopExpr.h"
 #include "runpasses.h"
 #include "stmt.h"
 #include "stringutil.h"
@@ -62,7 +63,11 @@ void AstDumpToHtml::init() {
   fprintf(sIndexFP, "<HEAD>\n");
   fprintf(sIndexFP, "<TITLE> Compilation Dump </TITLE>\n");
   fprintf(sIndexFP, "<SCRIPT SRC=\"https://chapel-lang.org/developer/mktree.js\" LANGUAGE=\"JavaScript\"></SCRIPT>");
-  fprintf(sIndexFP, "<LINK REL=\"stylesheet\" HREF=\"https://chapel-lang.org/developer/mktree.css\">");
+  fprintf(sIndexFP, "<LINK REL=\"stylesheet\" HREF=\"http://chapel.cray.com/developer/mktree.css\">\n");
+  fprintf(sIndexFP, "<STYLE>\n");
+  fprintf(sIndexFP, "a.userMod:link {color:#00A0FF;}\n");
+  fprintf(sIndexFP, "a.userMod:visited {color:#A000F0;}\n");
+  fprintf(sIndexFP, "</STYLE>\n");
   fprintf(sIndexFP, "</HEAD>\n");
   fprintf(sIndexFP, "<div style=\"text-align: center;\"><big><big><span style=\"font-weight: bold;\">");
   fprintf(sIndexFP, "Compilation Dump<br><br></span></big></big>\n");
@@ -116,8 +121,13 @@ bool AstDumpToHtml::open(ModuleSymbol* module, const char* passName) {
   mFP = fopen(path, "w");
 
   if (mFP != 0) {
-    fprintf(sIndexFP, "&nbsp;&nbsp;<a href=\"%s\">%s</a>\n", name, module->name);
+    const char* modClass = "";
 
+    if (module->modTag == MOD_USER)
+      modClass = "class=\"userMod\"";
+
+    fprintf(sIndexFP, "&nbsp;&nbsp;<a %s href=\"%s\">%s</a>\n",
+            modClass, name, module->name);
     fprintf(mFP, "<CHPLTAG=\"%s\">\n", passName);
     fprintf(mFP, "<HTML>\n");
     fprintf(mFP, "<HEAD>\n");
@@ -341,6 +351,17 @@ void AstDumpToHtml::exitNamedExpr(NamedExpr* node) {
 
 
 //
+// IfExpr
+//
+bool AstDumpToHtml::enterIfExpr(IfExpr* node) {
+  return false;
+}
+
+void AstDumpToHtml::exitIfExpr(IfExpr* node) {
+}
+
+
+//
 // SymExpr
 //
 void AstDumpToHtml::visitSymExpr(SymExpr* node) {
@@ -384,6 +405,50 @@ void AstDumpToHtml::visitUsymExpr(UnresolvedSymExpr* node) {
   if (isBlockStmt(node->parentExpr)) {
     fprintf(mFP, "%s\n", HTML_DL_close_tag);
   }
+}
+
+//
+// LoopExpr
+//
+bool AstDumpToHtml::enterLoopExpr(LoopExpr* node) {
+  if (isBlockStmt(node->parentExpr)) {
+    fprintf(mFP, "%s\n", HTML_DL_open_tag);
+  }
+
+  fprintf(mFP, "(%d ", node->id);
+
+  if (node->forall) {
+    if (node->maybeArrayType) fprintf(mFP, "[ ");
+    else fprintf(mFP, "<B>forall</B> ");
+  } else {
+    fprintf(mFP, "<B>for</B> ");
+  }
+
+  if (node->indices) {
+    node->indices->accept(this);
+    fprintf(mFP, " <B>in</B> ");
+  }
+
+  if (node->zippered) fprintf(mFP, "<B>zip</B>");
+  node->iteratorExpr->accept(this);
+
+  if (node->maybeArrayType) fprintf(mFP, " <B>]</B>");
+  else fprintf(mFP, " <B>do</B>");
+
+  if (node->cond) {
+    fprintf(mFP, " <B>if</B> ");
+    node->cond->accept(this);
+    fprintf(mFP, " <B>then</B> ");
+  }
+
+  node->loopBody->accept(this);
+
+  fprintf(mFP, ")");
+
+  return false;
+}
+
+void AstDumpToHtml::exitLoopExpr(LoopExpr* node) {
 }
 
 
@@ -434,17 +499,6 @@ void AstDumpToHtml::exitBlockStmt(BlockStmt* node) {
   fprintf(mFP, "}");
   printBlockID(node);
   fprintf(mFP, "%s\n", HTML_DL_close_tag);
-}
-
-void AstDumpToHtml::visitForallIntents(ForallIntents* clause) {
-  fprintf(mFP, "<B>with</B> (");
-  for (int i = 0; i < clause->numVars(); i++) {
-    if (i > 0) fprintf(mFP, ", ");
-    if (clause->isReduce(i)) clause->riSpecs[i]->accept(this);
-    fprintf(mFP, "<B>%s</B> ", forallIntentTagDescription(clause->fIntents[i]));
-    clause->fiVars[i]->accept(this);
-  }
-  fprintf(mFP, ")" );
 }
 
 

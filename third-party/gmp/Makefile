@@ -5,6 +5,10 @@ endif
 CHPL_MAKE_HOST_TARGET = --target
 include $(CHPL_MAKE_HOME)/make/Makefile.base
 
+# Get the host compiler (some build-time programs are compiled and run to
+# generate host-specific data table, and these run on the host/build node)
+HOST_CC=$(shell CHPL_MAKE_HOME=$(CHPL_MAKE_HOME) CHPL_MAKE_HOST_TARGET=--host make -f $(CHPL_MAKE_HOME)/make/Makefile.base printQ-CC)
+
 #
 # Cray X* builds are cross-compilations
 #
@@ -42,6 +46,11 @@ ifneq (, $(filter %32,$(CHPL_MAKE_TARGET_PLATFORM)))
 CHPL_GMP_ABI_ARG = ABI=32
 endif
 
+ifeq ($(CHPL_LIB_PIC),pic)
+CFLAGS += $(SHARED_LIB_CFLAGS)
+CXXFLAGS += $(SHARED_LIB_CFLAGS)
+endif
+
 CHPL_GMP_CFG_OPTIONS += $(CHPL_GMP_MORE_CFG_OPTIONS)
 
 default: all
@@ -64,7 +73,7 @@ $(GMP_BUILD_SUBDIR):
 $(GMP_H_FILE): $(GMP_BUILD_SUBDIR)
 	touch $(GMP_SUBDIR)/doc/gmp.info*
 	touch $(GMP_SUBDIR)/demos/calc/calc*.c
-	cd $(GMP_BUILD_DIR) && $(GMP_SUBDIR)/configure CC='$(CC)' CFLAGS='$(CFLAGS) $(CHPL_GMP_CFLAGS)' CXX='$(CXX)' CXXFLAGS='$(CXXFLAGS) $(CHPL_GMP_CXXFLAGS)' $(CHPL_GMP_ABI_ARG) --prefix=$(GMP_INSTALL_DIR) $(CHPL_GMP_CFG_OPTIONS)
+	cd $(GMP_BUILD_DIR) && $(GMP_SUBDIR)/configure CC_FOR_BUILD='$(HOST_CC)' CC='$(CC)' CFLAGS='$(CFLAGS) $(CHPL_GMP_CFLAGS)' CXX='$(CXX)' CXXFLAGS='$(CXXFLAGS) $(CHPL_GMP_CXXFLAGS)' $(CHPL_GMP_ABI_ARG) --prefix=$(GMP_INSTALL_DIR) $(CHPL_GMP_CFG_OPTIONS)
 	cd $(GMP_BUILD_DIR) && $(MAKE)
 ifeq ($(GMP_CROSS_COMPILED),no)
 	cd $(GMP_BUILD_DIR) && $(MAKE) check

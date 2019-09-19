@@ -16,10 +16,10 @@ module M2 {
   }
   proc bar() {
     use M1;
-    return new C();
+    return new unmanaged C();
   }
   proc baz(o: object) {
     use M1;
-    writeln((o:C).foo());
+    writeln((o:C?)!.foo());
   }
 }

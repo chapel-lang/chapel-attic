@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2018 Cray Inc.
+ * Copyright 2004-2019 Cray Inc.
  * Other additional copyright holders may be indicated within.
  *
  * The entirety of this work is licensed under the Apache License,
@@ -44,6 +44,7 @@ static int isDefinedAllPaths(Expr* expr, Symbol* ret, RefSet& refs);
 static void checkReturnPaths(FnSymbol* fn);
 static void checkCalls();
 static void checkExternProcs();
+static void checkExportedProcs();
 
 
 static void
@@ -62,7 +63,9 @@ checkResolved() {
     if (fn->retType->symbol->hasFlag(FLAG_ITERATOR_RECORD) &&
         !fn->isIterator()) {
       IteratorInfo* ii = toAggregateType(fn->retType)->iteratorInfo;
-      if (ii && ii->iterator && ii->iterator->defPoint->parentSymbol == fn) {
+      if (ii && ii->iterator &&
+          ii->iterator->defPoint->parentSymbol == fn &&
+          fn->hasFlag(FLAG_COMPILER_GENERATED) == false) {
         // This error isn't really possible in regular code anymore,
         // since you have to have FLAG_FN_RETURNS_ITERATOR / that pragma
         // to generate it. (Otherwise the iterator expression is turned
@@ -92,11 +95,21 @@ checkResolved() {
   checkCalls();
   checkConstLoops();
   checkExternProcs();
+  checkExportedProcs();
 }
 
 
-// Returns the smallest number of definitions of ret on any path through the
-// given expression.
+// This routine returns '0' if we can find a path through the given
+// expression that does not return (assign to 'ret'), halt, throw,
+// etc.  I.e., if there is a path that would constitute an error for a
+// function that was meant to return something and is not.  It returns
+// non-zero if all paths are covered, and the result _may_ indicate
+// something about the smallest number of definitions of 'ret' along
+// any path through the expression (though the behavior of throws,
+// halts, etc. may influence that number...).  In the only use-case in
+// our compiler, we are currently only relying on zero / non-zero
+// behavior and care should be taken before reading too much into the
+// non-zero value.
 static int
 isDefinedAllPaths(Expr* expr, Symbol* ret, RefSet& refs)
 {
@@ -109,11 +122,21 @@ isDefinedAllPaths(Expr* expr, Symbol* ret, RefSet& refs)
   if (isSymExpr(expr))
     return 0;
 
+  if (ret == gNone)
+    return 1;
+
   if (CallExpr* call = toCallExpr(expr))
   {
     if (call->isResolved() &&
         call->resolvedFunction()->hasFlag(FLAG_FUNCTION_TERMINATES_PROGRAM))
       return 1;
+
+    if (call->isPrimitive(PRIM_RT_ERROR))
+      return 1;
+
+    if (call->isPrimitive(PRIM_THROW)) {
+      return 1;
+    }
 
     if (call->isPrimitive(PRIM_MOVE) ||
         call->isPrimitive(PRIM_ASSIGN))
@@ -150,19 +173,6 @@ isDefinedAllPaths(Expr* expr, Symbol* ret, RefSet& refs)
                arg->intent == INTENT_INOUT ||
                arg->intent == INTENT_REF))
             return 1;
-
-          // Treat all (non-const) refs as definitions, until we know better.
-          // TODO: This may not be needed after moving insertReferenceTemps()
-          // after this pass.
-
-          // Commenting out debugging output
-          //for (RefSet::iterator i = refs.begin();
-          //     i != refs.end(); ++i)
-          //  printf("%d\n", (*i)->id);
-
-          if (refs.find(se->symbol()) != refs.end() &&
-              arg->intent == INTENT_REF)
-            return 1;
         }
       }
     }
@@ -170,8 +180,7 @@ isDefinedAllPaths(Expr* expr, Symbol* ret, RefSet& refs)
     return 0;
   }
 
-  if (CondStmt* cond = toCondStmt(expr))
-  {
+  if (CondStmt* cond = toCondStmt(expr)) {
     return std::min(isDefinedAllPaths(cond->thenStmt, ret, refs),
                     isDefinedAllPaths(cond->elseStmt, ret, refs));
   }
@@ -187,30 +196,48 @@ isDefinedAllPaths(Expr* expr, Symbol* ret, RefSet& refs)
   if (TryStmt* tryStmt = toTryStmt(expr))
   {
     int result = INT_MAX;
-    for_alist(c, tryStmt->_catches)
-      result = std::min(result, isDefinedAllPaths(c, ret, refs));
 
-    return std::min(result, isDefinedAllPaths(tryStmt->body(), ret, refs));
+    // This indicates whether or not we find a catch-all case, in
+    // which case nothing can escape us unless the individual clauses
+    // let it; if this is a try! statement, it doesn't need a
+    // catch-all case, so set it to true
+    //
+    bool foundCatchall = tryStmt->tryBang();
+    for_alist(c, tryStmt->_catches) {
+      result = std::min(result, isDefinedAllPaths(c, ret, refs));
+      if (toCatchStmt(c)->isCatchall()) {
+        foundCatchall = true;
+      }
+    }
+
+    result = std::min(result, isDefinedAllPaths(tryStmt->body(), ret, refs));
+
+    // even if the try and all catches are air-tight, if there's no
+    // catch-all, we can escape via an uncaught error, and will need
+    // for our parent statement to contain returns as well...
+    if (result == 1 && !foundCatchall) {
+      result = 0;
+    }
+    return result;
   }
 
-  if (CatchStmt* catchStmt = toCatchStmt(expr))
-    return isDefinedAllPaths(catchStmt->body(), ret, refs);
+  if (CatchStmt* catchStmt = toCatchStmt(expr)) {
+    return isDefinedAllPaths(catchStmt->bodyWithoutTest(), ret, refs);
+  }
 
   if (BlockStmt* block = toBlockStmt(expr))
   {
     // NOAKES 2014/11/25 Transitional.  Ensure we don't call blockInfoGet()
-    if (block->isWhileDoStmt()  == true ||
-        block->isForLoop()      == true ||
-        block->isCForLoop()     == true ||
-        block->isParamForLoop() == true)
+    if (block->isWhileDoStmt() ||
+        block->isForLoop()     ||
+        block->isCForLoop()    ||
+        block->isParamForLoop())
     {
       return 0;
     }
-
-    else if (block->isDoWhileStmt() == true ||
-             block->blockInfoGet()  == NULL ||
-             block->blockInfoGet()->isPrimitive(PRIM_BLOCK_LOCAL))
-    {
+    else if (block->isDoWhileStmt()        ||
+             block->blockInfoGet() == NULL ||
+             block->blockInfoGet()->isPrimitive(PRIM_BLOCK_LOCAL)) {
       int result = 0;
 
       for_alist(e, block->body)
@@ -218,12 +245,14 @@ isDefinedAllPaths(Expr* expr, Symbol* ret, RefSet& refs)
 
       return result;
     }
-
     else
     {
       return 0;
     }
   }
+
+  if (isForallStmt(expr))
+    return 0;
 
   if (isExternBlockStmt(expr))
     return 0;
@@ -392,8 +421,7 @@ checkReturnPaths(FnSymbol* fn) {
       fn->retType == dtVoid ||
       fn->retTag == RET_TYPE ||
       fn->hasFlag(FLAG_EXTERN) ||
-      fn->hasFlag(FLAG_DEFAULT_CONSTRUCTOR) ||
-      fn->hasFlag(FLAG_TYPE_CONSTRUCTOR) ||
+      fn->hasFlag(FLAG_INIT_TUPLE) ||
       fn->hasFlag(FLAG_AUTO_II))
     return; // No.
 
@@ -488,7 +516,8 @@ static void checkExternProcs() {
       continue;
 
     for_formals(formal, fn) {
-      if (formal->typeInfo() == dtString) {
+      if (formal->typeInfo() == dtString &&
+          !formal->hasFlag(FLAG_TYPE_VARIABLE)) {
         if (!fn->hasFlag(FLAG_INSTANTIATED_GENERIC)) {
           USR_FATAL_CONT(fn, "extern procedures should not take arguments of "
                              "type string, use c_string instead");
@@ -504,7 +533,20 @@ static void checkExternProcs() {
         break;
       }
     }
+
+    if (fn->retType->symbol->hasFlag(FLAG_C_ARRAY)) {
+      USR_FATAL_CONT(fn, "extern procedures should not return c_array");
+    }
   }
 }
 
+static void checkExportedProcs() {
+  forv_Vec(FnSymbol, fn, gFnSymbols) {
+    if (!fn->hasFlag(FLAG_EXPORT))
+      continue;
 
+    if (fn->retType->symbol->hasFlag(FLAG_C_ARRAY)) {
+      USR_FATAL_CONT(fn, "exported procedures should not return c_array");
+    }
+  }
+}

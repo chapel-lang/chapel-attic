@@ -1,6 +1,6 @@
 /*
  * Copyright © 2009 CNRS
- * Copyright © 2009-2017 Inria.  All rights reserved.
+ * Copyright © 2009-2019 Inria.  All rights reserved.
  * Copyright © 2009-2010 Université Bordeaux
  * Copyright © 2009-2011 Cisco Systems, Inc.  All rights reserved.
  * See COPYING in top-level directory.
@@ -54,8 +54,8 @@ int main(int argc, char *argv[])
   int err;
 
   /* enable verbose backends */
-  putenv("HWLOC_XML_VERBOSE=1");
-  putenv("HWLOC_SYNTHETIC_VERBOSE=1");
+  putenv((char *) "HWLOC_XML_VERBOSE=1");
+  putenv((char *) "HWLOC_SYNTHETIC_VERBOSE=1");
 
   hwloc_topology_init(&topology);
 
@@ -208,7 +208,11 @@ int main(int argc, char *argv[])
       }
     }
     hwloc_topology_set_flags(topology, flags);
-    hwloc_topology_load(topology);
+    err = hwloc_topology_load(topology);
+    if (err < 0) {
+      free(cpuset);
+      return EXIT_FAILURE;
+    }
 
     if (restrictstring) {
       hwloc_bitmap_t restrictset = hwloc_bitmap_alloc();

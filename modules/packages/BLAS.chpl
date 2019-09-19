@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2018 Cray Inc.
+ * Copyright 2004-2019 Cray Inc.
  * Other additional copyright holders may be indicated within.
  *
  * The entirety of this work is licensed under the Apache License,
@@ -23,12 +23,13 @@ Support for Basic Linear Algebra Subprograms (BLAS) kernel routines.
 
 BLAS (Basic Linear Algebra Subprograms) are the de facto standard routines for
 low-level matrix, vector, and scalar operations. While `netlib
-<http://www.netlib.org/blas/#_documentation>`_ provides the official
+<https://www.netlib.org/blas/#_documentation>`_ provides the official
 reference version of BLAS, this documentation refers to the
-`MKL BLAS <https://software.intel.com/en-us/node/520725>`_ documentation, due
-to interface similarities.
+`MKL BLAS <https://software.intel.com/en-us/mkl-developer-reference-fortran>`_
+documentation, due to interface similarities.
 
-This module is intended to work with non-distributed dense rectangular arrays.
+This module is intended to work with non-distributed dense rectangular
+(``DefaultRectangular``) arrays.
 
 
 Compiling with BLAS
@@ -52,7 +53,7 @@ BLAS Implementations:
   `BLAS implementations <https://en.wikipedia.org/wiki/Basic_Linear_Algebra_Subprograms#Implementations>`_
   available.
   This module was built and tested with `netlib's C_BLAS
-  <http://www.netlib.org/blas/#_cblas>`_, but many other implementations are
+  <https://www.netlib.org/blas/#_cblas>`_, but many other implementations are
   compatible as well.
   Using a version of BLAS optimized for the user's system will yield the best
   performance.
@@ -61,27 +62,31 @@ BLAS Implementations:
 
   * **ATLAS**
 
-    * The compilation command above likely requires the additional flag: ``-latlas``
+    * Compilation (linking) requires the additional flag: ``-latlas``
 
   * **MKL**
 
-    * Compile with :param:`isBLAS_MKL` if using MKL BLAS.
+    * Compilation requires the additional flag in order to use the MKL header
+      instead: ``--set blasImpl=mkl``
 
   * **OpenBLAS**
 
-    * The header files that are included with OpenBLAS differ from the reference
-      C_BLAS prototypes for complex arguments by using ``float*`` and ``double*``
-      pointers, instead of ``void*`` pointers.  Using this will likely result in
-      warnings about incompatible pointer types. These may be ignored.
+    * Compilation will generate warnings about incompatible pointer types,
+      which may be ignored.
+      These warnings are due to the header files of OpenBLAS differing from the
+      reference C_BLAS prototypes for complex arguments by using ``float*`` and
+      ``double*`` pointers, instead of ``void*`` pointers.
 
-Cray Systems:
-  No compiler flags should be necessary when compiling BLAS programs on
-  Crays. The **CrayBLAS** implementation is made available through Cray's libsci,
-  which comes installed on all Cray systems. This is typically loaded by
-  default, but can be manually loaded with ``module load cray-libsci`` as well.
-  Chapel programs compiled on Crays utilize the ``cc`` wrapper as the backend
-  compiler, which implicitly links against the libsci library. Therefore, no
-  additional steps are required of the user.
+  * **Cray LibSci**
+
+    * On Cray systems with the ``cray-libsci`` module loaded, no compiler flags
+      should be necessary when compiling programs that use BLAS. This is
+      typically loaded by default, but can be manually loaded with ``module
+      load cray-libsci`` as well.  Chapel programs compiled on Crays utilize
+      the ``cc`` wrapper as the backend compiler, which implicitly links
+      against the libsci library. Therefore, no additional steps are required
+      of the user.
+
 
 Chapel BLAS API
 ---------------
@@ -97,7 +102,7 @@ except that the type prefix is dropped. For instance, ``gemm`` is the
 wrapper for the ``[sdcz]gemm`` routines.
 
 The native BLAS interface can still be accessed by calling routines from the
-``C_BLAS`` submodule.
+:mod:`C_BLAS` submodule.
 
 The ``ldA`` argument is omitted from the Chapel BLAS API. Chapel determines the
 dimensions of the matrices from the arrays that are passed in, even when one is
@@ -111,86 +116,104 @@ in memory.
 
 .. MKL Documentation References
 
-.. _GEMM:   https://software.intel.com/en-us/node/ae8380b9-cac8-4c57-9af3-2eaac6acfc1b
-.. _HEMM:   https://software.intel.com/en-us/node/ecdcb863-3cb8-40ce-84f6-4cbc66cfc659
-.. _HERK:   https://software.intel.com/en-us/node/4ee4425c-42b6-4cc0-b2f0-6cfaa2117cb8
-.. _HER2K:  https://software.intel.com/en-us/node/5c17da7b-d8f9-44ec-921e-d6285238d48e
-.. _SYMM:   https://software.intel.com/en-us/node/8273eec0-2663-4843-90cd-12fd7a1baa6c
-.. _SYRK:   https://software.intel.com/en-us/node/04ca14b7-ec46-4836-8693-c4c7de26048e
-.. _SYR2K:  https://software.intel.com/en-us/node/d2a17c66-4265-4c56-84b9-2817ded7ee29
-.. _TRMM:   https://software.intel.com/en-us/node/60775edf-9a2b-4ad4-a627-dabbd24dcc80
-.. _TRSM:   https://software.intel.com/en-us/node/fc848297-8a33-42e6-826f-f4ae361c1800
-.. _GBMV:   https://software.intel.com/en-us/node/181e3c0c-e04a-4464-b87c-7e5d085f38a8
-.. _GEMV:   https://software.intel.com/en-us/node/78589c78-9c40-4846-b698-2c36e04b8869
-.. _GER:    https://software.intel.com/en-us/node/94156ede-4add-4830-940e-1ca5688abe88
-.. _GERC:   https://software.intel.com/en-us/node/f0469e83-40cc-40a0-9cd7-eeb8ea718aae
-.. _GERU:   https://software.intel.com/en-us/node/e62ae6d4-ba79-4034-96cc-46753ad0ec63
-.. _HBMV:   https://software.intel.com/en-us/node/02ca78c6-cad1-4c31-a6eb-5c645e862a52
-.. _HEMV:   https://software.intel.com/en-us/node/5c5972fb-d88f-4e32-8c4c-66f004945097
-.. _HER:    https://software.intel.com/en-us/node/c47a886b-8816-4cb6-be84-124b7ac70259
-.. _HER2:   https://software.intel.com/en-us/node/e2ddc00b-d8a5-4cc7-96f7-d08882151431
-.. _HPMV:   https://software.intel.com/en-us/node/fc602a99-7cb3-44f7-a22e-a89de255181a
-.. _HPR:    https://software.intel.com/en-us/node/60392a82-4400-4c9c-9c14-7a2e0cea4025
-.. _HPR2:   https://software.intel.com/en-us/node/163c6278-762f-40d7-8214-788d46ca4ea9
-.. _SBMV:   https://software.intel.com/en-us/node/9a02d0da-7aa4-4c5d-be91-78d4ce4a42e9
-.. _SPMV:   https://software.intel.com/en-us/node/fcd03a47-3896-4ad9-b0f9-1600c67deaa8
-.. _SPR:    https://software.intel.com/en-us/node/3a77ea66-38a4-42cd-ac6b-68c34c9f7e13
-.. _SPR2:   https://software.intel.com/en-us/node/9e17a098-ccbb-4cd4-9695-72c60a69904b
-.. _SYMV:   https://software.intel.com/en-us/node/687edc3e-fe76-4635-a425-40aab089cefc
-.. _SYR:    https://software.intel.com/en-us/node/08ab04b6-7aa7-4ce0-a69c-d4a4bc326ebe
-.. _SYR2:   https://software.intel.com/en-us/node/c2c54a2e-98d0-466a-a6b3-ae5f8cada666
-.. _TBMV:   https://software.intel.com/en-us/node/ae4b8c9d-8af2-4c5c-9e30-a8075cfef635
-.. _TBSV:   https://software.intel.com/en-us/node/f66b8633-aa82-4a54-ba5f-7aeaa40fc4f0
-.. _TPMV:   https://software.intel.com/en-us/node/00b446f2-5adb-4c7d-a4f5-3a63fee8f20d
-.. _TPSV:   https://software.intel.com/en-us/node/daea8c6c-7e29-461a-86d9-1ad01ae82cd6
-.. _TRMV:   https://software.intel.com/en-us/node/ce930002-ce05-4c38-a613-62931e024078
-.. _TRSV:   https://software.intel.com/en-us/node/4a450630-f24a-442e-94e2-e8f4e4ae4819
-.. _ASUM:   https://software.intel.com/en-us/node/ae455054-52b2-460a-8887-12192e01d899
-.. _AXPY:   https://software.intel.com/en-us/node/c8cbb256-eab7-4629-80ff-14029038e6b7
-.. _COPY:   https://software.intel.com/en-us/node/7e841640-7c31-4cd1-bc44-34f7d2343215
-.. _DOT:    https://software.intel.com/en-us/node/961a869b-14d9-4e4e-98fd-9ca13802c671
-.. _SDOT:   https://software.intel.com/en-us/node/7eaa9448-1ef0-404d-b8fb-c233a6b0142f
-.. _DOTC:   https://software.intel.com/en-us/node/a2c46a8c-343b-401d-88b6-9a6b88a4fa47
-.. _DOTU:   https://software.intel.com/en-us/node/e81ff20a-c401-4a15-a64f-cc0daa2bd65d
-.. _NRM2:   https://software.intel.com/en-us/node/aca1a6dc-60a0-4689-becc-2e0f4662c093
-.. _ROT:    https://software.intel.com/en-us/node/d8e66614-3ad9-4a37-90e8-3ef59e559ad6
-.. _ROTG:   https://software.intel.com/en-us/node/1a7e7c3a-e209-4c7a-b8ea-00c60e103e1f
-.. _ROTM:   https://software.intel.com/en-us/node/104aa6a5-5eef-4a3b-badf-78534ee1dee4
-.. _ROTMG:  https://software.intel.com/en-us/node/9ea3f8dd-fe3f-4a8a-ba12-ec25fabda6e6
-.. _SCAL:   https://software.intel.com/en-us/node/54f97254-4ed4-46ce-90f9-aa3c745ad840
-.. _SWAP:   https://software.intel.com/en-us/node/54a2904f-b8ed-4a5f-a0f2-a2be10d61495
-.. _AMAX:   https://software.intel.com/en-us/node/acb0d496-e032-4cf3-82f9-92b2e0bfc6d1
-.. _AMIN:   https://software.intel.com/en-us/node/50dceaa5-3463-402f-8065-a48bc68e0888
-.. _CABS1:  https://software.intel.com/en-us/node/64961e94-92d0-4671-90e6-86995e259a85
+.. _GEMM:   https://software.intel.com/en-us/mkl-developer-reference-fortran-gemm
+.. _HEMM:   https://software.intel.com/en-us/mkl-developer-reference-fortran-hemm
+.. _HERK:   https://software.intel.com/en-us/mkl-developer-reference-fortran-herk
+.. _HER2K:  https://software.intel.com/en-us/mkl-developer-reference-fortran-her2k
+.. _SYMM:   https://software.intel.com/en-us/mkl-developer-reference-fortran-symm
+.. _SYRK:   https://software.intel.com/en-us/mkl-developer-reference-fortran-syrk
+.. _SYR2K:  https://software.intel.com/en-us/mkl-developer-reference-fortran-syr2k
+.. _TRMM:   https://software.intel.com/en-us/mkl-developer-reference-fortran-trmm
+.. _TRSM:   https://software.intel.com/en-us/mkl-developer-reference-fortran-trsm
+.. _GBMV:   https://software.intel.com/en-us/mkl-developer-reference-fortran-gbmv
+.. _GEMV:   https://software.intel.com/en-us/mkl-developer-reference-fortran-gemv
+.. _GER:    https://software.intel.com/en-us/mkl-developer-reference-fortran-ger
+.. _GERC:   https://software.intel.com/en-us/mkl-developer-reference-fortran-gerc
+.. _GERU:   https://software.intel.com/en-us/mkl-developer-reference-fortran-geru
+.. _HBMV:   https://software.intel.com/en-us/mkl-developer-reference-fortran-hbmv
+.. _HEMV:   https://software.intel.com/en-us/mkl-developer-reference-fortran-hemv
+.. _HER:    https://software.intel.com/en-us/mkl-developer-reference-fortran-her
+.. _HER2:   https://software.intel.com/en-us/mkl-developer-reference-fortran-her2
+.. _HPMV:   https://software.intel.com/en-us/mkl-developer-reference-fortran-hpmv
+.. _HPR:    https://software.intel.com/en-us/mkl-developer-reference-fortran-hpr
+.. _HPR2:   https://software.intel.com/en-us/mkl-developer-reference-fortran-hpr2
+.. _SBMV:   https://software.intel.com/en-us/mkl-developer-reference-fortran-sbmv
+.. _SPMV:   https://software.intel.com/en-us/mkl-developer-reference-fortran-spmv
+.. _SPR:    https://software.intel.com/en-us/mkl-developer-reference-fortran-spr
+.. _SPR2:   https://software.intel.com/en-us/mkl-developer-reference-fortran-spr2
+.. _SYMV:   https://software.intel.com/en-us/mkl-developer-reference-fortran-symv
+.. _SYR:    https://software.intel.com/en-us/mkl-developer-reference-fortran-syr
+.. _SYR2:   https://software.intel.com/en-us/mkl-developer-reference-fortran-syr2
+.. _TBMV:   https://software.intel.com/en-us/mkl-developer-reference-fortran-tbmv
+.. _TBSV:   https://software.intel.com/en-us/mkl-developer-reference-fortran-tbsv
+.. _TPMV:   https://software.intel.com/en-us/mkl-developer-reference-fortran-tpmv
+.. _TPSV:   https://software.intel.com/en-us/mkl-developer-reference-fortran-tpsv
+.. _TRMV:   https://software.intel.com/en-us/mkl-developer-reference-fortran-trmv
+.. _TRSV:   https://software.intel.com/en-us/mkl-developer-reference-fortran-trsv
+.. _ASUM:   https://software.intel.com/en-us/mkl-developer-reference-fortran-asum
+.. _AXPY:   https://software.intel.com/en-us/mkl-developer-reference-fortran-axpy
+.. _COPY:   https://software.intel.com/en-us/mkl-developer-reference-fortran-copy
+.. _DOT:    https://software.intel.com/en-us/mkl-developer-reference-fortran-dot
+.. _SDOT:   https://software.intel.com/en-us/mkl-developer-reference-fortran-sdot
+.. _DOTC:   https://software.intel.com/en-us/mkl-developer-reference-fortran-dotc
+.. _DOTU:   https://software.intel.com/en-us/mkl-developer-reference-fortran-dotu
+.. _NRM2:   https://software.intel.com/en-us/mkl-developer-reference-fortran-nrm2
+.. _ROT:    https://software.intel.com/en-us/mkl-developer-reference-fortran-rot
+.. _ROTG:   https://software.intel.com/en-us/mkl-developer-reference-fortran-rotg
+.. _ROTM:   https://software.intel.com/en-us/mkl-developer-reference-fortran-rotm
+.. _ROTMG:  https://software.intel.com/en-us/mkl-developer-reference-fortran-rotmg
+.. _SCAL:   https://software.intel.com/en-us/mkl-developer-reference-fortran-scal
+.. _SWAP:   https://software.intel.com/en-us/mkl-developer-reference-fortran-swap
+.. _AMAX:   https://software.intel.com/en-us/mkl-developer-reference-fortran-i-amax
+.. _AMIN:   https://software.intel.com/en-us/mkl-developer-reference-fortran-amin
+.. _CABS1:  https://software.intel.com/en-us/mkl-developer-reference-fortran-cabs1
 
 .. BLAS Module TODO:
-  - Clearer compiler errors instead of using where-clauses
-  - Support more implementations using config param-wrapped require statements
-    - related: general RequireMKL module
-  - More consistent documentation
   - Support banded/packed matrix routines
 
 */
 module BLAS {
 
-  /*
-    Tells the BLAS module to look for ``mkl_cblas.h`` instead of ``cblas.h``.
-    Set this to `true` if you are using the Intel MKL BLAS implementation.
+  /* Available BLAS implementations for ``blasImpl`` */
+  enum BlasImpl {blas, mkl, off};
+  use BlasImpl;
+
+  /* Specifies which header filename to include, based on the BLAS
+     implementation.
+
+     Most BLAS implementations rely on ``cblas.h``, which is used when
+     ``blasImpl = blas``, the default setting.
+
+      - ``blas`` includes ``cblas.h`` (default)
+      - ``mkl`` includes ``mkl_cblas.h``
+      - ``off`` includes nothing
+
   */
-  config param isBLAS_MKL=false;
+  config param blasImpl = BlasImpl.blas;
+
+  /* Manually specifies the header filename to include. This flag overrides
+     the header determined by ``blasImpl``.
+
+     This flag should only be necessary if using an ``BLAS`` implementation
+     with a unique header name that is not supported by ``blasImpl``.
+     However, no guarantees can be made about this module working with untested
+     implementations.
+   */
+  config param blasHeader = '';
+
+  pragma "no doc"
+  param header = if blasHeader == '' then
+                   if blasImpl == BlasImpl.off then ''
+                   else if blasImpl == BlasImpl.mkl then 'mkl_cblas.h'
+                   else 'cblas.h'
+                 else blasHeader;
 
   use C_BLAS;
 
   use SysCTypes;
 
-  if (isBLAS_MKL) {
-    require "mkl_cblas.h";
-  } else {
-    require "cblas.h";
-  }
-
   /* Return `true` if type is supported by BLAS */
-  proc isBLASType(type t) param: bool{
+  proc isBLASType(type t) param: bool {
     return isRealType(t) || isComplexType(t);
   }
 
@@ -223,6 +246,7 @@ module BLAS {
     order : Order = Order.Row)
     where (Adom.rank == 2) && (Bdom.rank==2) && (Cdom.rank==2)
   {
+    require header;
     // Types
     type eltType = A.eltType;
 
@@ -287,6 +311,7 @@ module BLAS {
     order : Order = Order.Row)
     where (Adom.rank == 2) && (Bdom.rank==2) && (Cdom.rank==2)
   {
+    require header;
     // Types
     type eltType = A.eltType;
 
@@ -348,6 +373,7 @@ module BLAS {
     order : Order = Order.Row)
     where (Adom.rank == 2) && (Bdom.rank==2) && (Cdom.rank==2)
   {
+    require header;
     // Types
     type eltType = A.eltType;
 
@@ -400,6 +426,7 @@ module BLAS {
     order : Order = Order.Row)
     where (Adom.rank == 2) && (Cdom.rank==2)
   {
+    require header;
     // Types
     type eltType = A.eltType;
 
@@ -463,6 +490,7 @@ module BLAS {
     order : Order = Order.Row)
     where (Adom.rank == 2) && (Cdom.rank==2)
   {
+    require header;
     // Types
     type eltType = A.eltType;
 
@@ -517,6 +545,7 @@ module BLAS {
     order : Order = Order.Row)
     where (Adom.rank == 2) && (Bdom.rank==2) && (Cdom.rank==2)
   {
+    require header;
     // Types
     type eltType = A.eltType;
 
@@ -581,6 +610,7 @@ module BLAS {
     order : Order = Order.Row)
     where (Adom.rank == 2) && (Bdom.rank==2) && (Cdom.rank==2)
   {
+    require header;
     // Types
     type eltType = A.eltType;
 
@@ -625,6 +655,8 @@ module BLAS {
       B := alpha * B * op(A)
 
     where ``A`` is a triangular matrix.
+    
+    :throws IllegalArgumentError: When `B` is a non-square array.
   */
   proc trmm(A : [?Adom] ?eltType,  B : [?Bdom] eltType,
     alpha,
@@ -633,6 +665,7 @@ module BLAS {
     order : Order = Order.Row)
     throws where (Adom.rank == 2) && (Bdom.rank==2)
   {
+    require header;
 
 
     // Determine sizes
@@ -640,7 +673,7 @@ module BLAS {
         n = Bdom.dim(2).size : c_int;
 
     if m != n then
-      throw new IllegalArgumentError("B", "Non-square array of dimensions %ix%i passed to trmm".format(m, n));
+      throw new owned IllegalArgumentError("B", "Non-square array of dimensions %ix%i passed to trmm".format(m, n));
 
     // Set strides if necessary
     var _ldA = getLeadingDim(A, order),
@@ -682,6 +715,8 @@ module BLAS {
       X * op(A) = alpha * B
 
     where ``A`` is a triangular matrix.
+    
+    :throws IllegalArgumentError: When `B` is a non-square array.
   */
   proc trsm(A : [?Adom],  B : [?Bdom],
     alpha,
@@ -690,6 +725,7 @@ module BLAS {
     order : Order = Order.Row)
     throws where (Adom.rank == 2) && (Bdom.rank==2)
   {
+    require header;
     // Types
     type eltType = A.eltType;
 
@@ -698,7 +734,7 @@ module BLAS {
         n = Bdom.dim(2).size : c_int;
 
     if m != n then
-      throw new IllegalArgumentError("B", "Non-square array of dimensions %ix%i passed to trsm".format(m, n));
+      throw new owned IllegalArgumentError("B", "Non-square array of dimensions %ix%i passed to trsm".format(m, n));
 
     // Set strides if necessary
     var _ldA = getLeadingDim(A, order),
@@ -752,6 +788,7 @@ module BLAS {
             order : Order = Order.Row, incx : c_int = 1, incy : c_int = 1)
             where (Adom.rank == 2) && (Xdom.rank==1) && (Ydom.rank == 1)
   {
+    require header;
     // Determine sizes
     var m = Ydom.dim(1).size : c_int,
         n = Xdom.dim(1).size : c_int;
@@ -799,6 +836,7 @@ module BLAS {
             incx : c_int = 1, incy : c_int = 1)
             where (Adom.rank == 2) && (xdom.rank == 1) && (ydom.rank == 1)
   {
+    require header;
     // Determine sizes
     var m = Adom.dim(1).size : c_int,
         n = Adom.dim(2).size : c_int;
@@ -843,6 +881,7 @@ module BLAS {
            order : Order = Order.Row, incx : c_int = 1, incy : c_int = 1)
            where (Adom.rank == 2) && (Xdom.rank == 1) && (Ydom.rank == 1)
   {
+    require header;
 
     // Determine sizes
     var m = Xdom.dim(1).size : c_int,
@@ -876,6 +915,7 @@ module BLAS {
             order : Order = Order.Row, incx : c_int = 1, incy : c_int = 1)
             where (Adom.rank == 2) && (Xdom.rank == 1) && (Ydom.rank == 1)
   {
+    require header;
     var m = Xdom.dim(1).size : c_int,
         n = Ydom.dim(1).size : c_int;
 
@@ -907,6 +947,7 @@ module BLAS {
             order : Order = Order.Row, incx : c_int = 1, incy : c_int = 1)
             where (Adom.rank == 2) && (Xdom.rank == 1) && (Ydom.rank == 1)
   {
+    require header;
     var m = Xdom.dim(1).size : c_int,
         n = Ydom.dim(1).size : c_int;
 
@@ -943,6 +984,7 @@ module BLAS {
             uplo : Uplo = Uplo.Upper, incx : c_int = 1, incy : c_int = 1)
             where (Adom.rank == 2) && (vDom.rank == 1)
   {
+    require header;
     var m = Adom.dim(1).size : c_int,
         n = Adom.dim(2).size : c_int;
 
@@ -968,19 +1010,21 @@ module BLAS {
     Wrapper for the `HEMV`_ routines::
 
       y := alpha*A*x + beta*y
-
+      
+    :throws IllegalArgumentError: When `A` is a non-square array.
   */
   proc hemv(A: [?Adom] ?eltType, X: [?vDom] eltType, Y: [vDom] eltType,
             ref alpha: eltType, ref beta: eltType,
             order : Order = Order.Row,
             uplo : Uplo = Uplo.Upper, incx : c_int = 1, incy : c_int = 1)
             throws where (Adom.rank == 2) && (vDom.rank == 1)
-    {
+  {
+    require header;
     var m = Adom.dim(1).size : c_int,
         n = Adom.dim(2).size : c_int;
 
     if m != n then
-      throw new IllegalArgumentError("A", "Non-square array of dimensions %ix%i passed to hemv".format(m, n));
+      throw new owned IllegalArgumentError("A", "Non-square array of dimensions %ix%i passed to hemv".format(m, n));
 
     // Set strides if necessary
     var _ldA = getLeadingDim(A, order);
@@ -1002,18 +1046,20 @@ module BLAS {
     Wrapper for the `HER`_ routines::
 
       A := alpha*x*conjg(x') + A
-
+      
+    :throws IllegalArgumentError: When `A` is a non-square array.
   */
   proc her(A: [?Adom] ?eltType, X: [?vDom] eltType, alpha,
             order : Order = Order.Row,
             uplo : Uplo = Uplo.Upper, incx : c_int = 1)
             throws where (Adom.rank == 2) && (vDom.rank == 1)
   {
+    require header;
     var m = Adom.dim(1).size : c_int,
         n = Adom.dim(2).size : c_int;
 
     if m != n then
-      throw new IllegalArgumentError("A", "Non-square array of dimensions %ix%i passed to her".format(m, n));
+      throw new owned IllegalArgumentError("A", "Non-square array of dimensions %ix%i passed to her".format(m, n));
 
     // TODO -- Assert alpha is real
 
@@ -1036,19 +1082,21 @@ module BLAS {
     Wrapper for `HER2`_ routines::
 
       A := alpha *x*conjg(y') + conjg(alpha)*y *conjg(x') + A
-
+      
+    :throws IllegalArgumentError: When `A` is a non-square array.
   */
   proc her2(A: [?Adom] ?eltType, X: [?vDom] eltType, Y: [vDom] eltType,
             ref alpha: eltType,
             order : Order = Order.Row,
             uplo : Uplo = Uplo.Upper, incx : c_int = 1, incy : c_int = 1)
             throws where (Adom.rank == 2) && (vDom.rank == 1)
-    {
+  {
+    require header;
     var m = Adom.dim(1).size : c_int,
         n = Adom.dim(2).size : c_int;
 
     if m != n then
-      throw new IllegalArgumentError("A", "Non-square array of dimensions %ix%i passed to her2".format(m, n));
+      throw new owned IllegalArgumentError("A", "Non-square array of dimensions %ix%i passed to her2".format(m, n));
 
 
     // Set strides if necessary
@@ -1084,6 +1132,7 @@ module BLAS {
             incx : c_int = 1, incy : c_int = 1)
             where (Adom.rank == 2) && (vDom.rank == 1)
   {
+    require header;
     var m = Adom.dim(1).size : c_int,
         n = Adom.dim(2).size : c_int;
 
@@ -1116,6 +1165,7 @@ module BLAS {
             incx : c_int = 1)
             where (Adom.rank == 2) && (vDom.rank == 1)
   {
+    require header;
     var m = Adom.dim(1).size : c_int,
         n = Adom.dim(2).size : c_int;
 
@@ -1150,7 +1200,8 @@ module BLAS {
             uplo : Uplo = Uplo.Upper,
             incx : c_int = 1, incy : c_int = 1)
             where (Adom.rank == 2) && (vDom.rank == 1)
-    {
+  {
+    require header;
     var m = Adom.dim(1).size : c_int,
         n = Adom.dim(2).size : c_int;
 
@@ -1185,6 +1236,7 @@ module BLAS {
             incx : c_int = 1, incy : c_int = 1)
             where (Adom.rank == 2) && (vDom.rank == 1)
   {
+    require header;
     var m = Adom.dim(1).size : c_int,
         n = Adom.dim(2).size : c_int;
 
@@ -1222,6 +1274,7 @@ module BLAS {
             incx : c_int = 1, incy : c_int = 1)
             where (Adom.rank == 2) && (vDom.rank == 1)
   {
+    require header;
     var m = Adom.dim(1).size : c_int,
         n = Adom.dim(2).size : c_int;
 
@@ -1253,6 +1306,7 @@ module BLAS {
            incx : c_int = 1)
            where (Adom.rank == 2) && (vDom.rank == 1)
   {
+    require header;
 
     var m = Adom.dim(1).size : c_int,
         n = Adom.dim(2).size : c_int;
@@ -1285,6 +1339,7 @@ module BLAS {
             incx : c_int = 1, incy : c_int = 1)
             where (Adom.rank == 2) && (vDom.rank == 1)
   {
+    require header;
     var m = Adom.dim(1).size : c_int,
         n = Adom.dim(2).size : c_int;
 
@@ -1305,7 +1360,8 @@ module BLAS {
     Wrapper for the `SYMV`_ routines::
 
       y := alpha*A*x + beta*y
-
+      
+    :throws IllegalArgumentError: When `A` is a non-square array.
   */
   proc symv(A: [?Adom] ?eltType, X: [?vDom] eltType, Y: [vDom] eltType,
             alpha, beta,
@@ -1314,11 +1370,12 @@ module BLAS {
             incx : c_int = 1, incy : c_int = 1)
             throws where (Adom.rank == 2) && (vDom.rank == 1)
   {
+    require header;
     var m = Adom.dim(1).size : c_int,
         n = Adom.dim(2).size : c_int;
 
     if m != n then
-      throw new IllegalArgumentError("A", "Non-square array of dimensions %ix%i passed to symv".format(m, n));
+      throw new owned IllegalArgumentError("A", "Non-square array of dimensions %ix%i passed to symv".format(m, n));
 
     var _ldA = getLeadingDim(A, order);
 
@@ -1339,7 +1396,8 @@ module BLAS {
     Wrapper for `SYR`_ routines::
 
       A := alpha*x*x' + A
-
+      
+    :throws IllegalArgumentError: When `A` is a non-square array.
   */
   proc syr(A: [?Adom] ?eltType, X: [?vDom] eltType,
            alpha,
@@ -1348,12 +1406,13 @@ module BLAS {
            incx : c_int = 1)
            throws where (Adom.rank == 2) && (vDom.rank == 1)
   {
+    require header;
 
     var m = Adom.dim(1).size : c_int,
         n = Adom.dim(2).size : c_int;
 
     if m != n then
-      throw new IllegalArgumentError("A", "Non-square array of dimensions %ix%i passed to syr".format(m, n));
+      throw new owned IllegalArgumentError("A", "Non-square array of dimensions %ix%i passed to syr".format(m, n));
 
     var _ldA = getLeadingDim(A, order);
 
@@ -1375,6 +1434,7 @@ module BLAS {
 
       A := alpha*x*y'+ alpha*y*x' + A
 
+    :throws IllegalArgumentError: When `A` is a non-square array.
   */
   proc syr2(A: [?Adom] ?eltType, X: [?vDom] eltType, Y: [vDom] eltType,
             alpha,
@@ -1383,12 +1443,13 @@ module BLAS {
             incx : c_int = 1, incy : c_int = 1)
             throws where (Adom.rank == 2) && (vDom.rank == 1)
   {
+    require header;
 
     var m = Adom.dim(1).size : c_int,
         n = Adom.dim(2).size : c_int;
 
     if m != n then
-      throw new IllegalArgumentError("A", "Non-square array of dimensions %ix%i passed to syr2".format(m, n));
+      throw new owned IllegalArgumentError("A", "Non-square array of dimensions %ix%i passed to syr2".format(m, n));
 
     var _ldA = getLeadingDim(A, order);
 
@@ -1425,6 +1486,7 @@ module BLAS {
             incx : c_int = 1)
             where (Adom.rank == 2) && (vDom.rank == 1)
   {
+    require header;
     // Determine sizes
     var m = Adom.dim(1).size : c_int,
         n = Adom.dim(2).size : c_int;
@@ -1470,6 +1532,7 @@ module BLAS {
             incx : c_int = 1)
             where (Adom.rank == 2) && (vDom.rank == 1)
   {
+    require header;
 
     // Determine sizes
     var m = Adom.dim(1).size : c_int,
@@ -1520,6 +1583,7 @@ module BLAS {
             incx : c_int = 1)
             where (Adom.rank == 2) && (vDom.rank == 1)
   {
+    require header;
 
     // Determine sizes
     var m = Adom.dim(1).size : c_int,
@@ -1560,6 +1624,7 @@ module BLAS {
             incx : c_int = 1)
             where (Adom.rank == 2) && (vDom.rank == 1)
   {
+    require header;
 
     // Determine sizes
     var m = Adom.dim(1).size : c_int,
@@ -1590,6 +1655,7 @@ module BLAS {
 
       x := op(A)*x
 
+    :throws IllegalArgumentError: When `A` is a non-square array.
   */
   proc trmv(A: [?Adom] ?eltType, X: [?vDom] eltType,
             trans : Op = Op.N,
@@ -1599,13 +1665,14 @@ module BLAS {
             incx : c_int = 1)
             throws where (Adom.rank == 2) && (vDom.rank == 1)
   {
+    require header;
 
     // Determine sizes
     var m = Adom.dim(1).size : c_int,
         n = Adom.dim(2).size : c_int;
 
     if m != n then
-      throw new IllegalArgumentError("A", "Non-square array of dimensions %ix%i passed to trmv".format(m, n));
+      throw new owned IllegalArgumentError("A", "Non-square array of dimensions %ix%i passed to trmv".format(m, n));
 
     // Set strides if necessary
     var _ldA = getLeadingDim(A, order);
@@ -1634,6 +1701,7 @@ module BLAS {
 
       A*op(x) = b
 
+    :throws IllegalArgumentError: When `A` is a non-square array.
   */
   proc trsv(A: [?Adom] ?eltType, B: [?vDom] eltType,
             trans : Op = Op.N,
@@ -1643,13 +1711,14 @@ module BLAS {
             incx : c_int = 1)
             throws where (Adom.rank == 2) && (vDom.rank == 1)
   {
+    require header;
 
     // Determine sizes
     var m = Adom.dim(1).size : c_int,
         n = Adom.dim(2).size : c_int;
 
     if m != n then
-      throw new IllegalArgumentError("A", "Non-square array of dimensions %ix%i passed to trsv".format(m, n));
+      throw new owned IllegalArgumentError("A", "Non-square array of dimensions %ix%i passed to trsv".format(m, n));
 
     // Set strides if necessary
     var _ldA = getLeadingDim(A, order);
@@ -1706,7 +1775,8 @@ module BLAS {
         else z = 1
 
   */
-  proc rotg(ref a : ?eltType, ref b : eltType, ref c : eltType, ref s : eltType){
+  proc rotg(ref a : ?eltType, ref b : eltType, ref c : eltType, ref s : eltType) {
+    require header;
     select eltType {
       when real(32) do{
         cblas_srotg (a, b, c, s);
@@ -1761,12 +1831,14 @@ module BLAS {
                                  |0   1|
 
 
-
+      :throws IllegalArgumentError: When `P` does not consist of exactly five
+        elements.
   */
   proc rotmg(ref d1: ?eltType, ref d2: eltType, ref b1: eltType, b2: eltType, P: []eltType) throws {
+    require header;
 
     if P.size != 5 then
-      throw new IllegalArgumentError("P", "must consist of 5 elements, passed to rotmg");
+      throw new owned IllegalArgumentError("P", "must consist of 5 elements, passed to rotmg");
 
     select eltType {
       when real(32) do{
@@ -1806,7 +1878,9 @@ module BLAS {
 
   */
   proc rot(X: [?D] ?eltType, Y: [D] eltType, c: eltType, s: eltType,  incY: c_int = 1, incX: c_int = 1)
-  where D.rank == 1 {
+    where D.rank == 1
+  {
+    require header;
 
     const N = D.size: c_int;
 
@@ -1861,11 +1935,16 @@ module BLAS {
       - ``X``: Vector with updated elements
       - ``Y``: Vector with updated elements
 
+      :throws IllegalArgumentError: When `P` does not consist of exactly five
+        elements.
   */
-  proc rotm(X: [?D]?eltType,  Y: [D]eltType,  P: []eltType, incY: c_int = 1, incX: c_int = 1) throws where D.rank == 1 {
+  proc rotm(X: [?D]?eltType,  Y: [D]eltType,  P: []eltType, incY: c_int = 1, incX: c_int = 1) throws
+    where D.rank == 1
+  {
+    require header;
 
     if P.size != 5 then
-      throw new IllegalArgumentError("P", "must consist of 5 elements, passed to rotm");
+      throw new owned IllegalArgumentError("P", "must consist of 5 elements, passed to rotm");
 
     const N = D.size: c_int;
 
@@ -1902,7 +1981,9 @@ module BLAS {
 
   */
   proc swap(X: [?D]?eltType, Y: [D]eltType, incY: c_int = 1, incX: c_int = 1)
-   where D.rank == 1 {
+    where D.rank == 1
+  {
+    require header;
 
     const N = D.size: c_int;
 
@@ -1943,7 +2024,9 @@ module BLAS {
 
   */
   proc scal(X: [?D]?eltType, ref alpha:eltType, incX: c_int = 1)
-  where D.rank == 1 {
+    where D.rank == 1
+  {
+    require header;
 
     const N = D.size: c_int;
 
@@ -1986,7 +2069,9 @@ module BLAS {
 
    */
   proc copy(X: [?D]?eltType, Y: [D]eltType, incY: c_int = 1, incX: c_int = 1)
-    where D.rank == 1 {
+    where D.rank == 1
+  {
+    require header;
 
     const N = D.size: c_int;
 
@@ -2031,7 +2116,9 @@ module BLAS {
   */
 
   proc axpy(X: [?D]?eltType, Y: [D]eltType, ref alpha:eltType, incY: c_int = 1, incX: c_int = 1)
-   where D.rank == 1 {
+    where D.rank == 1
+  {
+    require header;
 
     const N = D.size: c_int;
     select eltType {
@@ -2070,7 +2157,9 @@ module BLAS {
       :returns: Scalar value of dot product
   */
   proc dot(X: [?xD]?eltType,  Y: [?yD] eltType, incY: c_int = 1, incX: c_int = 1) : eltType
-  where xD.rank == 1 && yD.rank == 1 {
+    where xD.rank == 1 && yD.rank == 1
+  {
+    require header;
 
     const N = xD.size: c_int;
 
@@ -2107,7 +2196,9 @@ module BLAS {
 
   */
   proc dotu(X: [?D]?eltType,  Y: [D]eltType, incY: c_int = 1, incX: c_int = 1)
-  where D.rank == 1 {
+    where D.rank == 1
+  {
+    require header;
 
     const N = D.size: c_int;
 
@@ -2150,6 +2241,7 @@ module BLAS {
   */
   proc dotc(X: [?D]?eltType, Y: [D]eltType, incY: c_int = 1, incX: c_int = 1)
    where D.rank == 1 {
+    require header;
 
     const N = D.size: c_int;
 
@@ -2190,6 +2282,7 @@ module BLAS {
   */
   proc dsdot(X: [?D] real(32), Y: [D] real(32), incY: c_int = 1,incX: c_int = 1): real(64)
    where D.rank == 1 {
+    require header;
 
     const N = D.size: c_int;
     return cblas_dsdot (N, X, incX, Y, incY);
@@ -2217,6 +2310,7 @@ module BLAS {
   */
   proc sdsdot(X: [?D] real(32), Y: [D] real(32), incY: c_int = 1,incX: c_int = 1): real(32)
    where D.rank == 1 {
+    require header;
 
     var alpha = 0: real(32);
     const N = D.size: c_int;
@@ -2240,7 +2334,9 @@ module BLAS {
 
   */
   proc nrm2(X: [?D]?eltType, incX: c_int = 1)
-  where D.rank == 1 {
+    where D.rank == 1
+  {
+    require header;
 
     const N = D.size: c_int;
 
@@ -2279,7 +2375,9 @@ module BLAS {
 
   */
   proc asum(X: [?D]?eltType, incX: c_int = 1)
-  where D.rank == 1 {
+    where D.rank == 1
+  {
+    require header;
 
     const N = D.size: c_int;
 
@@ -2316,7 +2414,9 @@ module BLAS {
 
   */
   proc amax(X: [?D]?eltType, incX: c_int = 1)
-  where D.rank == 1: D.idxType {
+    where D.rank == 1
+  {
+    require header;
 
     const N = D.size: c_int;
 
@@ -2347,6 +2447,7 @@ module BLAS {
 
   pragma "no doc"
   inline proc getLeadingDim(A: [?Adom], order : Order) : c_int {
+    require header;
     if order==Order.Row then
       return Adom.dim(2).size : c_int;
     else
@@ -2355,8 +2456,8 @@ module BLAS {
 
   pragma "no doc"
   inline proc getLeadingDim(Arr: [], order : Order) : c_int
-  where chpl__isArrayView(Arr)
-  {
+    where chpl__isArrayView(Arr)
+  { require header;
     const dims = chpl__getActualArray(Arr).dom.dsiDims();
     if order==Order.Row then
       return dims(2).size : c_int;
@@ -2372,6 +2473,12 @@ module BLAS {
     This submodule wraps the netlib C_BLAS implementation, providing access to
     all of C_BLAS calls.
 
+    Direct usage of this module requires an explicit ``require`` statement of
+    the BLAS header file, for example::
+
+      use C_BLAS;
+      require "cblas.h";
+
     Arrays are passed in directly, while pointers to scalar
     quantities (including complex numbers) are passed by reference (removing
     the need to wrap these with ``c_ptrTo``). As with BLAS calls in C,
@@ -2379,11 +2486,12 @@ module BLAS {
     different array element types require using different functions.
 
     Refer to the
-    `C_BLAS documentation <http://www.netlib.org/lapack/explore-html/dir_f88bc7ad48bfd56d75bf9d4836a2bb00.html>`_
+    `C_BLAS documentation <https://www.netlib.org/lapack/explore-html/dir_f88bc7ad48bfd56d75bf9d4836a2bb00.html>`_
     of the reference version for the usage of this module.
 
   */
   module C_BLAS {
+
     extern type CBLAS_INDEX = c_int;
 
     // Define the external types
@@ -2406,19 +2514,6 @@ module BLAS {
     extern const CblasLeft : CBLAS_SIDE;
     extern const CblasRight : CBLAS_SIDE;
 
-    {
-      assert(Order.Row:c_int == CblasRowMajor,"Enum value for Order.Row does not agree with CblasRowMajor");
-      assert(Order.Col:c_int == CblasColMajor,"Enum value for Order.Col does not agree with CblasColMajor");
-      assert(Op.N:c_int == CblasNoTrans,"Enum value for Op.N does not agree with CblasNoTrans");
-      assert(Op.T:c_int == CblasTrans,"Enum value for Op.T does not agree with CblasTrans");
-      assert(Op.H:c_int == CblasConjTrans,"Enum value for Op.H does not agree with CblasConjTrans");
-      assert(Uplo.Upper:c_int == CblasUpper,"Enum value for Uplo.Upper does not agree with CblasUpper");
-      assert(Uplo.Lower:c_int == CblasLower,"Enum value for Uplo.Lower does not agree with CblasLower");
-      assert(Diag.NonUnit:c_int == CblasNonUnit,"Enum value for Diag.NonUnit does not agree with CblasNonUnit");
-      assert(Diag.Unit:c_int == CblasUnit,"Enum value for Diag.Unit does not agree with CblasUnit");
-      assert(Side.Left:c_int == CblasLeft,"Enum value for Side.Left does not agree with CblasLeft");
-      assert(Side.Right:c_int == CblasRight,"Enum value for Side.Right does not agree with CblasRight");
-    }
 
     extern proc cblas_sdsdot (N: c_int, alpha: c_float, X: []c_float, incX: c_int, Y: []c_float, incY: c_int): c_float;
     extern proc cblas_dsdot (N: c_int, X: []c_float, incX: c_int, Y: []c_float, incY: c_int): c_double;
@@ -2565,6 +2660,26 @@ module BLAS {
 
   }
 
+  /*
+     Runs some assertions for constants defined in the underlying BLAS
+     implementation to confirm compatibility.
+   */
+  pragma "no doc"
+  proc checkBLAS()
+  {
+    require header;
+    assert(Order.Row:c_int == CblasRowMajor,"Enum value for Order.Row does not agree with CblasRowMajor");
+    assert(Order.Col:c_int == CblasColMajor,"Enum value for Order.Col does not agree with CblasColMajor");
+    assert(Op.N:c_int == CblasNoTrans,"Enum value for Op.N does not agree with CblasNoTrans");
+    assert(Op.T:c_int == CblasTrans,"Enum value for Op.T does not agree with CblasTrans");
+    assert(Op.H:c_int == CblasConjTrans,"Enum value for Op.H does not agree with CblasConjTrans");
+    assert(Uplo.Upper:c_int == CblasUpper,"Enum value for Uplo.Upper does not agree with CblasUpper");
+    assert(Uplo.Lower:c_int == CblasLower,"Enum value for Uplo.Lower does not agree with CblasLower");
+    assert(Diag.NonUnit:c_int == CblasNonUnit,"Enum value for Diag.NonUnit does not agree with CblasNonUnit");
+    assert(Diag.Unit:c_int == CblasUnit,"Enum value for Diag.Unit does not agree with CblasUnit");
+    assert(Side.Left:c_int == CblasLeft,"Enum value for Side.Left does not agree with CblasLeft");
+    assert(Side.Right:c_int == CblasRight,"Enum value for Side.Right does not agree with CblasRight");
+  }
+
 
 }
-

@@ -6,31 +6,34 @@ class MyClass {
 }
 
 class MyOtherClass {
-  var c:MyClass;
+  var c:borrowed MyClass;
 }
 
 
 // It's OK to return a ref to a class field
-proc getX(c:MyClass) ref {
+proc getX(c:borrowed MyClass) ref {
   return c.x;
 }
 
-proc getC(cc:MyOtherClass) ref {
+proc getC(cc:borrowed MyOtherClass) ref {
   return cc.c;
 }
 
 proc test() {
-  var c = new MyClass(1);
-  var cc = new MyOtherClass(c);
+  var c = new unmanaged MyClass(1);
+  var cc = new unmanaged MyOtherClass(c);
 
   ref rx = getX(c);
   ref rc = getC(cc);
 
   rx = 2;
-  rc = new MyClass(3);
+  var tc = new unmanaged MyClass(3);
+  rc = tc;
 
   writeln(c);
   writeln(cc);
+
+  delete tc, cc, c;
 }
 
 test();

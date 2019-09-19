@@ -1,7 +1,7 @@
 
 class C {
   var x: int;
-  proc C(arg: int) {
+  proc init(arg: int) {
     x = arg;
     writeln("C(", x, ")");
   }
@@ -12,7 +12,7 @@ class C {
 
 record R {
   var y: int;
-  proc R(arg: int) {
+  proc init(arg: int) {
     y = arg;
     writeln("R(", y, ")");
   }
@@ -21,10 +21,10 @@ record R {
   }
 }
 
-var d: C;
+var d: unmanaged C?;
 writeln("start");
 {
-var c = new C(44);
+var c = new unmanaged C(44);
 var r = new R(55);
 d = c;
 }

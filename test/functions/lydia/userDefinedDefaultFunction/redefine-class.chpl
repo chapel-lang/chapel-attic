@@ -2,15 +2,14 @@ class bar {
   var aField: int;
 }
 
-proc _defaultOf(type t):t where t:bar {
-  var res: t = noinit;
-  res = new bar(4);
-  return res;
-}
+var global = new unmanaged bar(4);
 
-var foo: bar;
+// it is not currently possible to change the default
+// value for a class type to be anything other than nil.
+
+var foo: unmanaged bar?;
 
 writeln(foo);
 
-delete foo;
+delete global;
 

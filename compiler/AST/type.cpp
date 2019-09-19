@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2018 Cray Inc.
+ * Copyright 2004-2019 Cray Inc.
  * Other additional copyright holders may be indicated within.
  *
  * The entirety of this work is licensed under the Apache License,
@@ -26,12 +26,12 @@
 #include "astutil.h"
 #include "AstVisitor.h"
 #include "build.h"
+#include "DecoratedClassType.h"
 #include "docsDriver.h"
 #include "driver.h"
 #include "expr.h"
 #include "files.h"
 #include "intlimits.h"
-#include "ipe.h"
 #include "iterator.h"
 #include "misc.h"
 #include "passes.h"
@@ -40,12 +40,13 @@
 #include "symbol.h"
 #include "vec.h"
 
+#include <cmath>
+
 static bool isDerivedType(Type* type, Flag flag);
 
 Type::Type(AstTag astTag, Symbol* iDefaultVal) : BaseAST(astTag) {
   symbol              = NULL;
   refType             = NULL;
-  hasGenericDefaults  = false;
   defaultValue        = iDefaultVal;
   destructor          = NULL;
   isInternalType      = false;
@@ -68,8 +69,8 @@ void Type::addSymbol(TypeSymbol* newSymbol) {
 }
 
 bool Type::inTree() {
-  if (symbol)
-    return symbol->inTree();
+  if (symbol && symbol->defPoint)
+    return symbol->defPoint->inTree();
   else
     return false;
 }
@@ -124,11 +125,91 @@ void Type::setDestructor(FnSymbol* fn) {
   destructor = fn;
 }
 
-const char* toString(Type* type) {
+const char* toString(Type* type, bool decorateAllClasses) {
   const char* retval = NULL;
 
   if (type != NULL) {
-    retval = type->getValType()->symbol->name;
+    Type* vt = type->getValType();
+
+    if (AggregateType* at = toAggregateType(vt)) {
+      const char* drDomName = "DefaultRectangularDom";
+      const int   drDomNameLen = strlen(drDomName);
+
+      if (isArrayClass(at) && !at->symbol->hasFlag(FLAG_BASE_ARRAY)) {
+        Symbol* domField = at->getField("dom", false);
+        Symbol* eltTypeField = at->getField("eltType", false);
+
+        if (domField && eltTypeField) {
+          Type* domainType = canonicalDecoratedClassType(domField->type);
+          Type* eltType    = eltTypeField->type;
+
+          if (domainType != dtUnknown && eltType != dtUnknown)
+            retval = astr("[", toString(domainType,false), "] ",
+                          toString(eltType));
+        }
+
+      } else if (strncmp(at->symbol->name, drDomName, drDomNameLen) == 0) {
+        retval = astr("domain", at->symbol->name + drDomNameLen);
+
+      } else if (isRecordWrappedType(at) == true) {
+        Symbol* instanceField = at->getField("_instance", false);
+
+        if (instanceField) {
+          Type* implType = canonicalDecoratedClassType(instanceField->type);
+
+          if (implType != dtUnknown)
+            retval = toString(implType, false);
+          else if (at->symbol->hasFlag(FLAG_ARRAY))
+            retval = astr("[]");
+        }
+      } else if (vt->symbol->hasFlag(FLAG_ITERATOR_RECORD)) {
+        if (developer == false)
+          retval = "iterator";
+      // TODO: add a case to handle sync, single, atomic
+      } else if (isManagedPtrType(vt)) {
+        Type* borrowType = getManagedPtrBorrowType(vt);
+        const char* borrowed = "borrowed ";
+        const char* borrowName = toString(borrowType, false);
+        if (startsWith(borrowName, borrowed)) {
+          borrowName = borrowName + strlen(borrowed);
+        }
+        if (startsWith(vt->symbol->name, "_owned")) {
+          if (borrowType == dtUnknown) {
+            retval = astr("owned");
+          } else {
+            retval = astr("owned ", borrowName);
+          }
+        }
+        else if (startsWith(vt->symbol->name, "_shared")) {
+          if (borrowType == dtUnknown) {
+            retval = astr("shared");
+          } else {
+            retval = astr("shared ", borrowName);
+          }
+        }
+
+      } else if (isClassLike(at)) {
+        if (isClass(at)) {
+          // It's an un-decorated class type
+          const char* borrowed = "borrowed ";
+          const char* useName = vt->symbol->name;
+          if (startsWith(useName, borrowed))
+            useName = useName + strlen(borrowed);
+
+          if (decorateAllClasses)
+            useName = astr("borrowed ", useName);
+
+          retval = useName;
+        }
+      }
+    }
+
+    if (retval == NULL)
+      retval = vt->symbol->name;
+    /* This can be helpful when debugging (and perhaps we should enable it
+       by default?): */
+//    if (developer)
+//      retval = vt->symbol->cname;
 
   } else {
     retval = "null type";
@@ -298,7 +379,7 @@ void PrimitiveType::accept(AstVisitor* visitor) {
 
 EnumType::EnumType() :
   Type(E_EnumType, NULL),
-  constants(), integerType(NULL), minConstant(), maxConstant(),
+  constants(), integerType(NULL),
   doc(NULL)
 {
   gEnumTypes.add(this);
@@ -334,8 +415,6 @@ EnumType::copyInner(SymbolMap* map) {
     newDef->sym->type = copy;
     copy->constants.insertAtTail(newDef);
   }
-  copy->minConstant = this->minConstant;
-  copy->maxConstant = this->maxConstant;;
   copy->addSymbol(symbol);
   return copy;
 }
@@ -346,329 +425,33 @@ void EnumType::replaceChild(BaseAST* old_ast, BaseAST* new_ast) {
 }
 
 
-void EnumType::sizeAndNormalize() {
-  bool first = true;
-  bool issigned = false;
-  int64_t v;
-  uint64_t uv;
-  int64_t min_v, max_v;
-  uint64_t min_uv, max_uv;
-  int num_bytes;
-  uint64_t max;
-  int64_t min;
-  PrimitiveType* ret = NULL;
-  Immediate* minImm = NULL;
-  Immediate* maxImm = NULL;
-
-  // First, look for negative numbers in the enum.
-  // If there are any, we have to store all
-  // the values in negative numbers.
+bool EnumType::isAbstract() {
   for_enums(constant, this) {
-    // If this passes testing, much of the following can
-    // be significantly simplified.
-    INT_ASSERT(constant->init);
-
-    if( constant->init ) {
-      if( get_int( constant->init, &v ) ) {
-        if( v < 0 ) {
-          issigned = true;
-        }
-      } else if( get_uint( constant->init, &uv ) ) {
-        // OK!
-      } else {
-        // If we get here, then the initializer does not have an immediate
-        // value associated with it....
-        SymExpr* sym = toSymExpr(constant->init);
-
-        // We think that all params should have init values by now.
-        INT_ASSERT(sym && !sym->symbol()->hasFlag(FLAG_PARAM));
-
-        // So we're going to blame this on the user.
-        USR_FATAL(constant,
-                  "enumerator '%s' is not an integer param value",
-                  constant->sym->name);
-        // And unfortunately, if we get here, we don't know how to proceed,
-        // which is why no USR_FATAL_CONT().
-      }
+    if (constant->init) {
+      return false;
     }
   }
-
-  // Set initializers for all enum symbols and
-  // compute the minimum and maximum values.
-  v = 1;
-  uv = 1;
-  min_v = max_v = 1;
-  min_uv = max_uv = 1;
-
-  first = true;
-  for_enums(constant, this) {
-    SET_LINENO(constant);
-    if( constant->init ) {
-      // set v and uv to the initializer value
-      // if the number doesn't fit in one of them, set it
-      // to 1. That avoids overflow when we increment these below,
-      // and won't confuse max/min calculations since any size
-      // integer needs to be able to represent 1.
-      if( get_int( constant->init, &v ) ) {
-        if( v >= 0 ) uv = v;
-        else uv = 1;
-      } else if( get_uint( constant->init, &uv ) ) {
-        if (uv <= (uint64_t)INT64_MAX) v = uv;
-        else v = 1;
-      }
-    } else {
-      // create initializer with v
-      if( issigned ) {
-        if( v >= INT32_MIN && v <= INT32_MAX ) {
-          constant->init = new SymExpr(new_IntSymbol(v, INT_SIZE_32));
-        } else {
-          constant->init = new SymExpr(new_IntSymbol(v, INT_SIZE_64));
-        }
-      } else {
-        if( uv <= UINT32_MAX ) {
-          constant->init = new SymExpr(new_UIntSymbol(uv, INT_SIZE_32));
-        } else {
-          constant->init = new SymExpr(new_UIntSymbol(uv, INT_SIZE_64));
-        }
-      }
-      parent_insert_help(constant, constant->init);
-    }
-    if( first ) {
-      min_v = v;
-      max_v = v;
-      min_uv = uv;
-      max_uv = uv;
-      first = false;
-    } else {
-      if( min_v > v ) min_v = v;
-      if( max_v < v ) max_v = v;
-      if( min_uv > uv ) min_uv = uv;
-      if( max_uv < uv ) max_uv = uv;
-
-    }
-    // Increment v for the next one, in case it is not set.
-    v++;
-    uv++;
-  }
-
-  // User error if the enum contains both negative values and
-  // something needing a uint64.
-  if (min_v < 0 && max_uv > (uint64_t)INT64_MAX)
-    USR_FATAL(this,
-              "this enum cannot be represented with a single integer type");
-
-  num_bytes = 0;
-
-  // Now figure out, based on min/max values, what integer
-  // size we must use.
-  if( issigned ) {
-    int num_bytes_neg = 0;
-    if( min_v >= INT8_MIN ) {
-      num_bytes_neg = 1;
-    } else if( min_v >= INT16_MIN ) {
-      num_bytes_neg = 2;
-    } else if( min_v >= INT32_MIN ) {
-      num_bytes_neg = 4;
-    } else {
-      num_bytes_neg = 8;
-    }
-
-    if( max_v <= INT8_MAX ) {
-      num_bytes = 1;
-    } else if( max_v <= INT16_MAX ) {
-      num_bytes = 2;
-    } else if( max_v <= INT32_MAX ) {
-      num_bytes = 4;
-    } else {
-      num_bytes = 8;
-    }
-
-    if( num_bytes < num_bytes_neg ) num_bytes = num_bytes_neg;
-  } else {
-    if( max_uv <= UINT8_MAX ) {
-      num_bytes = 1;
-    } else if( max_uv <= UINT16_MAX ) {
-      num_bytes = 2;
-    } else if( max_uv <= UINT32_MAX ) {
-      num_bytes = 4;
-    } else {
-      num_bytes = 8;
-    }
-  }
-
-  // Now figure out field min and max values.
-  // and set et->integerType
-  min = max = 0;
-
-  IF1_int_type int_size = INT_SIZE_DEFAULT;
-
-  if( num_bytes == 1 ) {
-    int_size = INT_SIZE_8;
-    if( issigned ) {
-      max = INT8_MAX;
-      min = INT8_MIN;
-    } else {
-      max = UINT8_MAX;
-    }
-  } else if( num_bytes == 2 ) {
-    int_size = INT_SIZE_16;
-    if( issigned ) {
-      max = INT16_MAX;
-      min = INT16_MIN;
-    } else {
-      max = UINT16_MAX;
-    }
-  } else if( num_bytes == 4 ) {
-    int_size = INT_SIZE_32;
-    if( issigned ) {
-      max = INT32_MAX;
-      min = INT32_MIN;
-    } else {
-      max = UINT32_MAX;
-    }
-  } else if( num_bytes == 8 ) {
-    int_size = INT_SIZE_64;
-    if( issigned ) {
-      max = INT64_MAX;
-      min = INT64_MIN;
-    } else {
-      max = UINT64_MAX;
-    }
-  }
-
-  if (issigned)
-    ret = dtInt[int_size];
-  else
-    ret = dtUInt[int_size];
-
-  // At the end of it all, check that each enum
-  // symbol fits into the assigned type.
-  // This check is necessary because we might have
-  // had the impossible-to-fit enum
-  // because it has e.g. UINT64_MAX and INT64_MIN.
-  for_enums(constant, this) {
-    if( get_int( constant->init, &v ) ) {
-      if( v < min || (v > 0 && (uint64_t)v > max) ) {
-        INT_FATAL(constant, "Does not fit in enum integer type");
-      }
-    } else if( get_uint( constant->init, &uv ) ) {
-      if( uv > max ) {
-        INT_FATAL(constant, "Does not fit in enum integer type");
-      }
-    }
-  }
-
-  // Replace the immediates with one of the appropriate numeric type.
-  // This is a way of normalizing the enum constants and simplifying
-  // what follow-on passes need to deal with.
-  for_enums(constant, this) {
-    SET_LINENO(constant);
-    INT_ASSERT(constant->init);
-
-    if (ret == constant->init->typeInfo()) {
-      // Nothing to do, constant already has appropriate type
-    } else {
-      bool have_v = true;
-      bool have_uv = true;
-      v = 0;
-      uv = 0;
-      // set v and uv to the initializer value
-      if( get_int( constant->init, &v ) ) {
-        if( v >= 0 ) uv = v;
-        else have_uv = false;
-      } else if( get_uint( constant->init, &uv ) ) {
-        if (uv <= (uint64_t)INT64_MAX) v = uv;
-        else have_v = false;
-      }
-
-      if( issigned ) {
-        INT_ASSERT(have_v);
-        constant->init->replace(new SymExpr(new_IntSymbol(v, int_size)));
-      } else {
-        INT_ASSERT(have_uv);
-        constant->init->replace(new SymExpr(new_UIntSymbol(uv, int_size)));
-      }
-    }
-  }
-
-  first = true;
-
-  min_v = max_v = 0;
-  min_uv = max_uv = 0;
-
-  // Set minConstant and maxConstant
-  for_enums(constant, this) {
-    SET_LINENO(constant);
-    INT_ASSERT(constant->init);
-
-    bool got = false;
-
-    v = 0;
-    uv = 0;
-    if (issigned)
-      got = get_int(constant->init, &v);
-    else
-      got = get_uint(constant->init, &uv);
-
-    INT_ASSERT(got);
-
-    Immediate* imm = getSymbolImmediate(constant->sym);
-
-    if (first) {
-      if (issigned) {
-        min_v = v;
-        max_v = v;
-      } else {
-        min_uv = uv;
-        max_uv = uv;
-      }
-      minImm = imm;
-      maxImm = imm;
-      first = false;
-    } else {
-      if (issigned) {
-        if (v < min_v) {
-          min_v = v;
-          minImm = imm;
-        }
-        if (v > max_v) {
-          max_v = v;
-          maxImm = imm;
-        }
-      } else {
-        if (uv < min_uv) {
-          min_uv = uv;
-          minImm = imm;
-        }
-        if (uv > max_uv) {
-          max_uv = uv;
-          maxImm = imm;
-        }
-      }
-    }
-  }
-
-  INT_ASSERT(minImm && maxImm);
-  this->minConstant = *minImm;
-  this->maxConstant = *maxImm;
-
-
-  integerType = ret;
+  return true;
 }
+
+bool EnumType::isConcrete() {
+  // if the first constant has an initializer, it's concrete;
+  // otherwise, it's not.  This loop with a guaranteed return is a
+  // lazy way of getting that first constant.
+  for_enums(constant, this) {
+    if (constant->init) {
+      return true;
+    } else {
+      return false;
+    }
+  }
+  return true;
+}
+
 
 PrimitiveType* EnumType::getIntegerType() {
   INT_ASSERT(integerType);
-  if( ! integerType ) {
-    sizeAndNormalize();
-  }
   return integerType;
-}
-
-Immediate* EnumType::getMinConstant() {
-  return &minConstant;
-}
-Immediate* EnumType::getMaxConstant() {
-  return &maxConstant;
 }
 
 
@@ -785,7 +568,8 @@ static VarSymbol*     createSymbol(PrimitiveType* primType, const char* name);
 // This should probably be renamed since it creates primitive types, as
 //  well as internal types and other types used in the generated code
 void initPrimitiveTypes() {
-  dtVoid                               = createInternalType ("void",     "void");
+  dtVoid                               = createInternalType("void", "void");
+  dtNothing                            = createInternalType ("nothing",  "nothing");
 
   dtBools[BOOL_SIZE_SYS]               = createPrimitiveType("bool",     "chpl_bool");
   dtInt[INT_SIZE_64]                   = createPrimitiveType("int",      "int64_t");
@@ -793,47 +577,45 @@ void initPrimitiveTypes() {
 
   dtStringC                            = createPrimitiveType("c_string", "c_string" );
 
+  dtBytes                              = new AggregateType(AGGREGATE_RECORD);
+  dtBytes->symbol                      = new TypeSymbol("bytes", dtBytes);
+
   dtString                             = new AggregateType(AGGREGATE_RECORD);
+  dtString->symbol                     = new TypeSymbol("string", dtString);
+  dtStringC->symbol->addFlag(FLAG_NO_CODEGEN);
+
+  dtLocale                             = new AggregateType(AGGREGATE_RECORD);
+  dtLocale->symbol                     = new TypeSymbol("locale", dtLocale);
 
   gFalse                               = createSymbol(dtBools[BOOL_SIZE_SYS], "false");
   gTrue                                = createSymbol(dtBools[BOOL_SIZE_SYS], "true");
 
+  gFalse->addFlag(FLAG_PARAM);
   gFalse->immediate                    = new Immediate;
   gFalse->immediate->v_bool            = false;
   gFalse->immediate->const_kind        = NUM_KIND_BOOL;
-  gFalse->immediate->num_index         = BOOL_SIZE_SYS;
+  gFalse->immediate->num_index         = BOOL_SIZE_DEFAULT;
 
+  gTrue->addFlag(FLAG_PARAM);
   gTrue->immediate                     = new Immediate;
   gTrue->immediate->v_bool             = true;
   gTrue->immediate->const_kind         = NUM_KIND_BOOL;
-  gTrue->immediate->num_index          = BOOL_SIZE_SYS;
-
-  //
-  // Mark the "high water mark" for types that IPE relies on directly
-  //
-  if (fUseIPE == true) {
-    ipeRootInit();
-  }
+  gTrue->immediate->num_index          = BOOL_SIZE_DEFAULT;
 
   dtBools[BOOL_SIZE_SYS]->defaultValue = gFalse;
   dtInt[INT_SIZE_64]->defaultValue     = new_IntSymbol(0, INT_SIZE_64);
   dtReal[FLOAT_SIZE_64]->defaultValue  = new_RealSymbol("0.0", FLOAT_SIZE_64);
-  dtStringC->defaultValue              = new_CStringSymbol("");
 
   dtBool                               = dtBools[BOOL_SIZE_SYS];
 
   uniqueConstantsHash.put(gFalse->immediate, gFalse);
   uniqueConstantsHash.put(gTrue->immediate,  gTrue);
 
-  dtStringC->symbol->addFlag(FLAG_NO_CODEGEN);
-
-  gTryToken = new VarSymbol("chpl__tryToken", dtBool);
-
-  gTryToken->addFlag(FLAG_CONST);
-  rootModule->block->insertAtTail(new DefExpr(gTryToken));
-
   dtNil = createInternalType ("_nilType", "_nilType");
   CREATE_DEFAULT_SYMBOL (dtNil, gNil, "nil");
+
+  // dtStringC defaults to nil
+  dtStringC->defaultValue = gNil;
 
   // This type should not be visible past normalize.
   CREATE_DEFAULT_SYMBOL (dtVoid, gNoInit, "_gnoinit");
@@ -843,10 +625,17 @@ void initPrimitiveTypes() {
   gUnknown->addFlag(FLAG_TYPE_VARIABLE);
 
   CREATE_DEFAULT_SYMBOL (dtVoid, gVoid, "_void");
+  CREATE_DEFAULT_SYMBOL (dtNothing, gNone, "none");
 
-  dtValue = createInternalType("value", "_chpl_value");
+  // parses from record
+  dtAnyRecord = createInternalType("record", "_anyRecord");
+  dtAnyRecord->symbol->addFlag(FLAG_GENERIC);
 
-  INIT_PRIM_BOOL("bool(1)", 1);
+  gIteratorBreakToken = new VarSymbol("_iteratorBreakToken", dtBool);
+  gIteratorBreakToken->addFlag(FLAG_CONST);
+  gIteratorBreakToken->addFlag(FLAG_NO_CODEGEN);
+  rootModule->block->insertAtTail(new DefExpr(gIteratorBreakToken));
+
   INIT_PRIM_BOOL("bool(8)", 8);
   INIT_PRIM_BOOL("bool(16)", 16);
   INIT_PRIM_BOOL("bool(32)", 32);
@@ -869,25 +658,35 @@ void initPrimitiveTypes() {
   INIT_PRIM_COMPLEX( "complex(64)", 64);
   INIT_PRIM_COMPLEX( "complex", 128);       // default size
 
+  // Set up INFINITY and NAN params
+  gInfinity = createSymbol(dtReal[FLOAT_SIZE_DEFAULT], "chpl_INFINITY");
+  gInfinity->addFlag(FLAG_PARAM);
+  gInfinity->immediate = new Immediate;
+  gInfinity->immediate->v_float64 = INFINITY;
+  gInfinity->immediate->const_kind = NUM_KIND_REAL;
+  gInfinity->immediate->num_index = FLOAT_SIZE_DEFAULT;
+
+  gNan = createSymbol(dtReal[FLOAT_SIZE_DEFAULT], "chpl_NAN");
+  gNan->addFlag(FLAG_PARAM);
+  gNan->immediate = new Immediate;
+  gNan->immediate->v_float64 = NAN;
+  gNan->immediate->const_kind = NUM_KIND_REAL;
+  gNan->immediate->num_index = FLOAT_SIZE_DEFAULT;
+
+
+
   // Could be == c_ptr(int(8)) e.g.
   // used in some runtime interfaces
   dtCVoidPtr   = createPrimitiveType("c_void_ptr", "c_void_ptr" );
   dtCVoidPtr->symbol->addFlag(FLAG_NO_CODEGEN);
-  dtCVoidPtr->defaultValue = gOpaque;
+  dtCVoidPtr->defaultValue = gNil;
+
   dtCFnPtr = createPrimitiveType("c_fn_ptr", "c_fn_ptr");
   dtCFnPtr->symbol->addFlag(FLAG_NO_CODEGEN);
-  dtCFnPtr->defaultValue = gOpaque;
-  CREATE_DEFAULT_SYMBOL(dtCVoidPtr, gCVoidPtr, "_nullVoidPtr");
-  gCVoidPtr->cname = "NULL";
-  gCVoidPtr->addFlag(FLAG_EXTERN);
-
-  dtSymbol = createPrimitiveType( "symbol", "_symbol");
+  dtCFnPtr->defaultValue = gNil;
 
   dtFile = createPrimitiveType ("_file", "_cfile");
   dtFile->symbol->addFlag(FLAG_EXTERN);
-
-  CREATE_DEFAULT_SYMBOL(dtFile, gFile, "NULL");
-  gFile->addFlag(FLAG_EXTERN);
 
   dtOpaque = createPrimitiveType("opaque", "chpl_opaque");
 
@@ -913,11 +712,26 @@ void initPrimitiveTypes() {
   dtAny = createInternalType ("_any", "_any");
   dtAny->symbol->addFlag(FLAG_GENERIC);
 
-  dtIntegral = createInternalType ("integral", "integral");
-  dtIntegral->symbol->addFlag(FLAG_GENERIC);
+  dtAnyBool = createInternalType("chpl_anybool", "bool");
+  dtAnyBool->symbol->addFlag(FLAG_GENERIC);
 
   dtAnyComplex = createInternalType("chpl_anycomplex", "complex");
   dtAnyComplex->symbol->addFlag(FLAG_GENERIC);
+
+  // parses from enum
+  // TODO: remove enumerated and replace it with enum
+  dtAnyEnumerated = createInternalType ("enumerated", "enumerated");
+  dtAnyEnumerated->symbol->addFlag(FLAG_GENERIC);
+
+  dtAnyImag = createInternalType("chpl_anyimag", "imag");
+  dtAnyImag->symbol->addFlag(FLAG_GENERIC);
+
+  dtAnyReal = createInternalType("chpl_anyreal", "real");
+  dtAnyReal->symbol->addFlag(FLAG_GENERIC);
+
+  // could also be called dtAnyIntegral
+  dtIntegral = createInternalType ("integral", "integral");
+  dtIntegral->symbol->addFlag(FLAG_GENERIC);
 
   dtNumeric = createInternalType ("numeric", "numeric");
   dtNumeric->symbol->addFlag(FLAG_GENERIC);
@@ -928,9 +742,40 @@ void initPrimitiveTypes() {
   dtIteratorClass = createInternalType("_iteratorClass", "_iteratorClass");
   dtIteratorClass->symbol->addFlag(FLAG_GENERIC);
 
+  dtBorrowed = createInternalType("borrowed", "borrowed");
+  dtBorrowed->symbol->addFlag(FLAG_GENERIC);
+
+  dtBorrowedNonNilable = createInternalType("_borrowedNonNilable", "_borrowedNonNilable");
+  dtBorrowedNonNilable->symbol->addFlag(FLAG_GENERIC);
+
+  dtBorrowedNilable = createInternalType("_borrowedNilable", "_borrowedNilable");
+  dtBorrowedNilable->symbol->addFlag(FLAG_GENERIC);
+
+  dtUnmanaged = createInternalType("unmanaged", "unmanaged");
+  dtUnmanaged->symbol->addFlag(FLAG_GENERIC);
+
+  dtUnmanagedNonNilable = createInternalType("_unmanagedNonNilable", "_unmanagedNonNilable");
+  dtUnmanagedNonNilable->symbol->addFlag(FLAG_GENERIC);
+
+  dtUnmanagedNilable = createInternalType("_unmanagedNilable", "_unmanagedNilable");
+  dtUnmanagedNilable->symbol->addFlag(FLAG_GENERIC);
+
+  dtAnyManagementAnyNilable = createInternalType("_anyManagementAnyNilable", "_anyManagementAnyNilable");
+  dtAnyManagementAnyNilable->symbol->addFlag(FLAG_GENERIC);
+
+  // parses from class
+  dtAnyManagementNonNilable = createInternalType("class", "_anyManagementNonNilable");
+  dtAnyManagementNonNilable->symbol->addFlag(FLAG_GENERIC);
+
+  dtAnyManagementNilable = createInternalType("_anyManagementNilable", "_anyManagementNilable");
+  dtAnyManagementNilable->symbol->addFlag(FLAG_GENERIC);
+
+
   dtMethodToken = createInternalType ("_MT", "_MT");
+  dtDummyRef = createInternalType ("_DummyRef", "_DummyRef");
 
   CREATE_DEFAULT_SYMBOL(dtMethodToken, gMethodToken, "_mt");
+  CREATE_DEFAULT_SYMBOL(dtDummyRef, gDummyRef, "_dummyRef");
 
   dtTypeDefaultToken = createInternalType("_TypeDefaultT", "_TypeDefaultT");
 
@@ -940,8 +785,10 @@ void initPrimitiveTypes() {
 
   CREATE_DEFAULT_SYMBOL(dtModuleToken, gModuleToken, "module=");
 
-  dtAnyEnumerated = createInternalType ("enumerated", "enumerated");
-  dtAnyEnumerated->symbol->addFlag(FLAG_GENERIC);
+  dtUninstantiated = createInternalType("_uninstantiated", "_uninstantiated");
+
+  CREATE_DEFAULT_SYMBOL(dtUninstantiated, gUninstantiated, "?");
+  gUninstantiated->addFlag(FLAG_PARAM);
 }
 
 static PrimitiveType* createPrimitiveType(const char* name, const char* cname) {
@@ -1022,6 +869,18 @@ void initCompilerGlobals() {
   gCastChecking->addFlag(FLAG_PARAM);
   setupBoolGlobal(gCastChecking, !fNoCastChecks);
 
+  gNilChecking = new VarSymbol("chpl_checkNilDereferences", dtBool);
+  gNilChecking->addFlag(FLAG_PARAM);
+  setupBoolGlobal(gNilChecking, !fNoNilChecks);
+
+  gLegacyClasses = new VarSymbol("chpl_legacyClasses", dtBool);
+  gLegacyClasses->addFlag(FLAG_PARAM);
+  setupBoolGlobal(gLegacyClasses, fLegacyClasses);
+
+  gOverloadSetsChecks = new VarSymbol("chpl_overloadSetsChecks", dtBool);
+  gOverloadSetsChecks->addFlag(FLAG_PARAM);
+  setupBoolGlobal(gOverloadSetsChecks, fOverloadSetsChecks);
+
   gDivZeroChecking = new VarSymbol("chpl_checkDivByZero", dtBool);
   gDivZeroChecking->addFlag(FLAG_PARAM);
   setupBoolGlobal(gDivZeroChecking, !fNoDivZeroChecks);
@@ -1034,6 +893,10 @@ void initCompilerGlobals() {
   gLocal->addFlag(FLAG_PARAM);
   setupBoolGlobal(gLocal, fLocal);
 
+  gWarnUnstable = new VarSymbol("chpl_warnUnstable", dtBool);
+  gWarnUnstable->addFlag(FLAG_PARAM);
+  setupBoolGlobal(gWarnUnstable, fWarnUnstable);
+
   // defined and maintained by the runtime
   gNodeID = new VarSymbol("chpl_nodeID", dtInt[INT_SIZE_32]);
   gNodeID->addFlag(FLAG_EXTERN);
@@ -1042,13 +905,12 @@ void initCompilerGlobals() {
   initForTaskIntents();
 }
 
-bool is_void_type(Type* t) {
-  return t == dtVoid;
+bool is_nothing_type(Type* t) {
+  return t == dtNothing;
 }
 
 bool is_bool_type(Type* t) {
   return
-    t == dtBools[BOOL_SIZE_1] ||
     t == dtBools[BOOL_SIZE_SYS] ||
     t == dtBools[BOOL_SIZE_8] ||
     t == dtBools[BOOL_SIZE_16] ||
@@ -1118,19 +980,15 @@ bool isLegalParamType(Type* t) {
           is_uint_type(t) ||
           is_real_type(t) ||
           is_imag_type(t) ||
+          is_complex_type(t) ||
           is_enum_type(t) ||
           isString(t) ||
+          isBytes(t) ||
           t == dtStringC ||
           t == dtUnknown);
 }
 
 int get_width(Type *t) {
-  if (t == dtBools[BOOL_SIZE_1] ||
-      t == dtBools[BOOL_SIZE_SYS]) {
-    return 1;
-    // BLC: This is a lie, but one I'm hoping we can get away with
-    // based on how this function is used
-  }
   if (t == dtBools[BOOL_SIZE_8] ||
       t == dtInt[INT_SIZE_8] ||
       t == dtUInt[INT_SIZE_8])
@@ -1203,10 +1061,69 @@ bool isClassOrNil(Type* t) {
   return isClass(t);
 }
 
+bool isBuiltinGenericClassType(Type* t) {
+  return t == dtBorrowed ||
+         t == dtBorrowedNonNilable ||
+         t == dtBorrowedNilable ||
+         t == dtUnmanaged ||
+         t == dtUnmanagedNilable ||
+         t == dtUnmanagedNonNilable ||
+         t == dtAnyManagementAnyNilable ||
+         t == dtAnyManagementNonNilable ||
+         t == dtAnyManagementNilable;
+}
+
+bool isClassLike(Type* t) {
+  return isDecoratedClassType(t) ||
+         isBuiltinGenericClassType(t) ||
+         (isClass(t) && !(t->symbol->hasFlag(FLAG_C_PTR_CLASS) ||
+                          t->symbol->hasFlag(FLAG_DATA_CLASS) ||
+                          t->symbol->hasFlag(FLAG_REF)));
+}
+
+bool isClassLikeOrManaged(Type* t) {
+  return isClassLike(t) || isManagedPtrType(t);
+}
+
+bool isClassLikeOrPtr(Type* t) {
+  return isClassLike(t) || (t->symbol->hasFlag(FLAG_C_PTR_CLASS) ||
+                            t->symbol->hasFlag(FLAG_DATA_CLASS) ||
+                            t == dtCVoidPtr ||
+                            t == dtCFnPtr);
+}
+
+bool isClassLikeOrNil(Type* t) {
+  if (t == dtNil) return true;
+  return isClassLike(t);
+}
+
 bool isRecord(Type* t) {
   if (AggregateType* ct = toAggregateType(t))
     return ct->isRecord();
   return false;
+}
+
+bool isUserRecord(Type* t) {
+  if (!isRecord(t))
+    return false;
+
+  // Check for lots of exceptions - types that are implemented
+  // as records but that isn't the user view.
+  if (t == dtString ||
+      t == dtBytes ||
+      t->symbol->hasFlag(FLAG_SYNTACTIC_DISTRIBUTION) ||
+      t->symbol->hasFlag(FLAG_DISTRIBUTION) ||
+      t->symbol->hasFlag(FLAG_DOMAIN) ||
+      t->symbol->hasFlag(FLAG_ARRAY) ||
+      t->symbol->hasFlag(FLAG_RANGE) ||
+      t->symbol->hasFlag(FLAG_TUPLE) ||
+      t->symbol->hasFlag(FLAG_SYNC) ||
+      t->symbol->hasFlag(FLAG_SINGLE) ||
+      t->symbol->hasFlag(FLAG_ATOMIC_TYPE) ||
+      t->symbol->hasFlag(FLAG_MANAGED_POINTER))
+    return false;
+
+  return true;
 }
 
 bool isUnion(Type* t) {
@@ -1274,7 +1191,48 @@ static bool isDerivedType(Type* type, Flag flag)
 }
 
 bool isManagedPtrType(const Type* t) {
-  return t->symbol->hasFlag(FLAG_MANAGED_POINTER);
+  if (const DecoratedClassType* dt = toConstDecoratedClassType(t))
+    t = dt->getCanonicalClass();
+
+  return t && t->symbol->hasFlag(FLAG_MANAGED_POINTER);
+}
+
+Type* getManagedPtrBorrowType(const Type* managedPtrType) {
+  INT_ASSERT(isManagedPtrType(managedPtrType));
+
+  if (const DecoratedClassType* dt = toConstDecoratedClassType(managedPtrType))
+    managedPtrType = dt->getCanonicalClass();
+
+  const AggregateType* at = toConstAggregateType(managedPtrType);
+
+  INT_ASSERT(at);
+
+  Type* borrowType = at->getField("chpl_t")->type;
+
+  ClassTypeDecorator decorator = CLASS_TYPE_BORROWED_NONNIL;
+
+  if (isNilableClassType(borrowType))
+    decorator = CLASS_TYPE_BORROWED_NILABLE;
+
+  borrowType = canonicalDecoratedClassType(borrowType);
+
+  if (AggregateType* at = toAggregateType(borrowType))
+    if (isClass(at))
+      borrowType = at->getDecoratedClass(decorator);
+
+  return borrowType;
+}
+
+AggregateType* getManagedPtrManagerType(Type* managedPtrType) {
+  INT_ASSERT(isManagedPtrType(managedPtrType));
+
+  if (DecoratedClassType* dt = toDecoratedClassType(managedPtrType))
+    managedPtrType = dt->getCanonicalClass();
+
+  AggregateType* at = toAggregateType(managedPtrType);
+  at = at->getRootInstantiation();
+
+  return at;
 }
 
 bool isSyncType(const Type* t) {
@@ -1377,13 +1335,11 @@ bool isArrayClass(Type* type) {
 }
 
 bool isString(Type* type) {
-  bool retval = false;
+  return type == dtString;
+}
 
-  if (AggregateType* aggr = toAggregateType(type)) {
-    retval = strcmp(aggr->symbol->name, "string") == 0;
-  }
-
-  return retval;
+bool isBytes(Type* type) {
+  return type == dtBytes;
 }
 
 //
@@ -1463,7 +1419,7 @@ bool needsCapture(Type* t) {
       is_complex_type(t) ||
       is_enum_type(t) ||
       t == dtStringC ||
-      isClass(t) ||
+      isClassLikeOrPtr(t) ||
       isRecord(t) ||
       isUnion(t) ||
       t == dtTaskID || // false?
@@ -1588,7 +1544,7 @@ bool isNonGenericClassWithInitializers(Type* type) {
 
   if (isNonGenericClass(type) == true) {
     if (AggregateType* at = toAggregateType(type)) {
-      if (at->initializerStyle == DEFINES_INITIALIZER) {
+      if (at->hasUserDefinedInit == true) {
         retval = true;
       } else if (at->wantsDefaultInitializer()) {
         retval = true;
@@ -1618,7 +1574,7 @@ bool isGenericClassWithInitializers(Type* type) {
 
   if (isGenericClass(type) == true) {
     if (AggregateType* at = toAggregateType(type)) {
-      if (at->initializerStyle == DEFINES_INITIALIZER) {
+      if (at->hasUserDefinedInit == true) {
         retval = true;
       } else if (at->wantsDefaultInitializer()) {
         retval = true;
@@ -1635,7 +1591,7 @@ bool isClassWithInitializers(Type* type) {
   if (AggregateType* at = toAggregateType(type)) {
     if (at->isClass()                    == true  &&
         at->symbol->hasFlag(FLAG_EXTERN) == false &&
-        (at->initializerStyle == DEFINES_INITIALIZER ||
+        (at->hasUserDefinedInit == true ||
          at->wantsDefaultInitializer())) {
       retval = true;
     }
@@ -1663,7 +1619,7 @@ bool isNonGenericRecordWithInitializers(Type* type) {
 
   if (isNonGenericRecord(type) == true) {
     if (AggregateType* at = toAggregateType(type)) {
-      if (at->initializerStyle == DEFINES_INITIALIZER) {
+      if (at->hasUserDefinedInit == true) {
         retval = true;
       } else if (at->wantsDefaultInitializer()) {
         retval = true;
@@ -1693,7 +1649,7 @@ bool isGenericRecordWithInitializers(Type* type) {
 
   if (isGenericRecord(type) == true) {
     if (AggregateType* at = toAggregateType(type)) {
-      if (at->initializerStyle == DEFINES_INITIALIZER) {
+      if (at->hasUserDefinedInit == true) {
         retval = true;
       } else if (at->wantsDefaultInitializer()) {
         retval = true;
@@ -1709,8 +1665,7 @@ bool isRecordWithInitializers(Type* type) {
 
   if (AggregateType* at = toAggregateType(type)) {
     if (at->isRecord()                   == true  &&
-        at->symbol->hasFlag(FLAG_EXTERN) == false &&
-        (at->initializerStyle == DEFINES_INITIALIZER ||
+        (at->hasUserDefinedInit == true ||
          at->wantsDefaultInitializer())) {
       retval = true;
     }
@@ -1740,4 +1695,33 @@ bool needsGenericRecordInitializer(Type* type) {
   }
 
   return retval;
+}
+
+Immediate getDefaultImmediate(Type* t) {
+  VarSymbol* defaultVar = toVarSymbol(t->defaultValue);
+  // (or anything handled by coerce_immediate)
+  if (defaultVar == NULL || defaultVar->immediate == NULL)
+    INT_FATAL(t->symbol, "does not have a default value");
+
+  // Numeric types should have a default of the right type
+  if (defaultVar->type != t)
+    INT_FATAL(t->symbol, "does not have a default of the same type");
+
+  Immediate ret = *defaultVar->immediate;
+  return ret;
+}
+
+// Returns 'true' for types that are the type of numeric literals.
+// e.g. 1 is an 'int', so this function returns 'true' for 'int'.
+// e.g. 0.0 is a 'real', so this function returns 'true' for 'real'.
+bool isNumericParamDefaultType(Type* t)
+{
+  if (t == dtInt[INT_SIZE_DEFAULT] ||
+      t == dtReal[FLOAT_SIZE_DEFAULT] ||
+      t == dtImag[FLOAT_SIZE_DEFAULT] ||
+      t == dtComplex[COMPLEX_SIZE_DEFAULT] ||
+      t == dtBools[BOOL_SIZE_DEFAULT])
+    return true;
+
+  return false;
 }

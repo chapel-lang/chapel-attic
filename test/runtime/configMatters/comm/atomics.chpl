@@ -2,9 +2,8 @@ config param enable_type_i32 = true;
 config param enable_type_i64 = true;
 config param enable_type_ui32 = true;
 config param enable_type_ui64 = true;
-config param enable_type_r32 = (CHPL_COMM == 'ugni'
-                                && false /* no support in module code */ );
-config param enable_type_r64 = (CHPL_COMM == 'ugni');
+config param enable_type_r32 = true;
+config param enable_type_r64 = true;
 
 config const default_do_type_flag = true;
 
@@ -304,7 +303,7 @@ proc test_cmpxchg(ref x: ?t, in cmp, in val, in what) {
   var x0: t;
   for i in x.domain do x0[i].write(x[i].read());
   if verbose then writeln('test atomic CmpXchg for ', what);
-  var did = x[1].compareExchange(cmp, val);
+  var did = x[1].compareAndSwap(cmp, val);
   var pass = (   check(x, x0,
                        if cmp == x0[1].read() then val else x0[1].read())
               && if cmp == x0[1].read() then did else !did);

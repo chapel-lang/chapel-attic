@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2018 Cray Inc.
+ * Copyright 2004-2019 Cray Inc.
  * Other additional copyright holders may be indicated within.
  *
  * The entirety of this work is licensed under the Apache License,
@@ -27,42 +27,58 @@ use MasonEnv;
 
 
 
-proc masonNew(args) {
-  if args.size < 3 {
-      writeln('error: Invalid arguments.');
+proc masonNew(args) throws {
+  try! {
+    if args.size < 3 {
       masonNewHelp();
       exit();
-    }
-  else if isDir(args[2]) {
-    writeln('A directory with that name already exists');
-  }
-  else {
-    var vcs = true;
-    var show = false;
-    var name = 'MyPackage';
-    for arg in args[2..] {
-      if arg == '-h' || arg == '--help' {
-        masonNewHelp();
-        exit();
+    } else {
+      var vcs = true;
+      var show = false;
+      var name = '';
+      for arg in args[2..] {
+        if arg == '-h' || arg == '--help' {
+          masonNewHelp();
+          exit();
+        }
+        else if arg == '--no-vcs' {
+          vcs = false;
+        }
+        else if arg == '--show' {
+          show = true;
+        }
+        else {
+          name = arg;
+        }
       }
-      else if arg == '--no-vcs' {
-        vcs = false;
+      
+      if name == '' {
+        throw new owned MasonError("No package name specified");
       }
-      else if arg == '--show' {
-        show = true;
+      else if !isIdentifier(name) {
+        throw new owned MasonError("Bad package name '" + name +
+                             "' - only Chapel identifiers are legal package names");
+      }
+      else if name.count("$") > 0 {
+        throw new owned MasonError("Bad package name '" + name +
+                             "' - $ is not allowed in package names");
+      }
+      else if isDir(name) {
+          throw new owned MasonError("A directory named '" + name + "' already exists");
       }
       else {
-        name = arg;
+        InitProject(name, vcs, show);
       }
     }
-    InitProject(name, vcs, show);
+  }
+  catch e: MasonError {
+    writeln(e.message());
+    exit(1);
   }
 }
 
 
-
-
-proc InitProject(name, vcs, show) {
+proc InitProject(name, vcs, show) throws {
   if vcs {
     gitInit(name, show);
     addGitIgnore(name);
@@ -77,19 +93,19 @@ proc InitProject(name, vcs, show) {
     writeln("Created new library project: " + name);
   }
   else {
-    writeln("Failed to create project");
+    throw new owned MasonError("Failed to create project");
   }
 }
 
 
-proc gitInit(name: string, show: bool) {
+private proc gitInit(name: string, show: bool) {
   var initialize = "git init -q " + name;
   if show then initialize = "git init " + name;
   runCommand(initialize);
 }
 
-proc addGitIgnore(name: string) {
-  var toIgnore = "\ntarget/\nMason.lock";
+private proc addGitIgnore(name: string) {
+  var toIgnore = "target/\nMason.lock\n";
   var gitIgnore = open(name+"/.gitignore", iomode.cw);
   var GIwriter = gitIgnore.writer();
   GIwriter.write(toIgnore);
@@ -98,12 +114,13 @@ proc addGitIgnore(name: string) {
 
 
 proc makeBasicToml(name: string) {
-  const baseToml = '\n[brick]\n' +
+  const baseToml = '[brick]\n' +
                      'name = "' + name + '"\n' +
                      'version = "0.1.0"\n' +
                      'chplVersion = "' + getChapelVersionStr() + '"\n' +
                      '\n' +
-                     '[dependencies]\n';
+                     '[dependencies]' +
+                     '\n';
   var tomlFile = open(name+"/Mason.toml", iomode.cw);
   var tomlWriter = tomlFile.writer();
   tomlWriter.write(baseToml);
@@ -111,12 +128,14 @@ proc makeBasicToml(name: string) {
 }
 
 
-proc makeProjectFiles(name: string) {
+private proc makeProjectFiles(name: string) {
   mkdir(name + "/src");
+  mkdir(name + "/test");
+  mkdir(name + "/example");
   const libTemplate = '/* Documentation for ' + name +
     ' */\nmodule '+ name + ' {\n  writeln("New library: '+ name +'");\n}';
   var lib = open(name+'/src/'+name+'.chpl', iomode.cw);
   var libWriter = lib.writer();
-  libWriter.write(libTemplate);
+  libWriter.write(libTemplate + '\n');
   libWriter.close();
 }

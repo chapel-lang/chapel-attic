@@ -1,4 +1,4 @@
-# Copyright 2004-2018 Cray Inc.
+# Copyright 2004-2019 Cray Inc.
 # Other additional copyright holders may be indicated within.
 #
 # The entirety of this work is licensed under the Apache License,
@@ -64,56 +64,66 @@ comprt: FORCE
 	@$(MAKE) runtime
 	@$(MAKE) modules
 
+notcompiler: FORCE
+	@$(MAKE) third-party-try-opt
+	@$(MAKE) always-build-test-venv
+	@$(MAKE) always-build-chpldoc
+	@$(MAKE) runtime
+	@$(MAKE) modules
+
 compiler: FORCE
-	cd compiler && $(MAKE)
+	@echo "Making the compiler..."
+	@cd compiler && $(MAKE)
 
 parser: FORCE
-	cd compiler && $(MAKE) parser
+	@echo "Making the parser..."
+	@cd compiler && $(MAKE) parser
 
 modules: FORCE
-	cd modules && $(MAKE)
+	@echo "Making the modules..."
+	@cd modules && CHPL_LLVM_CODEGEN=0 $(MAKE)
 	-@if [ ! -z `${NEEDS_LLVM_RUNTIME}` ]; then \
-	. ${CHPL_MAKE_HOME}/util/config/set_clang_included.bash && \
-	cd modules && $(MAKE) ; \
+	echo "Making the modules for LLVM..."; \
+	cd modules && CHPL_LLVM_CODEGEN=1 $(MAKE) ; \
 	fi
 
 runtime: FORCE
-	cd runtime && $(MAKE)
+	@echo "Making the runtime..."
+	@cd runtime && CHPL_LLVM_CODEGEN=0 $(MAKE)
 	-@if [ ! -z `${NEEDS_LLVM_RUNTIME}` ]; then \
-	. ${CHPL_MAKE_HOME}/util/config/set_clang_included.bash && \
-	cd runtime && $(MAKE) ; \
+	echo "Making the runtime for LLVM..."; \
+	cd runtime && CHPL_LLVM_CODEGEN=1 $(MAKE) ; \
 	fi
 
 third-party: FORCE
-	cd third-party && $(MAKE)
+	@echo "Making the third-party libraries..."
+	@cd third-party && $(MAKE)
 
 third-party-try-opt: third-party-try-re2 third-party-try-gmp
 
 third-party-try-re2: FORCE
 	-@if [ -z "$$CHPL_REGEXP" ]; then \
-	cd third-party && $(MAKE) try-re2; \
+	cd third-party && CHPL_LLVM_CODEGEN=0 $(MAKE) try-re2; \
 	if [ ! -z `${NEEDS_LLVM_RUNTIME}` ]; then \
-	. ${CHPL_MAKE_HOME}/util/config/set_clang_included.bash && \
-	$(MAKE) try-re2; \
+	CHPL_LLVM_CODEGEN=1 $(MAKE) try-re2; \
 	fi \
 	fi
 
 third-party-try-gmp: FORCE
 	-@if [ -z "$$CHPL_GMP" ]; then \
-	cd third-party && $(MAKE) try-gmp; \
+	cd third-party && CHPL_LLVM_CODEGEN=0 $(MAKE) try-gmp; \
 	if [ ! -z `${NEEDS_LLVM_RUNTIME}` ]; then \
-	. ${CHPL_MAKE_HOME}/util/config/set_clang_included.bash && \
-	$(MAKE) try-gmp; \
+	CHPL_LLVM_CODEGEN=1 $(MAKE) try-gmp; \
 	fi \
 	fi
 
 third-party-test-venv: FORCE
-	-@if [ -z "$$CHPL_DONT_BUILD_TEST_VENV" ]; then \
+	@if [ -z "$$CHPL_DONT_BUILD_TEST_VENV" ]; then \
 	cd third-party && $(MAKE) test-venv; \
 	fi
 
 third-party-chpldoc-venv: FORCE
-	-@if [ -z "$$CHPL_DONT_BUILD_CHPLDOC_VENV" ]; then \
+	@if [ -z "$$CHPL_DONT_BUILD_CHPLDOC_VENV" ]; then \
 	cd third-party && $(MAKE) chpldoc-venv; \
 	fi
 
@@ -137,7 +147,7 @@ chplvis: compiler third-party-fltk FORCE
 	cd tools/chplvis && $(MAKE)
 	cd tools/chplvis && $(MAKE) install
 
-mason: compiler chpldoc FORCE
+mason: compiler chpldoc modules FORCE
 	cd tools/mason && $(MAKE) && $(MAKE) install
 
 c2chapel: FORCE
@@ -176,6 +186,7 @@ clobber: FORCE
 	cd third-party && $(MAKE) clobber
 	cd tools/chplvis && $(MAKE) clobber
 	cd tools/c2chapel && $(MAKE) clobber
+	cd tools/mason && $(MAKE) clobber
 	if [ -e doc/Makefile ]; then cd doc && $(MAKE) clobber; fi
 	rm -rf bin
 	rm -rf lib
@@ -200,3 +211,6 @@ install: comprt
 -include Makefile.devel
 
 FORCE:
+
+# Don't want to try building e.g. GMP and RE2 at the same time
+.NOTPARALLEL:

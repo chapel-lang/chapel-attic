@@ -7,7 +7,7 @@ class C {
     writeln("In C.bar()");
   }
 
-  proc postInit() {
+  proc postinit() {
     foo();
     bar();
     //    baz();  // not possible since C doesn't define it
@@ -15,7 +15,7 @@ class C {
 }
 
 class D : C {
-  proc foo() {
+  override proc foo() {
     writeln("In D.foo()");
   }
 
@@ -25,7 +25,7 @@ class D : C {
 }
 
 class E : C {
-  proc foo() {
+  override proc foo() {
     writeln("In E.foo()");
   }
 
@@ -33,7 +33,7 @@ class E : C {
     writeln("In E.baz()");
   }
 
-  proc postInit() {
+  proc postinit() {
     foo();
     bar();
     baz();
@@ -41,12 +41,8 @@ class E : C {
 }
 
 writeln("C:");
-var myC = new C();
+var myC = new owned C();
 writeln("D:");
-var myD = new D();
+var myD = new owned D();
 writeln("E:");
-var myE = new E();
-
-delete myE;
-delete myD;
-delete myC;
+var myE = new owned E();

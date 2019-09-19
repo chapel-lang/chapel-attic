@@ -7,14 +7,11 @@ class C {
 
 class D: C {
   var y: int;
-  proc foo() {
+  override proc foo() {
     writeln("D: ", this);
   }
 }
 
-var d: D = new D();
+var d: borrowed D = new borrowed D();
 
-(d:C).foo();
-
-delete d;
-
+(d:borrowed C).foo();

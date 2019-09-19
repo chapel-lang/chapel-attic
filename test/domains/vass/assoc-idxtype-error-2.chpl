@@ -6,10 +6,10 @@ class C {
   var a: [d] int;
 }
 
-proc C.init(d, a) where d: domain(?) {
+proc C.init(d, a) where isSubtype(d, domain(?)) {
   this.d = d;
   this.a = a;
 }
 
-var c1 = new C(d1,a1);
+var c1 = new shared C(d1,a1);
 writeln(c1);

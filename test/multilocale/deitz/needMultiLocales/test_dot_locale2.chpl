@@ -2,10 +2,10 @@ class C {
   var x: int;
 }
 
-var c: C;
+var c: unmanaged C?;
 
 on Locales(1) {
-  c = new C();
+  c = new unmanaged C();
 }
 
 writeln(here.id, " c.locale.id = ", c.locale.id);
@@ -29,10 +29,12 @@ on Locales(1) do
   c.goo();
 
 proc bar() {
-  var d: C;
+  var d: unmanaged C?;
   d = c;
   writeln(here.id, " d.locale.id = ", d.locale.id);
   writeln(here.id, " d.x.locale.id = ", d.x.locale.id);
 }
 
 bar();
+
+delete c;

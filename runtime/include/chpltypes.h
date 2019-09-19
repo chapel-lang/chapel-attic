@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2018 Cray Inc.
+ * Copyright 2004-2019 Cray Inc.
  * Other additional copyright holders may be indicated within.
  * 
  * The entirety of this work is licensed under the Apache License,
@@ -22,6 +22,7 @@
 
 #include "sys_basic.h"
 
+#include <inttypes.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -58,56 +59,20 @@ typedef _Bool chpl_bool;
 typedef bool chpl_bool;
 #endif
 
-#define c_nil NULL
-static inline chpl_bool is_c_nil(void* x) { return (chpl_bool)(x==c_nil); }
 static inline void* c_pointer_return(void* x) { return x; }
-
-typedef enum {
-  CHPL_TYPE_chpl_bool,
-  CHPL_TYPE_chpl_bool8,
-  CHPL_TYPE_chpl_bool16,
-  CHPL_TYPE_chpl_bool32,
-  CHPL_TYPE_chpl_bool64,
-  CHPL_TYPE_enum,
-  CHPL_TYPE_int8_t,
-  CHPL_TYPE_int16_t,
-  CHPL_TYPE_int32_t,
-  CHPL_TYPE_int64_t,
-  CHPL_TYPE_uint8_t,
-  CHPL_TYPE_uint16_t,
-  CHPL_TYPE_uint32_t,
-  CHPL_TYPE_uint64_t,
-  CHPL_TYPE__real32,
-  CHPL_TYPE__real64,
-  CHPL_TYPE__imag32,
-  CHPL_TYPE__imag64,
-  CHPL_TYPE__complex64,
-  CHPL_TYPE__complex128,
-  CHPL_TYPE_chpl_string,
-  CHPL_TYPE_wide_string,
-  CHPL_TYPE__cfile,
-  CHPL_TYPE_chpl_task_list_p,
-  CHPL_TYPE__timevalue,
-  CHPL_TYPE_chpl_sync_aux_t,
-  CHPL_TYPE_chpl_single_aux_t,
-  CHPL_TYPE_chpl_taskID_t,
-  CHPL_TYPE__symbol,
-  CHPL_TYPE_CLASS_REFERENCE,
-  CHPL_TYPE_DONE
-} chplType;
-
-typedef struct _chpl_fieldType {
-  chplType type;
-  size_t offset;
-} chpl_fieldType;
+static inline ptrdiff_t c_pointer_diff(void* a, void* b, ptrdiff_t eltSize) {
+  return (((unsigned char*)a) - ((unsigned char*)b))/eltSize;
+}
 
 // This allocation of bits is arbitrary.
 // Seemingly, 64 bits is enough to represent both the node_id and sublocale_id
 // portions  of a locale ID, and an even split is a good first guess.
 typedef int32_t c_nodeid_t;
-#define FORMAT_c_nodeid_t PRId32
+#define PRI_c_nodeid_t PRId32
+#define SCN_c_nodeid_t SCNi32
 typedef int32_t c_sublocid_t;
-#define FORMAT_c_sublocid_t PRId32
+#define PRI_c_sublocid_t PRId32
+#define SCN_c_sublocid_t SCNi32
 typedef int64_t c_localeid_t;
 
 // These are special values that mean "no", "any", and "all sublocales",
@@ -172,6 +137,9 @@ typedef void* chpl_opaque;
 #define UINT16( i) ((uint16_t)(UINT16_C(i)))
 #define UINT32( i) ((uint32_t)(UINT32_C(i)))
 #define UINT64( i) ((uint64_t)(UINT64_C(i)))
+
+#define REAL32(i) ((float)(i))
+#define REAL64(i) ((double)(i))
 
 #define COMMID( i)  ((int64_t)(INT64_C(i)))
 
@@ -248,8 +216,12 @@ typedef struct chpl_main_argument_s {
 } chpl_main_argument;
 
 #ifndef __cplusplus
-_complex128 _chpl_complex128(_real64 re, _real64 im);
-_complex64 _chpl_complex64(_real32 re, _real32 im);
+static inline _complex128 _chpl_complex128(_real64 re, _real64 im) {
+  return re + im*_Complex_I;
+}
+static inline _complex64 _chpl_complex64(_real32 re, _real32 im) {
+  return re + im*_Complex_I;
+}
 
 static inline _real64* complex128GetRealRef(_complex128* cplx) {
   return ((_real64*)cplx) + 0;

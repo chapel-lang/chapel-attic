@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2018 Cray Inc.
+ * Copyright 2004-2019 Cray Inc.
  * Other additional copyright holders may be indicated within.
  *
  * The entirety of this work is licensed under the Apache License,
@@ -24,7 +24,9 @@
 #include "AstDump.h"
 
 #include "expr.h"
+#include "IfExpr.h"
 #include "log.h"
+#include "LoopExpr.h"
 #include "stmt.h"
 #include "stringutil.h"
 #include "symbol.h"
@@ -32,10 +34,12 @@
 #include "WhileDoStmt.h"
 #include "DoWhileStmt.h"
 #include "CForLoop.h"
+#include "ForallStmt.h"
 #include "ForLoop.h"
 #include "ParamForLoop.h"
 #include "TryStmt.h"
 #include "CatchStmt.h"
+#include "DeferStmt.h"
 
 AstDump::AstDump() {
   mName      =     0;
@@ -85,6 +89,11 @@ bool AstDump::open(const ModuleSymbol* module, const char* passName, int passNum
 
   if (mFP != 0) {
     fprintf(mFP, "AST dump for %s after pass %s.\n", module->name, passName);
+    fprintf(mFP, "Module use list: ");
+    for_vector(ModuleSymbol, usedMod, module->modUseList) {
+      fprintf(mFP, "%s ", usedMod->name);
+    }
+    fprintf(mFP, "\n");
   }
 
   return (mFP != 0) ? true : false;
@@ -174,7 +183,8 @@ bool AstDump::enterDefExpr(DefExpr* node) {
     retval = false;
 
   } else {
-    if (isBlockStmt(node->parentExpr)) {
+    if (isBlockStmt(node->parentExpr) ||
+        isForallStmt(node->parentExpr)) {
       newline();
     }
 
@@ -236,6 +246,31 @@ void AstDump::exitNamedExpr(NamedExpr* node) {
 
 
 //
+// IfExpr
+//
+
+bool AstDump::enterIfExpr(IfExpr* node) {
+  if (fLogIds) {
+    fprintf(mFP, "(%d ", node->id);
+    mNeedSpace = false;
+  } else {
+    write(true, "(", false);
+  }
+  write("IfExpr ");
+  node->getCondition()->accept(this);
+  write("then");
+  node->getThenStmt()->accept(this);
+  write("else");
+  node->getElseStmt()->accept(this);
+  write(")");
+  return false;
+}
+
+void AstDump::exitIfExpr(IfExpr* node) {
+}
+
+
+//
 // SymExpr
 //
 void AstDump::visitSymExpr(SymExpr* node) {
@@ -249,7 +284,7 @@ void AstDump::visitSymExpr(SymExpr* node) {
   if (var != 0 && var->immediate != 0) {
     const size_t bufSize = 128;
     char         imm[bufSize];
-    char         buff[bufSize];
+    char         buff[bufSize + 1];
 
     snprint_imm(imm, bufSize, *var->immediate);
     sprintf(buff, "%s%s", imm, is_imag_type(var->type) ? "i" : "");
@@ -271,6 +306,55 @@ void AstDump::visitUsymExpr(UnresolvedSymExpr* node) {
   }
 
   write(node->unresolved);
+}
+
+//
+// LoopExpr
+//
+bool AstDump::enterLoopExpr(LoopExpr* node) {
+  if (isBlockStmt(node->parentExpr)) {
+    newline();
+  }
+
+  if (fLogIds) {
+    fprintf(mFP, "(%d ", node->id);
+    mNeedSpace = false;
+  } else {
+    write(true, "(", false);
+  }
+
+  if (node->forall) {
+    if (node->maybeArrayType) write("[ ");
+    else write("forall ");
+  } else {
+    write("for ");
+  }
+
+  if (node->indices) {
+    node->indices->accept(this);
+    write(" in ");
+  }
+
+  if (node->zippered) write("zip");
+  node->iteratorExpr->accept(this);
+
+  if (node->maybeArrayType) write("]");
+  else write("do");
+
+  if (node->cond) {
+    write(" if ");
+    node->cond->accept(this);
+    write(" then ");
+  }
+
+  node->loopBody->accept(this);
+
+  write(")");
+
+  return false;
+}
+
+void AstDump::exitLoopExpr(LoopExpr* node) {
 }
 
 
@@ -321,6 +405,13 @@ bool AstDump::enterBlockStmt(BlockStmt* node) {
 
   write("{");
   printBlockID(node);
+  if ((node->blockTag & BLOCK_SCOPELESS))
+    write("scopeless");
+  if ((node->blockTag & BLOCK_TYPE_ONLY))
+    write("type");
+  if ((node->blockTag & BLOCK_EXTERN))
+    write("extern");
+
   ++mIndent;
 
   return true;
@@ -333,18 +424,67 @@ void AstDump::exitBlockStmt(BlockStmt* node) {
   printBlockID(node);
 }
 
-void AstDump::visitForallIntents(ForallIntents* clause) {
-  newline();
-  write("with (");
-  for (int i = 0; i < clause->numVars(); i++) {
-    if (i > 0) write(false, ",", true);
-    if (clause->isReduce(i)) clause->riSpecs[i]->accept(this);
-    write(forallIntentTagDescription(clause->fIntents[i]));
-    clause->fiVars[i]->accept(this);
-  }
-  write(false, ")", true);
-}
 
+bool AstDump::enterForallStmt(ForallStmt* node) {
+  newline();
+  write("Forall");
+  write("{");
+  ++mIndent;
+  newline();
+  write("induction variables:");
+  ++mIndent;
+  for_alist(expr, node->inductionVariables()) {
+    newline();
+    expr->accept(this);
+  }
+  --mIndent;
+  newline();
+  write("iterated expressions:");
+  ++mIndent;
+  for_alist(expr, node->iteratedExpressions()) {
+    newline();
+    expr->accept(this);
+  }
+  --mIndent;
+  newline();
+  write("shadow variables:");
+  ++mIndent;
+  for_alist(expr, node->shadowVariables()) {
+    if (DefExpr* def = toDefExpr(expr)) {
+      if (ShadowVarSymbol* sv = toShadowVarSymbol(def->sym)) {
+        newline();
+        writeSymbol(sv, true);
+        write(sv->intentDescrString());
+        if (sv->outerVarSym()) {
+          write("outer var");
+          writeSymbol(sv->outerVarSym(), false);
+        }
+        ++mIndent;
+        if (sv->initBlock()) {
+          newline();
+          write("init block");
+          sv->initBlock()->accept(this);
+        }
+        if (sv->deinitBlock()) {
+          newline();
+          write("deinit block");
+          sv->deinitBlock()->accept(this);
+        }
+        --mIndent;
+      }
+    }
+  }
+  --mIndent;
+  newline();
+  write("forall body");
+  node->loopBody()->accept(this);
+  --mIndent;
+  newline();
+  write("}");
+  return false;
+}
+void AstDump::exitForallStmt(ForallStmt* node) {
+}
 
 //
 // WhileDoStmt
@@ -547,6 +687,7 @@ bool AstDump::enterDeferStmt(DeferStmt* node) {
   write("Defer");
   newline();
   write("{");
+  printBlockID(node);
   ++mIndent;
   return true;
 }
@@ -586,6 +727,15 @@ void AstDump::exitTryStmt(TryStmt* node) {
 bool AstDump::enterCatchStmt(CatchStmt* node) {
   newline();
   write("Catch");
+  if (node->name() != NULL)
+    write(node->name());
+  if (UnresolvedSymExpr* urse = toUnresolvedSymExpr(node->type())) {
+    write(":");
+    write(urse->unresolved);
+  } else if (SymExpr* se = toSymExpr(node->type())) {
+    write(":");
+    write(se->symbol()->name);
+  }
   newline();
   write("{");
   ++mIndent;
@@ -717,7 +867,12 @@ void AstDump::writeSymbol(Symbol* sym, bool def) {
   }
 
   if (sym->hasFlag(FLAG_GENERIC))
-    write(false, "?", false);
+    write(false, "(?)", false);
+
+  if (def)
+    if (ArgSymbol* arg = toArgSymbol(sym))
+      if (arg->variableExpr)
+        write("...");
 
   mNeedSpace = true;
 }

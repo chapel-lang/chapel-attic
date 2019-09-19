@@ -16,6 +16,7 @@ libqthread_la_SOURCES = \
 	feb.c \
 	hazardptrs.c \
 	io.c \
+	performance.c \
 	locks.c \
 	qalloc.c \
 	qloop.c \
@@ -59,7 +60,6 @@ include qtimer/Makefile.inc
 include ds/Makefile.inc
 include patterns/Makefile.inc
 include syscalls/Makefile.inc
-include rcrtool/Makefile.inc
 
 if COMPILE_MULTINODE
 libqthread_la_SOURCES += spr.c
@@ -110,8 +110,10 @@ EXTRA_DIST += \
 			 alloc/chapel.c \
 			 affinity/common.c \
 			 affinity/hwloc.c \
+			 affinity/hwloc_via_chapel.c \
 			 affinity/binders.c \
 			 affinity/hwloc_v2.c \
+			 affinity/no.c \
 			 affinity/sys.c \
 			 affinity/libnuma.c \
 			 affinity/libnumaV2.c \

@@ -1,11 +1,12 @@
 // copied from test/classes/ferguson/class-alias-generic-concrete.chpl
 class A {
-  var x;
+  type T;
+  var x : T;
 }
 
 type C = A(int);
 
-var c = new C(1);
+var c = new unmanaged C(1);
 writeln(c);
 writeln(c.x);
 

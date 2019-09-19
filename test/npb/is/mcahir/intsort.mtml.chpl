@@ -26,9 +26,9 @@
 
 // Problem size parameters
 enum  classVals {S=0, W=1, A=2, B=3, C=4};
-const Classes: domain(classVals);
-const ClassNkeys:  [Classes] int = ( 16, 20, 23, 25, 27 ),
-      ClassRanges: [Classes] int = ( 11, 16, 19, 21, 23 );
+const Classes = {classVals.S..classVals.C};
+const ClassNkeys:  [Classes] int = [ 16, 20, 23, 25, 27 ],
+      ClassRanges: [Classes] int = [ 11, 16, 19, 21, 23 ];
 
 // Set of config constants that control size of problem and output options
 config const probClass = classVals.S;	 // default to Sample class
@@ -37,6 +37,7 @@ config const DEBUG:        bool = false; // shows progress and summary info
 config param printLoopTimings: bool = false; // prints timing info
 config param printArrays:  bool = false; // prints out arrays (can be long)
 config const printTime    = false;	 // turn off for test verification
+config const printNumLocales = true;     // print the number of locales
 
 // Standard modules
 use Time, Random, BlockDist, BlockCycDist;
@@ -143,7 +144,8 @@ proc main () {
   writef ("NAS Parallel Benchmarks 2.4 -- IS Benchmark\n" );
   writef (" Size:                       %{#########}  (class %t)\n", nkeys, probClass);
   writef (" Iterations:                 %{#########}\n",maxIterations);
-  writef (" Number of locales:          %{#########}\n",numLocales);
+  if printNumLocales then
+    writef (" Number of locales:          %{#########}\n",numLocales);
   writef (" Number of tasks per locale: %{#########}\n",dataParTasksPerLocale);
   writef (" \n");
 
@@ -327,19 +329,19 @@ proc partialVerification(iteration: int, keyBuff1 /*:[countDom]int*/ ) {
   //  version except that we use enums to access the comparison values directly.
 
   for i in 0..4 {
-    var k = key(testIndexArray(probClass,i));
+    var k = key(testIndexArray(probClass:int,i));
     var kbidx = if distType==ISDistType.block then k-1 else (k-1,0);
     select probClass {
       when classVals.S do {
         if (i <= 2) {
-          if (keyBuff1(kbidx) != testRankArray(probClass,i)+iteration) {
+          if (keyBuff1(kbidx) != testRankArray(probClass:int,i)+iteration) {
             writeln("Failed partial verification: iteration ",
                     iteration, ", test key ", i);
           } else {
             passedVerifications += 1;
           }
         } else {
-          if (keyBuff1(kbidx) != testRankArray(probClass,i)-iteration) {
+          if (keyBuff1(kbidx) != testRankArray(probClass:int,i)-iteration) {
             writeln("Failed partial verification: iteration ",
                     iteration, ", test key ", i);
           } else {
@@ -349,14 +351,14 @@ proc partialVerification(iteration: int, keyBuff1 /*:[countDom]int*/ ) {
       }
       when classVals.W do {
         if (i < 2) {
-          if (keyBuff1(kbidx) != testRankArray(probClass,i) + (iteration-2)) {
+          if (keyBuff1(kbidx) != testRankArray(probClass:int,i) + (iteration-2)) {
             writeln("Failed partial verification: iteration ",
                     iteration, ", test key ", i);
           } else {
             passedVerifications += 1;
           }
         } else {
-          if (keyBuff1(kbidx) != testRankArray(probClass,i) - iteration) {
+          if (keyBuff1(kbidx) != testRankArray(probClass:int,i) - iteration) {
             writeln("Failed partial verification: iteration ",
                     iteration, ", test key ", i);
           } else {
@@ -366,14 +368,14 @@ proc partialVerification(iteration: int, keyBuff1 /*:[countDom]int*/ ) {
       }
       when classVals.A do {
         if (i <= 2) {
-          if (keyBuff1(kbidx) != testRankArray(probClass,i) + (iteration-1)) {
+          if (keyBuff1(kbidx) != testRankArray(probClass:int,i) + (iteration-1)) {
             writeln("Failed partial verification: iteration ",
                     iteration, ", test key ", i);
           } else {
             passedVerifications += 1;
           }
         } else {
-          if (keyBuff1(kbidx) != testRankArray(probClass,i) - (iteration-1)) {
+          if (keyBuff1(kbidx) != testRankArray(probClass:int,i) - (iteration-1)) {
             writeln("Failed partial verification: iteration ",
                     iteration, ", test key ", i);
           } else {
@@ -383,14 +385,14 @@ proc partialVerification(iteration: int, keyBuff1 /*:[countDom]int*/ ) {
       }
       when classVals.B do {
         if (i == 1 || i == 2 || i == 4) {
-          if (keyBuff1(kbidx) != testRankArray(probClass,i) + iteration) {
+          if (keyBuff1(kbidx) != testRankArray(probClass:int,i) + iteration) {
             writeln("Failed partial verification: iteration ",
                     iteration, ", test key ", i);
           } else {
             passedVerifications += 1;
           }
         } else {
-          if (keyBuff1(kbidx) != testRankArray(probClass,i) - iteration) {
+          if (keyBuff1(kbidx) != testRankArray(probClass:int,i) - iteration) {
             writeln("Failed partial verification: iteration ",
                     iteration, ", test key ", i);
           } else {
@@ -400,14 +402,14 @@ proc partialVerification(iteration: int, keyBuff1 /*:[countDom]int*/ ) {
       }
       when classVals.C do {
         if (i <= 2) {
-          if (keyBuff1(kbidx) != testRankArray(probClass,i) + iteration) {
+          if (keyBuff1(kbidx) != testRankArray(probClass:int,i) + iteration) {
             writeln("Failed partial verification: iteration ",
                     iteration, ", test key ", i);
           } else {
             passedVerifications += 1;
           }
         } else {
-          if (keyBuff1(kbidx) != testRankArray(probClass,i) - iteration) {
+          if (keyBuff1(kbidx) != testRankArray(probClass:int,i) - iteration) {
             writeln("Failed partial verification: iteration ",
                     iteration, ", test key ", i);
           } else {
@@ -484,13 +486,12 @@ proc gen_keys () {
       var first: int = mype*(nkeys/numLocales);
       var last : int = first+(nkeys/numLocales) - 1;
  
-      var rs = new NPBRandomStream(real, seed);
+      var rs = new owned NPBRandomStream(real, seed);
       rs.skipToNth(first*4+1);
       for i in first..last {
         rs.fillRandom(tmpreals);
         key(i) = ( (range>>2)*(+ reduce tmpreals ) ): int;
       }
-      delete rs;
     }
   }
 }

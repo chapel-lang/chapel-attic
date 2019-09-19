@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2018 Cray Inc.
+ * Copyright 2004-2019 Cray Inc.
  * Other additional copyright holders may be indicated within.
  *
  * The entirety of this work is licensed under the Apache License,
@@ -155,9 +155,10 @@ As an example for specifying an I/O style, the code below specifies the minimum 
 
 I/O facilities in Chapel also include several other ways to control I/O
 formatting. There is support for :ref:`formatted I/O <about-io-formatted-io>`
-with :proc:`channel.readf` and :proc:`channel.writef`. Also note that record or
-class implementations can provide custom functions implementing read or write
-operations for that type (see :ref:`readThis-writeThis-readWriteThis`).
+with :proc:`FormattedIO.channel.readf` and :proc:`FormattedIO.channel.writef`.
+Also note that record or class implementations can provide custom functions
+implementing read or write operations for that type (see
+:ref:`readThis-writeThis-readWriteThis`).
 
 .. _about-io-files:
 
@@ -197,10 +198,11 @@ multiple tasks. When creating a channel, it is possible to disable the lock
 Some channel methods - in particular those beginning with the underscore -
 should only be called on locked channels.  With these methods, it is possible
 to get or set the channel style, or perform I/O "transactions" (see
-:proc:`channel._mark`). To use these methods, first lock the channel with
-channel.lock(), call the methods you need, and then unlock the channel with
-channel.unlock(). Note that in the future, we may move to alternative ways of
-calling these functions that guarantee that they are not called on a channel
+:proc:`channel.mark` and :proc:`channel._mark`). To use these methods,
+first lock the channel with :proc:`channel.lock`, call the methods you need,
+then unlock the channel with :proc:`channel.unlock`.
+Note that in the future, we may move to alternative ways of calling
+these functions that guarantee that they are not called on a channel
 without the appropriate locking.
 
 Besides data races that can occur if locking is not used in channels when it
@@ -242,17 +244,17 @@ Performing I/O with Channels
 
 Channels contain read and write methods, which are generic methods that can
 read or write anything, and can also take optional arguments such as I/O style
-or to return an error instead of halting. These functions generally take any
-number of arguments. See:
+or. These functions generally take any number of arguments and `throw`
+if there was an error. See:
 
  * :proc:`channel.write`
  * :proc:`channel.writeln`
  * :proc:`channel.writebits`
- * :proc:`channel.writef` (see also :ref:`about-io-formatted-io`)
+ * :proc:`FormattedIO.channel.writef` (see also :ref:`about-io-formatted-io`)
  * :proc:`channel.read`
  * :proc:`channel.readln`
  * :proc:`channel.readbits`
- * :proc:`channel.readf` (see also :ref:`about-io-formatted-io`)
+ * :proc:`FormattedIO.channel.readf` (see also :ref:`about-io-formatted-io`)
 
 In addition, there are several convenient synonyms for :proc:`channel.write` and
 :proc:`channel.read`:
@@ -314,14 +316,16 @@ Error Handling
 Most I/O routines throw a :class:`SysError.SystemError`, and can be handled
 appropriately with ``try`` and ``catch``. For legacy reasons most I/O routines
 can also can accept an optional `error=` argument.
+In this documentation, `SystemError` may include both the
+:class:`SysError.SystemError` class proper and its subclasses.
 
-Some of these errors commonly used within the I/O implementation include:
+Some of these subclasses commonly used within the I/O implementation include:
 
- * :class:`SystemError.EOFError` - the end of file was reached
- * :class:`SystemError.UnexpectedEOFError` - a read or write only returned
-   part of the requested data
- * :class:`SystemError.BadFormatError` - data read did not adhere to the
-   requested format
+ * :class:`SysError.EOFError` - the end of file was reached
+ * :class:`SysError.UnexpectedEOFError` - a read or write only returned
+                                          part of the requested data
+ * :class:`SysError.BadFormatError` - data read did not adhere to the
+                                      requested format
 
 Some of the legacy error codes used include:
 
@@ -349,7 +353,6 @@ When a file (or channel) is closed, data written to that file will be written
 to disk eventually by the operating system. If an application needs to be sure
 that the data is immediately written to persistent storage, it should use
 :proc:`file.fsync` prior to closing the file.
-
 
 Correspondence to C I/O
 -----------------------
@@ -421,7 +424,7 @@ module IO {
       (ie, they can open up channels that are not shared).
 */
 
-use SysBasic;
+private use SysBasic;
 use SysError;
 
 /*
@@ -514,7 +517,7 @@ via the ``str_style`` field in :record:`iostyle`.
   of length follow, and where the 7-bits of length from each byte store
   the 7-bit portions of the length in order from least-significant to
   most-significant. This way of encoding a variable-byte length  matches
-  `Google Protocol Buffers <https://github.com/google/protobuf/>`_.
+  `Google Protocol Buffers <https://github.com/protocolbuffers/protobuf>`_.
 * ``iostringstyle.data_toeof`` indicates a string format that contains
   only the string data without any length or terminator. When reading,
   this format will read a string until the end of the file is reached.
@@ -578,7 +581,7 @@ enum iostringformat {
             to store in :var:`iostyle.str_style`.
  */
 proc stringStyleTerminated(terminator:uint(8)) {
-  return -(terminator - iostringstyle.data_null);
+  return -(terminator - iostringstyle.data_null:int(64));
 }
 
 /*
@@ -604,16 +607,18 @@ proc stringStyleExactLen(len:int(64)) {
   length as described in :type:`iostringstyle`.
  */
 proc stringStyleWithVariableLength() {
-  return iostringstyle.lenVb_data;
+  return iostringstyle.lenVb_data: int(64);
 }
 
 /*
-  This method returns the appropriate :record:`iostyle` ``str_style`` value
-  to indicate a string format where string data is preceded by a ``lengthBytes``
-  of length. Only lengths of 1, 2, 4, or 8 are supported; if this method
-  is called with any other length, it will halt with an error.
+  Return the appropriate :record:`iostyle` ``str_style`` value
+  to indicate a string format where string data is preceded by a
+  `lengthBytes` of length. Only lengths of 1, 2, 4, or 8 are supported.
+  When `lengthBytes` is 0, the returned value indicates variable-byte length.
+
+  :throws SystemError: Thrown for an unsupported value of `lengthBytes`.
  */
-proc stringStyleWithLength(lengthBytes:int) {
+proc stringStyleWithLength(lengthBytes:int) throws {
   var x = iostringstyle.lenVb_data;
   select lengthBytes {
     when 0 do x = iostringstyle.lenVb_data;
@@ -621,7 +626,10 @@ proc stringStyleWithLength(lengthBytes:int) {
     when 2 do x = iostringstyle.len2b_data;
     when 4 do x = iostringstyle.len4b_data;
     when 8 do x = iostringstyle.len8b_data;
-    otherwise halt("Unhandled string length prefix size");
+    otherwise
+      throw SystemError.fromSyserr(EINVAL,
+                                   "Invalid string length prefix " +
+                                   lengthBytes:string);
   }
   return x;
 }
@@ -704,10 +712,12 @@ pragma "no doc"
 extern type qio_file_ptr_t;
 private extern const QIO_FILE_PTR_NULL:qio_file_ptr_t;
 
+
 pragma "no doc"
-extern type qio_file_functions_ptr_t; // pointer to function ptr struct
-pragma "no doc"
-extern type qio_file_functions_t;     // function ptr struct
+extern record qiovec_t {
+  var iov_base: c_void_ptr;
+  var iov_len: size_t;
+}
 
 pragma "no doc"
 extern type qio_channel_ptr_t;
@@ -760,7 +770,7 @@ extern record iostyle { // aka qio_style_t
      in binary mode? See :type:`iostringstyle` for more information
      on what the values of ``str_style`` mean.
    */
-  var str_style:int(64) = iostringstyle.data_toeof;
+  var str_style:int(64) = iostringstyle.data_toeof: int(64);
 
   // text style choices
   /* When performing text I/O, pad out to this many columns */
@@ -782,6 +792,10 @@ extern record iostyle { // aka qio_style_t
      on what the values of ``str_style`` mean.
    */
   var string_format:uint(8) = iostringformat.word:uint(8);
+
+  /* What character do we start bytes with, when appropriate? Default is " */
+  var bytes_prefix:style_char_t = 0x62; // b
+
   // numeric scanning/printing choices
   /* When reading or writing a numeric value in a text mode channel,
      what base should be used for the number? Default of 0 means decimal.
@@ -847,6 +861,145 @@ extern record iostyle { // aka qio_style_t
   var tuple_style:uint(8) = 0;
 }
 
+// This class helps in implementing runtime calls.
+// It represents a file as a pointer. C code can call Chapel
+// code working with this file through the export procs below,
+// e.g. chpl_qio_read_atleast. These work by casting to
+// this type and then invoking the method with virtual dispatch.
+
+pragma "no doc"
+class QioPluginFile {
+  // Assume instance has a link to filesystem if needed
+
+  // TODO: would like these to throw instead of returning QIO errors,
+  // but that will require changing the error representation within QIO.
+
+  /* Create a new plugin channel that will work with the passed
+     qio channel. */
+  proc setupChannel(out pluginChannel:unmanaged QioPluginChannel?,
+                    start:int(64), end:int(64),
+                    qioChannelPtr:qio_channel_ptr_t):syserr {
+    return ENOSYS;
+  }
+
+  /* Returns the length of an open file. */
+  proc filelength(out length:int(64)):syserr {
+    return ENOSYS;
+  }
+
+  /* Returns the path to an open file.
+     The caller has the responsibility to free the returned c_string.
+   */
+  // TODO: use Chapel strings for this, one day
+  proc getpath(out path:c_string, out len:int(64)):syserr {
+    return ENOSYS;
+  }
+
+  /* Write the file data to persistent storage. */
+  proc fsync():syserr {
+    return ENOSYS;
+  }
+  /* Get the optimal I/O chunk size for the file. */
+  proc getChunk(out length:int(64)):syserr {
+    return ENOSYS;
+  }
+  /* Returns a locale best at working with each chunk within a region in a
+     file */
+  // TODO: This is not currently implemented or used anywhere.
+  proc getLocalesForRegion(start:int(64), end:int(64), out
+      localeNames:c_ptr(c_string), ref nLocales:int(64)):syserr {
+    return ENOSYS;
+  }
+
+  /* Close the file. */
+  proc close():syserr {
+    return ENOSYS;
+  }
+}
+
+// This class helps with C runtime I/O plugins. It represents additional
+// information for a channel.
+pragma "no doc"
+class QioPluginChannel {
+  /* Read at least ``amt`` bytes and store these in the related channel. */
+  proc readAtLeast(amt:int(64)):syserr {
+    return ENOSYS;
+  }
+  /* Write up to ``amt`` bytes from the channel. */
+  proc write(amt:int(64)):syserr {
+    return ENOSYS;
+  }
+  /* Close the channel. */
+  proc close():syserr {
+    return ENOSYS;
+  }
+}
+
+// These functions let the C QIO code call the plugins
+// TODO: Move more of the QIO code to be pure Chapel
+pragma "no doc"
+export proc chpl_qio_setup_plugin_channel(file:c_void_ptr, ref plugin_ch:c_void_ptr, start:int(64), end:int(64), qio_ch:qio_channel_ptr_t):syserr {
+  var f=(file:unmanaged QioPluginFile?)!;
+  var pluginChannel:unmanaged QioPluginChannel? = nil;
+  var ret = f.setupChannel(pluginChannel, start, end, qio_ch);
+  plugin_ch = pluginChannel:c_void_ptr;
+  return ret;
+}
+
+pragma "no doc"
+export proc chpl_qio_read_atleast(ch_plugin:c_void_ptr, amt:int(64)) {
+  var c=(ch_plugin:unmanaged QioPluginChannel?)!;
+  return c.readAtLeast(amt);
+}
+pragma "no doc"
+export proc chpl_qio_write(ch_plugin:c_void_ptr, amt:int(64)) {
+  var c=(ch_plugin:unmanaged QioPluginChannel?)!;
+  return c.write(amt);
+}
+pragma "no doc"
+export proc chpl_qio_channel_close(ch:c_void_ptr):syserr {
+  var c=(ch:unmanaged QioPluginChannel?)!;
+  var err = c.close();
+  delete c;
+  return err;
+}
+
+pragma "no doc"
+export proc chpl_qio_filelength(file:c_void_ptr, ref length:int(64)):syserr {
+  var f=(file:unmanaged QioPluginFile?)!;
+  return f.filelength(length);
+}
+pragma "no doc"
+export proc chpl_qio_getpath(file:c_void_ptr, ref str:c_string, ref len:int(64)):syserr {
+  var f=(file:unmanaged QioPluginFile?)!;
+  return f.getpath(str, len);
+}
+pragma "no doc"
+export proc chpl_qio_fsync(file:c_void_ptr):syserr {
+  var f=(file:unmanaged QioPluginFile?)!;
+  return f.fsync();
+}
+pragma "no doc"
+export proc chpl_qio_get_chunk(file:c_void_ptr, ref length:int(64)):syserr {
+  var f=(file:unmanaged QioPluginFile?)!;
+  return f.getChunk(length);
+}
+pragma "no doc"
+export proc chpl_qio_get_locales_for_region(file:c_void_ptr, start:int(64),
+    end:int(64), ref localeNames:c_void_ptr, ref nLocales:int(64)):syserr {
+  var strPtr:c_ptr(c_string);
+  var f=(file:unmanaged QioPluginFile?)!;
+  var ret = f.getLocalesForRegion(start, end, strPtr, nLocales);
+  localeNames = strPtr:c_void_ptr;
+  return ret;
+}
+pragma "no doc"
+export proc chpl_qio_file_close(file:c_void_ptr):syserr {
+  var f = (file:unmanaged QioPluginFile?)!;
+  var err = f.close();
+  delete f;
+  return err;
+}
 
 // Extern functions
 // TODO -- move these declarations to where they are used or into
@@ -857,18 +1010,10 @@ private extern proc qio_style_init_default(ref s: iostyle);
 private extern proc qio_file_retain(f:qio_file_ptr_t);
 private extern proc qio_file_release(f:qio_file_ptr_t);
 
-pragma "no prototype" // FIXME
 private extern proc qio_file_init(ref file_out:qio_file_ptr_t, fp:_file, fd:fd_t, iohints:c_int, const ref style:iostyle, usefilestar:c_int):syserr;
 private extern proc qio_file_open_access(ref file_out:qio_file_ptr_t, path:c_string, access:c_string, iohints:c_int, const ref style:iostyle):syserr;
 private extern proc qio_file_open_tmp(ref file_out:qio_file_ptr_t, iohints:c_int, const ref style:iostyle):syserr;
 private extern proc qio_file_open_mem(ref file_out:qio_file_ptr_t, buf:qbuffer_ptr_t, const ref style:iostyle):syserr;
-
-// Same as qio_file_open_access in, except this time we pass though our
-// struct that will initialize the file with the appropriate functions for that FS
-pragma "no doc"
-extern proc qio_file_open_access_usr(out file_out:qio_file_ptr_t, path:c_string,
-                                     access:c_string, iohints:c_int, /*const*/ ref style:iostyle,
-                                     fs:c_void_ptr, s: qio_file_functions_ptr_t):syserr;
 
 pragma "no doc"
 extern proc qio_file_close(f:qio_file_ptr_t):syserr;
@@ -876,18 +1021,19 @@ extern proc qio_file_close(f:qio_file_ptr_t):syserr;
 
 private extern proc qio_file_lock(f:qio_file_ptr_t):syserr;
 private extern proc qio_file_unlock(f:qio_file_ptr_t);
+private extern proc qio_file_isopen(f:qio_file_ptr_t):bool;
 
 /* The general way to make sure data is written without error */
 private extern proc qio_file_sync(f:qio_file_ptr_t):syserr;
 
 private extern proc qio_channel_end_offset_unlocked(ch:qio_channel_ptr_t):int(64);
 private extern proc qio_file_get_style(f:qio_file_ptr_t, ref style:iostyle);
+private extern proc qio_file_get_plugin(f:qio_file_ptr_t):c_void_ptr;
+private extern proc qio_channel_get_plugin(ch:qio_channel_ptr_t):c_void_ptr;
 private extern proc qio_file_length(f:qio_file_ptr_t, ref len:int(64)):syserr;
 
-pragma "no prototype" // FIXME
 private extern proc qio_channel_create(ref ch:qio_channel_ptr_t, file:qio_file_ptr_t, hints:c_int, readable:c_int, writeable:c_int, start:int(64), end:int(64), const ref style:iostyle):syserr;
 
-pragma "no prototype" // FIXME
 private extern proc qio_channel_path_offset(threadsafe:c_int, ch:qio_channel_ptr_t, ref path:c_string, ref offset:int(64)):syserr;
 
 private extern proc qio_channel_retain(ch:qio_channel_ptr_t);
@@ -911,7 +1057,8 @@ private extern proc qio_channel_style_element(ch:qio_channel_ptr_t, element:int(
 
 private extern proc qio_channel_flush(threadsafe:c_int, ch:qio_channel_ptr_t):syserr;
 private extern proc qio_channel_close(threadsafe:c_int, ch:qio_channel_ptr_t):syserr;
-private extern proc qio_channel_isclosed(threadsafe:c_int, ch:qio_channel_ptr_t):bool;
+pragma "no doc"
+extern proc qio_channel_isclosed(threadsafe:c_int, ch:qio_channel_ptr_t):bool;
 
 private extern proc qio_channel_read(threadsafe:c_int, ch:qio_channel_ptr_t, ref ptr, len:ssize_t, ref amt_read:ssize_t):syserr;
 private extern proc qio_channel_read_amt(threadsafe:c_int, ch:qio_channel_ptr_t, ref ptr, len:ssize_t):syserr;
@@ -937,24 +1084,22 @@ private extern proc qio_channel_mark(threadsafe:c_int, ch:qio_channel_ptr_t):sys
 private extern proc qio_channel_revert_unlocked(ch:qio_channel_ptr_t);
 private extern proc qio_channel_commit_unlocked(ch:qio_channel_ptr_t);
 
+private extern proc qio_channel_seek(ch:qio_channel_ptr_t, start:int(64), end:int(64)):syserr;
+
 private extern proc qio_channel_write_bits(threadsafe:c_int, ch:qio_channel_ptr_t, v:uint(64), nbits:int(8)):syserr;
 private extern proc qio_channel_flush_bits(threadsafe:c_int, ch:qio_channel_ptr_t):syserr;
 private extern proc qio_channel_read_bits(threadsafe:c_int, ch:qio_channel_ptr_t, ref v:uint(64), nbits:int(8)):syserr;
 
 private extern proc qio_locales_for_region(fl:qio_file_ptr_t,
                                    start:int(64), end:int(64),
-                                   ref loc_names:c_ptr(c_string),
+                                   loc_names_out:c_void_ptr,
                                    ref num_locs_out:c_int):syserr;
 private extern proc qio_get_chunk(fl:qio_file_ptr_t, ref len:int(64)):syserr;
 private extern proc qio_get_fs_type(fl:qio_file_ptr_t, ref tp:c_int):syserr;
 
-pragma "no prototype" // FIXME
 private extern proc qio_file_path_for_fd(fd:fd_t, ref path:c_string):syserr;
-pragma "no prototype" // FIXME
 private extern proc qio_file_path_for_fp(fp:_file, ref path:c_string):syserr;
-pragma "no prototype" // FIXME
 private extern proc qio_file_path(f:qio_file_ptr_t, ref path:c_string):syserr;
-pragma "no prototype" // FIXME
 private extern proc qio_shortest_path(fl: qio_file_ptr_t, ref path_out:c_string, path_in:c_string):syserr;
 
 // we don't use qio_channel_read_int/write_int since the code there is pretty
@@ -1002,16 +1147,13 @@ private extern proc qio_channel_read_string(threadsafe:c_int, byteorder:c_int, s
 private extern proc qio_channel_write_string(threadsafe:c_int, byteorder:c_int, str_style:int(64), ch:qio_channel_ptr_t, const s:c_string, len:ssize_t):syserr;
 
 private extern proc qio_channel_scan_int(threadsafe:c_int, ch:qio_channel_ptr_t, ref ptr, len:size_t, issigned:c_int):syserr;
-pragma "no prototype" // FIXME
 private extern proc qio_channel_print_int(threadsafe:c_int, ch:qio_channel_ptr_t, const ref ptr, len:size_t, issigned:c_int):syserr;
 
 private extern proc qio_channel_scan_float(threadsafe:c_int, ch:qio_channel_ptr_t, ref ptr, len:size_t):syserr;
-pragma "no prototype" // FIXME
 private extern proc qio_channel_print_float(threadsafe:c_int, ch:qio_channel_ptr_t, const ref ptr, len:size_t):syserr;
 
 // These are the same as scan/print float but they assume an 'i' afterwards.
 private extern proc qio_channel_scan_imag(threadsafe:c_int, ch:qio_channel_ptr_t, ref ptr, len:size_t):syserr;
-pragma "no prototype" // FIXME
 private extern proc qio_channel_print_imag(threadsafe:c_int, ch:qio_channel_ptr_t, const ref ptr, len:size_t):syserr;
 
 
@@ -1030,6 +1172,8 @@ private extern proc qio_channel_skip_past_newline(threadsafe:c_int, ch:qio_chann
 private extern proc qio_channel_write_newline(threadsafe:c_int, ch:qio_channel_ptr_t):syserr;
 
 private extern proc qio_channel_scan_string(threadsafe:c_int, ch:qio_channel_ptr_t, ref ptr:c_string, ref len:int(64), maxlen:ssize_t):syserr;
+private extern proc qio_channel_scan_bytes(threadsafe:c_int, ch:qio_channel_ptr_t, ref ptr:c_string, ref len:int(64), maxlen:ssize_t):syserr;
+private extern proc qio_channel_print_bytes(threadsafe:c_int, ch:qio_channel_ptr_t, const ptr:c_string, len:ssize_t):syserr;
 private extern proc qio_channel_print_string(threadsafe:c_int, ch:qio_channel_ptr_t, const ptr:c_string, len:ssize_t):syserr;
 
 private extern proc qio_channel_scan_literal(threadsafe:c_int, ch:qio_channel_ptr_t, const match:c_string, len:ssize_t, skipwsbefore:c_int):syserr;
@@ -1038,20 +1182,6 @@ private extern proc qio_channel_print_literal(threadsafe:c_int, ch:qio_channel_p
 private extern proc qio_channel_print_literal_2(threadsafe:c_int, ch:qio_channel_ptr_t, match:c_void_ptr, len:ssize_t):syserr;
 
 private extern proc qio_channel_skip_json_field(threadsafe:c_int, ch:qio_channel_ptr_t):syserr;
-
-/*********************** Curl/HDFS support ******************/
-
-/***************** C U R L *******************/
-pragma "no doc"
-extern type curl_handle;
-private extern const curl_function_struct:qio_file_functions_t;
-private extern const curl_function_struct_ptr:qio_file_functions_ptr_t;
-
-/****************** H D F S ******************/
-private extern const hdfs_function_struct_ptr:qio_file_functions_ptr_t;
-private extern proc hdfs_connect(out fs: c_void_ptr, path: c_string, port: int): syserr;
-private extern proc hdfs_do_release(fs:c_void_ptr);
-// End
 
 pragma "no doc"
 extern record qio_conv_t {
@@ -1084,6 +1214,7 @@ private extern const QIO_CONV_ARG_TYPE_BINARY_COMPLEX:c_int;
 
 private extern const QIO_CONV_ARG_TYPE_CHAR:c_int;
 private extern const QIO_CONV_ARG_TYPE_STRING:c_int;
+private extern const QIO_CONV_ARG_TYPE_BINARY_STRING:c_int;
 private extern const QIO_CONV_ARG_TYPE_REPR:c_int;
 private extern const QIO_CONV_ARG_TYPE_REGEXP:c_int;
 private extern const QIO_CONV_ARG_TYPE_NONE_REGEXP_LITERAL:c_int;
@@ -1254,16 +1385,26 @@ record file {
   var home: locale = here;
   pragma "no doc"
   var _file_internal:qio_file_ptr_t = QIO_FILE_PTR_NULL;
+
+  // INIT TODO: This would be a useful case for requesting a default initializer
+  // be built even when handwritten initializers (copy init) exist.
+  proc init() {
+  }
 }
 
 // TODO -- shouldn't have to write this this way!
 pragma "no doc"
-pragma "init copy fn"
-proc chpl__initCopy(x: file) {
-  on x.home {
-    qio_file_retain(x._file_internal);
+proc file.init(x: file) {
+  this.home = x.home;
+  this._file_internal = x._file_internal;
+  this.complete();
+  on home {
+    qio_file_retain(_file_internal);
   }
-  return x;
+}
+
+proc file.init=(x: file) {
+  this.init(x);
 }
 
 pragma "no doc"
@@ -1282,23 +1423,22 @@ proc =(ref ret:file, x:file) {
   ret._file_internal = x._file_internal;
 }
 
-/* Throw an error if a file is invalid */
-proc file.check() throws {
+pragma "no doc"
+proc file.checkAssumingLocal() throws {
   if is_c_nil(_file_internal) then
     throw SystemError.fromSyserr(EBADF, "Operation attempted on an invalid file");
+  if !qio_file_isopen(_file_internal) then
+    throw SystemError.fromSyserr(EBADF, "Operation attempted on closed file");
 }
 
-/* Return a syserr through out error if a file is invalid */
-proc file.check(out error:syserr) {
-  var err: syserr = ENOERR;
-  try {
-    check();
-  } catch e: SystemError {
-    err = e.err;
-  } catch {
-    err = EINVAL;
+/* Throw an error if `this` is not a valid representation of an OS file.
+
+   :throws SystemError: Indicates that `this` does not represent an OS file.
+*/
+proc file.check() throws {
+  on this.home {
+    this.checkAssumingLocal();
   }
-  error = err;
 }
 
 pragma "no doc"
@@ -1325,15 +1465,19 @@ proc file.unlock() {
 }
 */
 
+pragma "no doc"
+proc file.filePlugin() : QioPluginFile? {
+  return qio_file_get_plugin(this._channel_internal);
+}
+
 // File style cannot be modified after the file is created;
 // this prevents race conditions;
 // channel style is protected by channel lock, can be modified.
 pragma "no doc"
 proc file._style:iostyle throws {
-  try check();
-
   var ret:iostyle;
   on this.home {
+    try this.checkAssumingLocal();
     var local_style:iostyle;
     qio_file_get_style(_file_internal, local_style);
     ret = local_style;
@@ -1345,11 +1489,6 @@ proc file._style:iostyle throws {
 
    In order to free the resources allocated for a file, it
    must be closed using this method.
-
-   It is an error to perform any I/O operations on a file
-   that has been closed.
-   It is an error to close a file when it has channels that
-   have not been closed.
 
    Closing a file does not guarantee immediate persistence of the performed
    updates, if any. In cases where immediate persistence is important,
@@ -1363,25 +1502,19 @@ proc file._style:iostyle throws {
    goes out of scope and all channels using that file are closed. Programs
    may also explicitly close a file using this method.
 
-   :arg error: optional argument to capture an error code. If this argument
-               is not provided and an error is encountered, this function
-               will halt with an error message.
+   It is an error to perform any I/O operations on a file that has been closed.
+   It is an error to close a file when it has channels that have not been closed.
+
+   :throws SystemError: Thrown if the file could not be closed.
  */
-proc file.close(out error:syserr) {
-  check(error);
-
-  if !error {
-    on this.home {
-      error = qio_file_close(_file_internal);
-    }
-  }
-}
-
-// documented in error= version
-pragma "no doc"
 proc file.close() throws {
+  if is_c_nil(_file_internal) then
+    throw SystemError.fromSyserr(EBADF, "Operation attempted on an invalid file");
+
   var err:syserr = ENOERR;
-  this.close(err);
+  on this.home {
+    err = qio_file_close(_file_internal);
+  }
   if err then try ioerror(err, "in file.close", this.tryGetPath());
 }
 
@@ -1395,26 +1528,14 @@ only if the channel has been closed or flushed.
 
 This function will typically call the ``fsync`` system call.
 
-:arg error: optional argument to capture an error code. If this argument
-            is not provided and an error is encountered, this function
-            will halt with an error message.
-
+:throws SystemError: Thrown if the file could not be synced.
  */
-proc file.fsync(out error:syserr) {
-  check(error);
-
-  if !error {
-    on this.home {
-      error = qio_file_sync(_file_internal);
-    }
-  }
-}
-
-// documented in the error= version
-pragma "no doc"
 proc file.fsync() throws {
   var err:syserr = ENOERR;
-  this.fsync(err);
+  on this.home {
+    try this.checkAssumingLocal();
+    err = qio_file_sync(_file_internal);
+  }
   if err then try ioerror(err, "in file.fsync", this.tryGetPath());
 }
 
@@ -1429,29 +1550,25 @@ and that this function may not work on all operating systems.
 The function :proc:`Path.file.realPath` is an alternative way
 to get the path to a file.
 
-:arg error: argument to capture an error code. If this argument
-            is not provided and an error is encountered, this function
-            will halt with an error message.
-
+:throws SystemError: Thrown if the path could not be retrieved.
  */
-proc file.getPath(out error:syserr) : string {
-  check(error);
-
-  var ret: string = "unknown";
-  if !error {
-    on this.home {
-      var tmp:c_string;
-      var tmp2:c_string;
-      error = qio_file_path(_file_internal, tmp);
-      if !error {
-        error = qio_shortest_path(_file_internal, tmp2, tmp);
-      }
-      chpl_free_c_string(tmp);
-      if !error {
-        ret = new string(tmp2, needToCopy=false);
-      }
+proc file.path : string throws {
+  var ret: string;
+  var err:syserr = ENOERR;
+  on this.home {
+    try this.checkAssumingLocal();
+    var tmp:c_string;
+    var tmp2:c_string;
+    err = qio_file_path(_file_internal, tmp);
+    if !err {
+      err = qio_shortest_path(_file_internal, tmp2, tmp);
+    }
+    chpl_free_c_string(tmp);
+    if !err {
+      ret = createStringWithOwnedBuffer(tmp2);
     }
   }
+  if err then try ioerror(err, "in file.path");
   return ret;
 }
 
@@ -1462,24 +1579,11 @@ a problem getting the path to the open file.
 
 */
 proc file.tryGetPath() : string {
-  var err:syserr = ENOERR;
-  var ret = this.getPath(err);
-
-  if err then return "unknown";
-  else return ret;
-}
-
-/*
-
-Get the path to an open file. Halt if there is an error getting the path.
-
-*/
-proc file.path : string throws {
-  var err:syserr = ENOERR;
-  var ret:string;
-  ret = this.getPath(err);
-  if err then try ioerror(err, "in file.path");
-  return ret;
+  try {
+    return this.path;
+  } catch {
+    return "unknown";
+  }
 }
 
 /*
@@ -1489,6 +1593,7 @@ change if other channels, tasks or programs are writing to the file.
 
 :returns: the current file length
 
+:throws SystemError: Thrown if the length could not be retrieved.
 */
 proc file.length():int(64) throws {
   var err:syserr = ENOERR;
@@ -1510,23 +1615,23 @@ private param _cwr = "w+";
 
 pragma "no doc"
 proc _modestring(mode:iomode) {
+  use HaltWrappers only;
   select mode {
     when iomode.r do return _r;
     when iomode.rw do return _rw;
     when iomode.cw do return _cw;
     when iomode.cwr do return _cwr;
-    otherwise halt("Invalid mode");
+    otherwise do HaltWrappers.exhaustiveSelectHalt("Invalid iomode");
   }
 }
 
 /*
 
-Open a file on a filesystem or stored at a particular URL. Note that once the
+Open a file on a filesystem. Note that once the
 file is open, you will need to use a :proc:`file.reader` or :proc:`file.writer`
 to create a channel to actually perform I/O operations
 
-:arg path: which file to open (for example, "some/file.txt"). This argument
-           is required unless the ``url=`` argument is used.
+:arg path: which file to open (for example, "some/file.txt").
 :arg iomode: specify whether to open the file for reading or writing and
              whether or not to create the file if it doesn't exist.
              See :type:`iomode`.
@@ -1536,100 +1641,83 @@ to create a channel to actually perform I/O operations
             The provided style will be the default for any channels created for
             on this file, and that in turn will be the default for all I/O
             operations performed with those channels.
-:arg url: optional argument to specify a URL to open. See :mod:`Curl` and
-          :mod:`HDFS` for more information on ``url=`` support for those
-          systems. If HDFS is enabled, this function supports ``url=``
-          arguments of the form "hdfs://<host>:<port>/<path>". If Curl is
-          enabled, this function supports ``url=`` starting with
-          ``http://``, ``https://``, ``ftp://``, ``ftps://``, ``smtp://``,
-          ``smtps://``, ``imap://``, or ``imaps://``
-:returns: an open file to the requested resource. If the ``error=`` argument
-          was provided and the file was not opened because of an error, returns
-          the default :record:`file` value.
+:returns: an open file to the requested resource.
 
+:throws SystemError: Thrown if the file could not be opened.
 */
-
-proc open(path:string="", mode:iomode, hints:iohints=IOHINT_NONE,
-          style:iostyle = defaultIOStyle(), url:string=""): file throws {
-
-  proc parse_hdfs_path(path:string) throws {
-    // hdfs://<host>:<port>/<path>
-    var host_start = path.find("//") + 2;
-    var colon = path.find(":", host_start..);
-    var slash = path.find("/", host_start..);
-    var host_end, port_start, port_end, path_start = 0;
-
-    if colon > 0 {
-      host_end = colon - 1;
-      port_start = colon + 1;
-      if slash > 0 {
-        port_end = slash - 1;
-        path_start = slash + 1;
-      } else {
-        port_end = path.length;
-      }
-    } else {
-      if slash > 0 {
-        host_end = slash - 1;
-        path_start = slash + 1;
-      } else {
-        host_end = path.length;
-      }
-    }
-
-    var host = path[host_start..host_end];
-    var port_str = "";
-    if port_start > 0 then port_str = path[port_start..port_end];
-
-    var port: int;
-    try {
-      port = port_str: int;
-    } catch {
-      throw SystemError.fromSyserr(EINVAL, "invalid port");
-    }
-
-    var file_path = "";
-    if path_start > 0 then file_path = path[path_start..];
-    return (host, port, file_path);
-  }
+proc open(path:string, mode:iomode, hints:iohints=IOHINT_NONE,
+          style:iostyle = defaultIOStyle()): file throws {
 
   var local_style = style;
   var error: syserr = ENOERR;
   var ret: file;
   ret.home = here;
-  if (url != "") {
-    if (url.startsWith("hdfs://")) { // HDFS
-      var (host, port, file_path) = try parse_hdfs_path(url);
-      var fs:c_void_ptr;
 
-      // Since we don't have an auto-destructor for this, we actually need to make
-      // the reference count 1 on this FS after we open this file so that we will
-      // disconnect once we close this file.
-      defer hdfs_do_release(fs);
+  if (path == "") then
+    try ioerror(ENOENT:syserr, "in open: path is the empty string");
 
-      error = hdfs_connect(fs, host.c_str(), port);
-      if error then
-        try ioerror(error, "Unable to connect to HDFS", host);
+  error = qio_file_open_access(ret._file_internal, path.localize().c_str(), _modestring(mode).c_str(), hints, local_style);
+  if error then
+    try ioerror(error, "in open", path);
 
-      error = qio_file_open_access_usr(ret._file_internal, file_path.c_str(), _modestring(mode).c_str(), hints, local_style, fs, hdfs_function_struct_ptr);
-      if error then
-        try ioerror(error, "Unable to open file in HDFS", url);
+  return ret;
+}
 
-    } else if (url.startsWith("http://", "https://", "ftp://", "ftps://", "smtp://", "smtps://", "imap://", "imaps://"))  { // Curl
-      error = qio_file_open_access_usr(ret._file_internal, url.c_str(), _modestring(mode).c_str(), hints, local_style, c_nil, curl_function_struct_ptr);
-      if error then
-        try ioerror(error, "Unable to open URL", url);
+pragma "last resort"
+proc open(path:string="", mode:iomode, hints:iohints=IOHINT_NONE,
+          style:iostyle = defaultIOStyle(), url:string): file throws {
+  compilerError("open with url argument has been deprecated.");
+}
 
-    } else {
-      try ioerror(ENOENT:syserr, "Invalid URL passed to open");
+
+proc openplugin(pluginFile: QioPluginFile, mode:iomode,
+                seekable:bool, style:iostyle) throws {
+  use HaltWrappers only;
+
+  extern proc qio_file_init_plugin(ref file_out:qio_file_ptr_t,
+      file_info:c_void_ptr, flags:c_int, const ref style:iostyle):syserr;
+
+  var local_style = style;
+  var ret:file;
+  ret.home = here;
+
+  var flags:c_int = 0;
+  select mode {
+    when iomode.r {
+      flags |= QIO_FDFLAG_READABLE;
     }
-  } else {
-    if (path == "") then
-      try ioerror(ENOENT:syserr, "in open: Both path and url were blank");
+    when iomode.rw {
+      flags |= QIO_FDFLAG_READABLE;
+      flags |= QIO_FDFLAG_WRITEABLE;
+    }
+    when iomode.cw {
+      flags |= QIO_FDFLAG_WRITEABLE;
+    }
+    when iomode.cwr {
+      flags |= QIO_FDFLAG_READABLE;
+      flags |= QIO_FDFLAG_WRITEABLE;
+    }
+    otherwise do HaltWrappers.exhaustiveSelectHalt("Invalid iomode");
+  }
 
-    error = qio_file_open_access(ret._file_internal, path.localize().c_str(), _modestring(mode).c_str(), hints, local_style);
-    if error then
-      try ioerror(error, "in open", path);
+  if seekable then
+    flags |= QIO_FDFLAG_SEEKABLE;
+
+  var err = qio_file_init_plugin(ret._file_internal, pluginFile:c_void_ptr, flags, style);
+  if err {
+    var path:string = "unknown";
+    if pluginFile {
+      var str:c_string = nil;
+      var len:ssize_t;
+      var path_err = pluginFile.getpath(str, len);
+      if path_err {
+        path = "unknown";
+      } else {
+        path = createStringWithOwnedBuffer(str, len);
+      }
+    }
+
+    try ioerror(err, "in openplugin", path);
   }
 
   return ret;
@@ -1637,18 +1725,20 @@ proc open(path:string="", mode:iomode, hints:iohints=IOHINT_NONE,
 
 // documented in open() throws version
 pragma "no doc"
-proc open(out error:syserr, path:string="", mode:iomode, hints:iohints=IOHINT_NONE,
-          style:iostyle = defaultIOStyle(), url:string=""):file {
-  var err: syserr = ENOERR;
+proc open(out error:syserr, path:string="",
+          mode:iomode, hints:iohints=IOHINT_NONE,
+          style:iostyle = defaultIOStyle()):file {
+  compilerWarning("This version of open() is deprecated; " +
+                  "please switch to a throwing version");
+  error = ENOERR;
   var ret: file;
   try {
-    ret = open(path, mode, hints, style, url);
+    ret = open(path, mode, hints, style);
   } catch e: SystemError {
-    err = e.err;
+    error = e.err;
   } catch {
-    err = EINVAL;
+    error = EINVAL;
   }
-  error = err;
   return ret;
 }
 
@@ -1673,9 +1763,6 @@ The system file descriptor will be closed when the Chapel file is closed.
 
 :arg fd: a system file descriptor (obtained with :proc:`Sys.sys_open` or
          :proc:`Sys.sys_connect` for example).
-:arg error: optional argument to capture an error code. If this argument
-            is not provided and an error is encountered, this function
-            will halt with an error message.
 :arg hints: optional argument to specify any hints to the I/O system about
             this file. See :type:`iohints`.
 :arg style: optional argument to specify I/O style associated with this file.
@@ -1683,32 +1770,23 @@ The system file descriptor will be closed when the Chapel file is closed.
             on this file, and that in turn will be the default for all I/O
             operations performed with those channels.
 :returns: an open :record:`file` using the specified file descriptor.
-          If the ``error=`` argument
-          was provided and the file was not opened because of an error, returns
-          the default :record:`file` value.
 
-*/
-proc openfd(fd: fd_t, out error:syserr, hints:iohints=IOHINT_NONE, style:iostyle = defaultIOStyle()):file {
+:throws SystemError: Thrown if the file descriptor could not be retrieved.
+
+ */
+proc openfd(fd: fd_t, hints:iohints=IOHINT_NONE, style:iostyle = defaultIOStyle()):file throws {
   var local_style = style;
   var ret:file;
   ret.home = here;
-  error = qio_file_init(ret._file_internal, chpl_cnullfile(), fd, hints, local_style, 0);
-  // On return, either ret._file_internal.ref_cnt == 1, or ret._file_internal is NULL.
-  // error should be nonzero in the latter case.
-  return ret;
-}
+  var err = qio_file_init(ret._file_internal, chpl_cnullfile(), fd, hints, local_style, 0);
 
-// documented in the error= version
-pragma "no doc"
-proc openfd(fd: fd_t, hints:iohints=IOHINT_NONE, style:iostyle = defaultIOStyle()):file throws {
-  var err:syserr = ENOERR;
-  var ret = openfd(fd, err, hints, style);
+  // On return, either ret._file_internal.ref_cnt == 1, or ret._file_internal is NULL.
+  // err should be nonzero in the latter case.
   if err {
     var path_cs:c_string;
-    var e2:syserr = ENOERR;
-    e2 = qio_file_path_for_fd(fd, path_cs);
-    var path = if e2 then "unknown"
-                     else new string(path_cs, needToCopy=false);
+    var path_err = qio_file_path_for_fd(fd, path_cs);
+    var path = if path_err then "unknown"
+                           else createStringWithOwnedBuffer(path_cs);
     try ioerror(err, "in openfd", path);
   }
   return ret;
@@ -1728,9 +1806,6 @@ that once the file is open, you will need to use a :proc:`file.reader` or
 
 
 :arg fp: a C ``FILE*`` to work with
-:arg error: optional argument to capture an error code. If this argument
-            is not provided and an error is encountered, this function
-            will halt with an error message.
 :arg hints: optional argument to specify any hints to the I/O system about
             this file. See :type:`iohints`.
 :arg style: optional argument to specify I/O style associated with this file.
@@ -1738,32 +1813,22 @@ that once the file is open, you will need to use a :proc:`file.reader` or
             on this file, and that in turn will be the default for all I/O
             operations performed with those channels.
 :returns: an open :record:`file` that uses the underlying FILE* argument.
-          If the ``error=`` argument
-          was provided and the file was not opened because of an error, returns
-          the default :record:`file` value.
 
+:throws SystemError: Thrown if the C file could not be retrieved.
  */
-proc openfp(fp: _file, out error:syserr, hints:iohints=IOHINT_NONE, style:iostyle = defaultIOStyle()):file {
+proc openfp(fp: _file, hints:iohints=IOHINT_NONE, style:iostyle = defaultIOStyle()):file throws {
   var local_style = style;
   var ret:file;
   ret.home = here;
-  error = qio_file_init(ret._file_internal, fp, -1, hints, local_style, 1);
+  var err = qio_file_init(ret._file_internal, fp, -1, hints, local_style, 1);
+
   // On return either ret._file_internal.ref_cnt == 1, or ret._file_internal is NULL.
   // error should be nonzero in the latter case.
-  return ret;
-}
-
-// documented in the error= version
-pragma "no doc"
-proc openfp(fp: _file, hints:iohints=IOHINT_NONE, style:iostyle = defaultIOStyle()):file throws {
-  var err:syserr = ENOERR;
-  var ret = openfp(fp, err, hints, style);
   if err {
     var path_cs:c_string;
-    var e2:syserr = ENOERR;
-    e2 = qio_file_path_for_fp(fp, path_cs);
-    var path = if e2 then "unknown"
-                     else new string(path_cs, needToCopy=false);
+    var path_err = qio_file_path_for_fp(fp, path_cs);
+    var path = if path_err then "unknown"
+                           else createStringWithOwnedBuffer(path_cs);
     try ioerror(err, "in openfp", path);
   }
   return ret;
@@ -1782,34 +1847,23 @@ deleted upon closing.
 Temporary files are always opened with :type:`iomode` ``iomode.cwr``;
 that is, a new file is created that supports both writing and reading.
 
-:arg error: optional argument to capture an error code. If this argument
-            is not provided and an error is encountered, this function
-            will halt with an error message.
 :arg hints: optional argument to specify any hints to the I/O system about
             this file. See :type:`iohints`.
 :arg style: optional argument to specify I/O style associated with this file.
             The provided style will be the default for any channels created for
             on this file, and that in turn will be the default for all I/O
             operations performed with those channels.
-:returns: an open temporary file. If the ``error=`` argument
-          was provided and the file was not opened because of an error, returns
-          the default :record:`file` value.
+:returns: an open temporary file.
 
+:throws SystemError: Thrown if the temporary file could not be opened.
  */
-proc opentmp(out error:syserr, hints:iohints=IOHINT_NONE, style:iostyle = defaultIOStyle()):file {
+proc opentmp(hints:iohints=IOHINT_NONE, style:iostyle = defaultIOStyle()):file throws {
   var local_style = style;
   var ret:file;
   ret.home = here;
-  error = qio_file_open_tmp(ret._file_internal, hints, local_style);
-  // On return ret._file_internal.ref_cnt == 1.
-  return ret;
-}
 
-// documented in the error= version
-pragma "no doc"
-proc opentmp(hints:iohints=IOHINT_NONE, style:iostyle = defaultIOStyle()):file throws {
-  var err:syserr = ENOERR;
-  var ret = opentmp(err, hints, style);
+  // On return ret._file_internal.ref_cnt == 1.
+  var err = qio_file_open_tmp(ret._file_internal, hints, local_style);
   if err then try ioerror(err, "in opentmp");
   return ret;
 }
@@ -1823,33 +1877,21 @@ perform I/O operations.
 
 The resulting file supports both reading and writing.
 
-:arg error: optional argument to capture an error code. If this argument
-            is not provided and an error is encountered, this function
-            will halt with an error message.
 :arg style: optional argument to specify I/O style associated with this file.
             The provided style will be the default for any channels created for
             on this file, and that in turn will be the default for all I/O
             operations performed with those channels.
-:returns: an open memory file. If the ``error=`` argument
-          was provided and the file was not opened because of an error, returns
-          the default :record:`file` value.
+:returns: an open memory file.
 
+:throws SystemError: Thrown if the memory buffered file could not be opened.
  */
-proc openmem(out error:syserr, style:iostyle = defaultIOStyle()) {
+proc openmem(style:iostyle = defaultIOStyle()):file throws {
   var local_style = style;
   var ret:file;
   ret.home = here;
-  error = qio_file_open_mem(ret._file_internal, QBUFFER_PTR_NULL, local_style);
+
   // On return ret._file_internal.ref_cnt == 1.
-  return ret;
-}
-
-
-// documented in the error= version
-pragma "no doc"
-proc openmem(style:iostyle = defaultIOStyle()):file throws {
-  var err:syserr = ENOERR;
-  var ret = openmem(err, style);
+  var err = qio_file_open_mem(ret._file_internal, QBUFFER_PTR_NULL, local_style);
   if err then try ioerror(err, "in openmem");
   return ret;
 }
@@ -1893,7 +1935,7 @@ record channel {
    */
   param locking:bool;
   pragma "no doc"
-  var home:locale;
+  var home:locale = here;
   pragma "no doc"
   var _channel_internal:qio_channel_ptr_t = QIO_CHANNEL_PTR_NULL;
 
@@ -1905,7 +1947,7 @@ record channel {
   // we are working on a channel created for running writeThis/readThis.
   // Therefore further locking by the same task is not necessary.
   pragma "no doc"
-  var _readWriteThisFromLocale:locale;
+  var _readWriteThisFromLocale:locale?;
 }
 
 pragma "no doc"
@@ -1938,10 +1980,14 @@ proc channel.init(x: channel) {
   this.home = x.home;
   this._channel_internal = x._channel_internal;
   _readWriteThisFromLocale = x._readWriteThisFromLocale;
-  this.initDone();
+  this.complete();
   on x.home {
     qio_channel_retain(x._channel_internal);
   }
+}
+
+proc channel.init=(x: this.type) {
+  this.init(x);
 }
 
 //
@@ -1953,7 +1999,7 @@ proc channel.init(x: channel) {
 pragma "no doc"
 proc channel.init(param writing:bool, param kind:iokind, param locking:bool,
                   home: locale, _channel_internal:qio_channel_ptr_t,
-                  _readWriteThisFromLocale: locale) {
+                  _readWriteThisFromLocale: locale?) {
   this.writing = writing;
   this.kind = kind;
   this.locking = locking;
@@ -1964,12 +2010,7 @@ proc channel.init(param writing:bool, param kind:iokind, param locking:bool,
 
 pragma "no doc"
 proc channel.init(param writing:bool, param kind:iokind, param locking:bool, f:file, out error:syserr, hints:c_int, start:int(64), end:int(64), in local_style:iostyle) {
-  // Note that once issue #7960 is resolved, the following could become a
-  // call to this.init(writing, kind, locking)...
-  this.writing = writing;
-  this.kind = kind;
-  this.locking = locking;
-  this.initDone();
+  this.init(writing, kind, locking);
   on f.home {
     this.home = f.home;
     if kind != iokind.dynamic {
@@ -1992,25 +2033,27 @@ proc ref channel.deinit() {
 
 /*
 
-Represents a Unicode code point. I/O routines (such as :proc:`channel.read`
+Represents a Unicode codepoint. I/O routines (such as :proc:`channel.read`
 and :proc:`channel.write`) can use arguments of this type in order to read or
-write a single Unicode code point.
+write a single Unicode codepoint.
 
  */
 record ioChar {
-  /* The code point value */
+  /* The codepoint value */
   var ch:int(32);
   pragma "no doc"
   proc writeThis(f) {
-    halt("ioChar.writeThis must handled by channel");
+    // ioChar.writeThis should not be called;
+    // I/O routines should handle ioChar directly
+    assert(false);
   }
 }
 
 pragma "no doc"
-inline proc _cast(type t, x: ioChar) where t == string {
+inline proc _cast(type t:string, x: ioChar) {
   var csc: c_string =  qio_encode_to_string(x.ch);
   // The caller has responsibility for freeing the returned string.
-  return new string(csc, needToCopy=false);
+  return createStringWithOwnedBuffer(csc);
 }
 
 
@@ -2042,7 +2085,7 @@ record ioNewline {
 }
 
 pragma "no doc"
-inline proc _cast(type t, x: ioNewline) where t == string {
+inline proc _cast(type t:string, x: ioNewline) {
   return "\n";
 }
 
@@ -2071,7 +2114,7 @@ record ioLiteral {
 }
 
 pragma "no doc"
-inline proc _cast(type t, x: ioLiteral) where t == string {
+inline proc _cast(type t:string, x: ioLiteral) {
   return x.val;
 }
 
@@ -2094,7 +2137,7 @@ record ioBits {
 }
 
 pragma "no doc"
-inline proc _cast(type t, x: ioBits) where t == string {
+inline proc _cast(type t:string, x: ioBits) {
   const ret = "ioBits(v=" + x.v:string + ", nbits=" + x.nbits:string + ")";
   return ret;
 }
@@ -2110,7 +2153,7 @@ proc channel._ch_ioerror(error:syserr, msg:string) throws {
     var err:syserr = ENOERR;
     err = qio_channel_path_offset(locking, _channel_internal, tmp_path, tmp_offset);
     if !err {
-      path = new string(tmp_path, needToCopy=false);
+      path = createStringWithOwnedBuffer(tmp_path);
       offset = tmp_offset;
     }
   }
@@ -2128,7 +2171,7 @@ proc channel._ch_ioerror(errstr:string, msg:string) throws {
     var err:syserr = ENOERR;
     err = qio_channel_path_offset(locking, _channel_internal, tmp_path, tmp_offset);
     if !err {
-      path = new string(tmp_path, needToCopy=false);
+      path = createStringWithOwnedBuffer(tmp_path);
       offset = tmp_offset;
     }
   }
@@ -2139,26 +2182,19 @@ proc channel._ch_ioerror(errstr:string, msg:string) throws {
 /*
    Acquire a channel's lock.
 
-   :arg error: optional argument to capture an error code. If this argument
-               is not provided and an error is encountered, this function
-               will halt with an error message.
-
+   :throws SystemError: Thrown if the lock could not be acquired.
  */
-inline proc channel.lock(out error:syserr) {
-  error = ENOERR;
-  if locking {
-    on this.home {
-      error = qio_channel_lock(_channel_internal);
-    }
-  }
-}
-
-
-// documented in error= version
-pragma "no doc"
 inline proc channel.lock() throws {
   var err:syserr = ENOERR;
-  this.lock(err);
+
+  if is_c_nil(_channel_internal) then
+    throw SystemError.fromSyserr(EINVAL, "Operation attempted on an invalid channel");
+
+  if locking {
+    on this.home {
+      err = qio_channel_lock(_channel_internal);
+    }
+  }
   if err then try this._ch_ioerror(err, "in lock");
 }
 
@@ -2174,11 +2210,16 @@ inline proc channel.unlock() {
 }
 
 /*
-   Return the current offset of a channel. Note that other operations
-   on the channel (e.g. by other tasks) might change the offset. If you
-   are doing another operation on the channel based upon the current offset,
-   you should use :proc:`channel.lock`, :proc:`channel._offset`, and
-   :proc:`channel.unlock` to prevent race conditions.
+   Return the current offset of a channel.
+
+   .. warning::
+
+      If the channel can be used by multiple tasks, take care
+      when doing operations that rely on the channel's current offset.
+      To prevent race conditions, first lock the channel with
+      :proc:`channel.lock`, do the operations, then unlock it
+      with :proc:`channel.unlock`.
+      While holding the lock, use :proc:`channel._offset` instead.
 
    :returns: the current offset of the channel
  */
@@ -2203,50 +2244,124 @@ proc channel.offset():int(64) {
    other data if it is stored in the channel's buffer, for example with
    :proc:`channel._mark` and :proc:`channel._revert`.
 
-   :arg error: optional argument to capture an error code. If this argument
-               is not provided and an error is encountered, this function
-               will halt with an error message.
-
+   :throws SystemError: Throws if the channel offset was not moved.
  */
-proc channel.advance(amount:int(64), ref error:syserr) {
-  on this.home {
-    try! this.lock();
-    error = qio_channel_advance(false, _channel_internal, amount);
-    this.unlock();
-  }
-}
-
-// documented with the error= version
-pragma "no doc"
 proc channel.advance(amount:int(64)) throws {
+  var err:syserr = ENOERR;
   on this.home {
-    try! this.lock();
-    var err = qio_channel_advance(false, _channel_internal, amount);
-    if err then try this._ch_ioerror(err, "in advance");
-    this.unlock();
+    try this.lock(); defer { this.unlock(); }
+    err = qio_channel_advance(false, _channel_internal, amount);
   }
-}
-
-pragma "no doc"
-proc channel.advancePastByte(byte:uint(8), ref error:syserr) {
-  on this.home {
-    try! this.lock();
-    error = qio_channel_advance_past_byte(false, _channel_internal, byte:c_int);
-    this.unlock();
-  }
+  if err then try this._ch_ioerror(err, "in advance");
 }
 
 /*
    Reads until ``byte`` is found and then leave the channel offset
-   just after it. If that byte is never found, raises an EOFError.
+   just after it.
+
+   :throws EOFError: if the requested `byte` could not be found.
+   :throws SystemError: if another error occurred.
  */
 proc channel.advancePastByte(byte:uint(8)) throws {
+  var err:syserr = ENOERR;
   on this.home {
-    try! this.lock();
-    var err = qio_channel_advance_past_byte(false, _channel_internal, byte:c_int);
-    if err then try this._ch_ioerror(err, "in advanceToByte");
-    this.unlock();
+    try this.lock(); defer { this.unlock(); }
+    err = qio_channel_advance_past_byte(false, _channel_internal, byte:c_int);
   }
+  if err then try this._ch_ioerror(err, "in advanceToByte");
+}
+
+/*
+   *mark* a channel - that is, save the current offset of the channel
+   on its *mark stack*. This function can only be called on a channel
+   with ``locking==false``.
+
+   The *mark stack* stores several channel offsets. For any channel offset that
+   is between the minimum and maximum value in the *mark stack*, I/O operations
+   on the channel will keep that region of the file buffered in memory so that
+   those operations can be un-done. As a result, it is possible to perform *I/O
+   transactions* on a channel. The basic steps for an *I/O transaction* are:
+
+    * *mark* the current position with :proc:`channel.mark`
+    * do something speculative (e.g. try to read 200 bytes of anything followed
+      by a 'B')
+    * if the speculative operation was successful,  commit the changes by
+      calling :proc:`channel.commit`
+    * if the speculative operation was not successful, go back to the *mark* by
+      calling :proc:`channel.revert`. Subsequent I/O operations will work
+      as though nothing happened.
+
+  .. note::
+
+    Note that it is possible to request an entire file be buffered in memory
+    using this feature, for example by *marking* at offset=0 and then
+    advancing to the end of the file. It is important to be aware of these
+    memory space requirements.
+
+  :returns: The offset that was marked
+  :throws: SystemError: if marking the channel failed
+ */
+inline proc channel.mark() throws where this.locking == false {
+  const offset = this.offset();
+  const err = qio_channel_mark(false, _channel_internal);
+
+  if err then
+    throw SystemError.fromSyserr(err);
+
+  return offset;
+}
+
+/*
+   Abort an *I/O transaction*. See :proc:`channel.mark`. This function
+   will pop the last element from the *mark stack* and then leave the
+   previous channel offset unchanged.  This function can only be
+   called on a channel with ``locking==false``.
+*/
+inline proc channel.revert() where this.locking == false {
+  qio_channel_revert_unlocked(_channel_internal);
+}
+
+/*
+   Commit an *I/O transaction*. See :proc:`channel.mark`.  This
+   function will pop the last element from the *mark stack* and then
+   set the channel offset to the popped offset.  This function can
+   only be called on a channel with ``locking==false``.
+
+*/
+inline proc channel.commit() where this.locking == false {
+  qio_channel_commit_unlocked(_channel_internal);
+}
+
+/*
+   Reset a channel to point to a new part of a file.
+   This function allows one to jump to a different part of a
+   file without creating a new channel. It can only be called
+   on a channel with ``locking==false``.
+
+   Besides setting a new start position, this function allows
+   one to specify a new end position. Specifying the end position
+   is usually not necessary for correct behavior but it might be
+   an important performance optimization since the channel will not
+   try to read data outside of the start..end region.
+
+   This function will, in most cases, discard the channel's buffer.
+   When writing, the data will be saved to the file before discarding.
+
+   :arg start: the new start offset, measured in bytes and counting from 0
+   :arg end: optionally, a new end offset, measured in bytes and counting from 0
+   :throws: SystemError: if seeking failed. Possible reasons include
+                         that the file is not seekable, or that the
+                         channel is marked.
+ */
+proc channel.seek(start:int, end:int = max(int)) throws {
+
+  if this.locking then
+    compilerError("Cannot seek on a locking channel");
+
+  const err = qio_channel_seek(_channel_internal, start, end);
+
+  if err then
+    throw SystemError.fromSyserr(err);
 }
 
 
@@ -2266,65 +2381,48 @@ inline proc channel._offset():int(64) {
   return ret;
 }
 
-
 /*
-   *mark* a channel - that is, save the current offset of the channel on its
-   *mark stack*. This function should only be called on a channel that is
-   already locked with with :proc:`channel.lock`.
+   This routine is identical to :proc:`channel.mark` except that it
+   can be called on channels with ``locking==true`` and should be
+   called only once the channel has been locked with
+   :proc:`channel.lock`.  The channel should not be unlocked with
+   :proc:`channel.unlock` until after the mark has been committed with
+   :proc:`channel._commit` or reverted with :proc:`channel._revert`.
 
-   The *mark stack* stores several channel offsets. For any channel offset that
-   is between the minimum and maximum value in the *mark stack*, I/O operations
-   on the channel will keep that region of the file buffered in memory so that
-   those operations can be un-done. As a result, it is possible to perform *I/O
-   transactions* on a channel. The basic steps for an *I/O transaction* are:
+   See :proc:`channel.mark` for details other than the locking
+   discipline.
 
-    * lock the channel with :proc:`channel.lock`
-      (or work on an already-locked channel)
-    * *mark* the current position with :proc:`channel._mark`
-    * do something speculative (e.g. try to read 200 bytes of anything followed
-      by a 'B')
-    * if the speculative operation was successful,  commit the changes by
-      calling :proc:`channel._commit`
-    * if the speculative operation was not successful, go back to the *mark* by
-      calling :proc:`channel._revert`. Subsequent I/O operations will work
-      as though nothing happened.
-    * unlock the channel with :proc:`channel.unlock` if necessary
-
-  .. note::
-
-    Note that it is possible to request an entire file be buffered in memory
-    using this feature, for example by *marking* at offset=0 and then
-    advancing to the end of the file. It is important to be aware of these
-    memory space requirements.
-
-  :returns: an error code, if an error was encountered.
-
+  :returns: The offset that was marked
+  :throws: SystemError: if marking the channel failed
  */
-// TODO - use the out error= style and otherwise halt on error, for consistency
-inline proc channel._mark():syserr {
-  return qio_channel_mark(false, _channel_internal);
+inline proc channel._mark() throws {
+  const offset = this.offset();
+  const err = qio_channel_mark(false, _channel_internal);
+
+  if err then
+    throw SystemError.fromSyserr(err);
+
+  return offset;
 }
 
 /*
-
-   Abort an *I/O transaction*. See :proc:`channel._mark`. This function should
-   only be called on a channel that has already been locked and marked.  This
-   function will pop the last element from the *mark stack* and then leave the
-   previous channel offset unchanged.
-
- */
+   Abort an *I/O transaction*. See :proc:`channel._mark`.  This
+   function will pop the last element from the *mark stack* and then
+   leave the previous channel offset unchanged.  This function should
+   only be called on a channel that has already been locked and
+   marked.
+*/
 inline proc channel._revert() {
   qio_channel_revert_unlocked(_channel_internal);
 }
 
 /*
-
-   Commit an *I/O transaction*. See :proc:`channel._mark`. This function should
-   only be called on a channel that has already been locked and marked.  This
-   function will pop the last element from the *mark stack* and then set the
-   channel offset to the popped offset.
-
- */
+   Commit an *I/O transaction*. See :proc:`channel._mark`.  This
+   function will pop the last element from the *mark stack* and then
+   set the channel offset to the popped offset.  This function should
+   only be called on a channel that has already been locked and
+   marked.
+*/
 inline proc channel._commit() {
   qio_channel_commit_unlocked(_channel_internal);
 }
@@ -2386,17 +2484,27 @@ proc channel.getLocaleOfIoRequest() {
   return ret;
 }
 
+// QIO plugins don't have stable interface yet, hence no-doc
+// only works when called on locale owning channel.
+pragma "no doc"
+proc channel.channelPlugin() : borrowed QioPluginChannel? {
+  var vptr = qio_channel_get_plugin(this._channel_internal);
+  return vptr:borrowed QioPluginChannel?;
+}
+pragma "no doc"
+proc channel.filePlugin() : borrowed QioPluginFile? {
+  var vptr = qio_file_get_plugin(qio_channel_get_file(this._channel_internal));
+  return vptr:borrowed QioPluginFile?;
+}
+
+
 /*
 
-Open a file at a particular path or URL and return a reading channel for it.
+Open a file at a particular path and return a reading channel for it.
 This function is equivalent to calling :proc:`open` and then
 :proc:`file.reader` on the resulting file.
 
-:arg err: optional argument to capture an error code. If this argument
-          is not provided and an error is encountered, this function
-          will halt with an error message.
-:arg path: which file to open (for example, "some/file.txt"). This argument
-           is required unless the ``url=`` argument is used.
+:arg path: which file to open (for example, "some/file.txt").
 :arg kind: :type:`iokind` compile-time argument to determine the
             corresponding parameter of the :record:`channel` type. Defaults
             to ``iokind.dynamic``, meaning that the associated
@@ -2413,70 +2521,33 @@ This function is equivalent to calling :proc:`open` and then
           to a ``max(int)`` - meaning no end point.
 :arg hints: optional argument to specify any hints to the I/O system about
             this file. See :type:`iohints`.
-:arg url: optional argument to specify a URL to open. See :mod:`Curl` and
-          :mod:`HDFS` for more information on ``url=`` support for those
-          systems. If HDFS is enabled, this function supports ``url=``
-          arguments of the form "hdfs://<host>:<port>/<path>". If Curl is
-          enabled, this function supports ``url=`` starting with
-          ``http://``, ``https://``, ``ftp://``, ``ftps://``, ``smtp://``,
-          ``smtps://``, ``imap://``, or ``imaps://``
-:returns: an open reading channel to the requested resource. If the ``error=``
-          argument was provided and the channel was not opened because of an
-          error, returns the default :record:`channel` value.
+:returns: an open reading channel to the requested resource.
 
+:throws SystemError: Thrown if a reading channel could not be returned.
  */
 // We can simply call channel.close() on these, since the underlying file will
 // be closed once we no longer have any references to it (which in this case,
 // since we only will have one reference, will be right after we close this
 // channel presumably).
 // TODO: include optional iostyle argument for consistency
-proc openreader(out error: syserr, path:string="", param kind=iokind.dynamic, param locking=true,
-    start:int(64) = 0, end:int(64) = max(int(64)), hints:iohints = IOHINT_NONE,
-    url:string=""): channel(false, kind, locking) {
-  var fl:file = open(error=error, path, iomode.r, url=url);
-  if error then
-    return new channel(writing=false, kind=kind, locking=locking);
+proc openreader(path:string,
+                param kind=iokind.dynamic, param locking=true,
+                start:int(64) = 0, end:int(64) = max(int(64)),
+                hints:iohints = IOHINT_NONE,
+                style:iostyle = defaultIOStyle())
+    : channel(false, kind, locking) throws {
 
-  var fl_style: iostyle;
-  try {
-    fl_style = fl._style;
-  } catch e: SystemError {
-    error = e.err;
-  } catch {
-    error = EINVAL;
-  }
-
-  var reader = fl.reader(error=error, kind, locking, start, end, hints, fl_style);
-  // If we decrement the ref count after we open this channel, ref_cnt fl == 1.
-  // Then, when we leave this function, Chapel will view this file as leaving scope,
-  // and not having any handles attached to it, it will close the underlying file for the channel.
-  /*qio_file_release(fl._file_internal);*/
-  // TODO.
-  return reader;
-}
-
-// documented in error= version
-pragma "no doc"
-proc openreader(path:string="", param kind=iokind.dynamic, param locking=true,
-    start:int(64) = 0, end:int(64) = max(int(64)), hints:iohints = IOHINT_NONE,
-    url:string=""):channel(false, kind, locking) throws {
-  var err:syserr = ENOERR;
-  var reader = openreader(error=err, path=path, kind=kind, locking=locking, start=start, end=end, hints=hints, url=url);
-  if err then try ioerror(err, "in openreader()");
-  return reader;
+  var fl:file = try open(path, iomode.r);
+  return try fl.reader(kind, locking, start, end, hints, style);
 }
 
 /*
 
-Open a file at a particular path or URL and return a writing channel for it.
+Open a file at a particular path and return a writing channel for it.
 This function is equivalent to calling :proc:`open` with ``iomode.cwr`` and then
 :proc:`file.writer` on the resulting file.
 
-:arg error: optional argument to capture an error code. If this argument
-            is not provided and an error is encountered, this function
-            will halt with an error message.
-:arg path: which file to open (for example, "some/file.txt"). This argument
-           is required unless the ``url=`` argument is used.
+:arg path: which file to open (for example, "some/file.txt").
 :arg kind: :type:`iokind` compile-time argument to determine the
            corresponding parameter of the :record:`channel` type. Defaults
            to ``iokind.dynamic``, meaning that the associated
@@ -2493,54 +2564,20 @@ This function is equivalent to calling :proc:`open` with ``iomode.cwr`` and then
           to a ``max(int)`` - meaning no end point.
 :arg hints: optional argument to specify any hints to the I/O system about
             this file. See :type:`iohints`.
-:arg url: optional argument to specify a URL to open. See :mod:`Curl` and
-          :mod:`HDFS` for more information on ``url=`` support for those
-          systems. If HDFS is enabled, this function supports ``url=``
-          arguments of the form "hdfs://<host>:<port>/<path>". If Curl is
-          enabled, this function supports ``url=`` starting with
-          ``http://``, ``https://``, ``ftp://``, ``ftps://``, ``smtp://``,
-          ``smtps://``, ``imap://``, or ``imaps://``
-:returns: an open reading channel to the requested resource. If the ``error=``
-          argument was provided and the channel was not opened because of an
-          error, returns the default :record:`channel` value.
+:returns: an open writing channel to the requested resource.
 
+:throws SystemError: Thrown if a writing channel could not be returned.
 */
-proc openwriter(out error: syserr, path:string="", param kind=iokind.dynamic, param locking=true,
-    start:int(64) = 0, end:int(64) = max(int(64)), hints:iohints = IOHINT_NONE,
-    url:string=""): channel(true, kind, locking) {
-  var fl:file = open(error=error, path, iomode.cw, url=url);
-  if error then
-    return new channel(writing=true, kind=kind, locking=locking);
+proc openwriter(path:string,
+                param kind=iokind.dynamic, param locking=true,
+                start:int(64) = 0, end:int(64) = max(int(64)),
+                hints:iohints = IOHINT_NONE,
+                style:iostyle = defaultIOStyle())
+    : channel(true, kind, locking) throws {
 
-  var fl_style: iostyle;
-  try {
-    fl_style = fl._style;
-  } catch e: SystemError {
-    error = e.err;
-  } catch {
-    error = EINVAL;
-  }
-
-  var writer = fl.writer(error=error, kind, locking, start, end, hints, fl_style);
-  // Need to look at this some more and verify it:
-  // If we decrement the ref count after we open this channel, ref_cnt fl == 1.
-  // Then, when we leave this function, Chapel will view this file as leaving scope,
-  // and not having any handles attached to it, it will close the underlying file for the channel.
-  /*qio_file_release(fl._file_internal);*/
-  return writer;
+  var fl:file = try open(path, iomode.cw);
+  return try fl.writer(kind, locking, start, end, hints, style);
 }
-
-// documented in the error= version
-pragma "no doc"
-proc openwriter(path:string="", param kind=iokind.dynamic, param locking=true,
-    start:int(64) = 0, end:int(64) = max(int(64)), hints:iohints = IOHINT_NONE,
-    url:string=""): channel(true, kind, locking) throws {
-  var err: syserr = ENOERR;
-  var writer = openwriter(error=err, path=path, kind=kind, locking=locking, start=start, end=end, hints=hints, url=url);
-  if err then try ioerror(err, "in openwriter()");
-  return writer;
-}
-
 
 /*
    Create a :record:`channel` that supports reading from a file. See
@@ -2557,9 +2594,6 @@ proc openwriter(path:string="", param kind=iokind.dynamic, param locking=true,
    the channel will produce the error ``EEOF`` (and return `false` in many
    cases such as :proc:`channel.read`) to indicate that the end was reached.
 
-   :arg error: optional argument to capture an error code. If this argument
-               is not provided and an error is encountered, this function
-               will halt with an error message.
    :arg kind: :type:`iokind` compile-time argument to determine the
               corresponding parameter of the :record:`channel` type. Defaults
               to ``iokind.dynamic``, meaning that the associated
@@ -2582,61 +2616,46 @@ proc openwriter(path:string="", param kind=iokind.dynamic, param locking=true,
                default value will be the :record:`iostyle` associated with
                this file.
 
+   :throws SystemError: Thrown if a file reader channel could not be returned.
  */
 // It is the responsibility of the caller to release the returned channel
 // if the error code is nonzero.
 // The return error code should be checked to avoid double-deletion errors.
-proc file.reader(out error:syserr, param kind=iokind.dynamic, param locking=true, start:int(64) = 0, end:int(64) = max(int(64)), hints:iohints = IOHINT_NONE, style:iostyle = this._style): channel(false, kind, locking) {
-  check(error);
-
+proc file.reader(param kind=iokind.dynamic, param locking=true, start:int(64) = 0,
+                 end:int(64) = max(int(64)), hints:iohints = IOHINT_NONE,
+                 style:iostyle = this._style): channel(false, kind, locking) throws {
   var ret:channel(false, kind, locking);
-  if !error {
-    on this.home {
-      ret = new channel(false, kind, locking, this, error, hints, start, end, style);
-    }
-  }
-  return ret;
-}
-
-// documented in the error= version
-pragma "no doc"
-proc file.reader(param kind=iokind.dynamic, param locking=true, start:int(64) = 0, end:int(64) = max(int(64)), hints:iohints = IOHINT_NONE, style:iostyle = this._style): channel(false, kind, locking) throws {
   var err:syserr = ENOERR;
-  var ret = this.reader(err, kind, locking, start, end, hints, style);
+  on this.home {
+    try this.checkAssumingLocal();
+    ret = new channel(false, kind, locking, this, err, hints, start, end, style);
+  }
   if err then try ioerror(err, "in file.reader", this.tryGetPath());
+
   return ret;
 }
 
 /* Iterate over all of the lines in a file.
 
-   :arg error: optional argument to capture an error code. If this argument
-               is not provided and an error is encountered, this function
-               will halt with an error message.
    :returns: an object which yields strings read from the file
- */
-proc file.lines(out error:syserr, param locking:bool = true, start:int(64) = 0, end:int(64) = max(int(64)), hints:iohints = IOHINT_NONE, in local_style:iostyle = this._style) {
-  check(error);
 
+   :throws SystemError: Thrown if an ItemReader could not be returned.
+ */
+proc file.lines(param locking:bool = true, start:int(64) = 0, end:int(64) = max(int(64)),
+                hints:iohints = IOHINT_NONE, in local_style:iostyle = this._style) throws {
   local_style.string_format = QIO_STRING_FORMAT_TOEND;
   local_style.string_end = 0x0a; // '\n'
   param kind = iokind.dynamic;
+
   var ret:ItemReader(string, kind, locking);
-
-  if !error {
-    on this.home {
-      var ch = new channel(false, kind, locking, this, error, hints, start, end, local_style);
-      ret = new ItemReader(string, kind, locking, ch);
-    }
-  }
-  return ret;
-}
-
-// documented in the error= version
-pragma "no doc"
-proc file.lines(param locking:bool = true, start:int(64) = 0, end:int(64) = max(int(64)), hints:iohints = IOHINT_NONE, style:iostyle = this._style) throws {
   var err:syserr = ENOERR;
-  var ret = this.lines(err, locking, start, end, hints, style);
+  on this.home {
+    try this.checkAssumingLocal();
+    var ch = new channel(false, kind, locking, this, err, hints, start, end, local_style);
+    ret = new ItemReader(string, kind, locking, ch);
+  }
   if err then try ioerror(err, "in file.lines", this.tryGetPath());
+
   return ret;
 }
 
@@ -2660,9 +2679,6 @@ proc file.lines(param locking:bool = true, start:int(64) = 0, end:int(64) = max(
    all channels to a file are closed, that file will have a size equal to the
    last position written to by any channel.
 
-   :arg error: optional argument to capture an error code. If this argument
-               is not provided and an error is encountered, this function
-               will halt with an error message.
    :arg kind: :type:`iokind` compile-time argument to determine the
               corresponding parameter of the :record:`channel` type. Defaults
               to ``iokind.dynamic``, meaning that the associated
@@ -2685,30 +2701,23 @@ proc file.lines(param locking:bool = true, start:int(64) = 0, end:int(64) = max(
                default value will be the :record:`iostyle` associated with
                this file.
 
+   :throws SystemError: Thrown if a file writer channel could not be returned.
  */
 // It is the responsibility of the caller to retain and release the returned
 // channel.
 // If the return error code is nonzero, the ref count will be 0 not 1.
 // The error code should be checked to avoid double-deletion errors.
-proc file.writer(out error:syserr, param kind=iokind.dynamic, param locking=true, start:int(64) = 0, end:int(64) = max(int(64)), hints:iohints = IOHINT_NONE, style:iostyle = this._style): channel(true,kind,locking) {
-  check(error);
-
+proc file.writer(param kind=iokind.dynamic, param locking=true, start:int(64) = 0,
+                 end:int(64) = max(int(64)), hints:c_int = 0, style:iostyle = this._style):
+                 channel(true,kind,locking) throws {
   var ret:channel(true, kind, locking);
-  if !error {
-    on this.home {
-      ret = new channel(true, kind, locking, this, error, hints, start, end, style);
-    }
-  }
-  return ret;
-}
-
-// documented in error= version
-pragma "no doc"
-proc file.writer(param kind=iokind.dynamic, param locking=true, start:int(64) = 0, end:int(64) = max(int(64)), hints:c_int = 0, style:iostyle = this._style): channel(true,kind,locking) throws {
   var err:syserr = ENOERR;
-  var ret = this.writer(err, kind, locking, start, end, hints, style);
-
+  on this.home {
+    try this.checkAssumingLocal();
+    ret = new channel(true, kind, locking, this, err, hints, start, end, style);
+  }
   if err then try ioerror(err, "in file.writer", this.tryGetPath());
+
   return ret;
 }
 
@@ -2718,7 +2727,7 @@ proc _isSimpleIoType(type t) param return
 
 pragma "no doc"
 proc _isIoPrimitiveType(type t) param return
-  _isSimpleIoType(t) || (t == string);
+  _isSimpleIoType(t) || (t == string) || (t == bytes);
 
 pragma "no doc"
  proc _isIoPrimitiveTypeOrNewline(type t) param return
@@ -2731,12 +2740,12 @@ private proc _read_text_internal(_channel_internal:qio_channel_ptr_t,
     var err:syserr = ENOERR;
     var got:bool = false;
 
-    err = qio_channel_scan_literal(false, _channel_internal, c"true", "true".length:ssize_t, 1);
+    err = qio_channel_scan_literal(false, _channel_internal, c"true", "true".numBytes:ssize_t, 1);
     if !err {
       got = true;
     } else if err == EFORMAT {
       // try reading false instead.
-      err = qio_channel_scan_literal(false, _channel_internal, c"false", "false".length:ssize_t, 1);
+      err = qio_channel_scan_literal(false, _channel_internal, c"false", "false".numBytes:ssize_t, 1);
       // got is already false, so we don't need to set it.
     }
     if !err then x = got;
@@ -2762,7 +2771,14 @@ private proc _read_text_internal(_channel_internal:qio_channel_ptr_t,
     var len:int(64);
     var tx: c_string;
     var ret = qio_channel_scan_string(false, _channel_internal, tx, len, -1);
-    x = new string(tx, length=len, needToCopy=false);
+    x = createStringWithOwnedBuffer(tx, length=len);
+    return ret;
+  } else if t == bytes {
+    // handle _bytes
+    var len:int(64);
+    var tx: c_string;
+    var ret = qio_channel_scan_bytes(false, _channel_internal, tx, len, -1);
+    x = createBytesWithOwnedBuffer(tx, length=len);
     return ret;
   } else if isEnumType(t) {
     var err:syserr = ENOERR;
@@ -2770,7 +2786,7 @@ private proc _read_text_internal(_channel_internal:qio_channel_ptr_t,
     for i in chpl_enumerate(t) {
       var str = i:string;
       if st == QIO_AGGREGATE_FORMAT_JSON then str = '"'+str+'"';
-      var slen:ssize_t = str.length.safeCast(ssize_t);
+      var slen:ssize_t = str.numBytes.safeCast(ssize_t);
       err = qio_channel_scan_literal(false, _channel_internal, str.c_str(), slen, 1);
       // Do not free str, because enum literals are C string literals
       if !err {
@@ -2789,9 +2805,9 @@ private proc _write_text_internal(_channel_internal:qio_channel_ptr_t,
     x:?t):syserr where _isIoPrimitiveType(t) {
   if isBoolType(t) {
     if x {
-      return qio_channel_print_literal(false, _channel_internal, c"true", "true".length:ssize_t);
+      return qio_channel_print_literal(false, _channel_internal, c"true", "true".numBytes:ssize_t);
     } else {
-      return qio_channel_print_literal(false, _channel_internal, c"false", "false".length:ssize_t);
+      return qio_channel_print_literal(false, _channel_internal, c"false", "false".numBytes:ssize_t);
     }
   } else if isIntegralType(t) {
     // handles int types
@@ -2810,12 +2826,16 @@ private proc _write_text_internal(_channel_internal:qio_channel_ptr_t,
   } else if t == string {
     // handle string
     const local_x = x.localize();
-    return qio_channel_print_string(false, _channel_internal, local_x.c_str(), local_x.length:ssize_t);
+    return qio_channel_print_string(false, _channel_internal, local_x.c_str(), local_x.numBytes:ssize_t);
+  } else if t == bytes {
+    // handle bytes
+    const local_x = x.localize();
+    return qio_channel_print_bytes(false, _channel_internal, local_x.c_str(), local_x.numBytes:ssize_t);
   } else if isEnumType(t) {
     var st = qio_channel_style_element(_channel_internal, QIO_STYLE_ELEMENT_AGGREGATE);
     var s = x:string;
     if st == QIO_AGGREGATE_FORMAT_JSON then s = '"'+s+'"';
-    return qio_channel_print_literal(false, _channel_internal, s.c_str(), s.length:ssize_t);
+    return qio_channel_print_literal(false, _channel_internal, s.c_str(), s.numBytes:ssize_t);
   } else {
     compilerError("Unknown primitive type in _write_text_internal ", t:string);
   }
@@ -2844,26 +2864,26 @@ private inline proc _read_binary_internal(_channel_internal:qio_channel_ptr_t, p
         return (-got):syserr;
       }
     } else if t == int(16) {
-      return qio_channel_read_int16(false, byteorder, _channel_internal, x);
+      return qio_channel_read_int16(false, byteorder:c_int, _channel_internal, x);
     } else if t == uint(16) {
-      return qio_channel_read_uint16(false, byteorder, _channel_internal, x);
+      return qio_channel_read_uint16(false, byteorder:c_int, _channel_internal, x);
     } else if t == int(32) {
-      return qio_channel_read_int32(false, byteorder, _channel_internal, x);
+      return qio_channel_read_int32(false, byteorder:c_int, _channel_internal, x);
     } else if t == uint(32) {
-      return qio_channel_read_uint32(false, byteorder, _channel_internal, x);
+      return qio_channel_read_uint32(false, byteorder:c_int, _channel_internal, x);
     } else if t == int(64) {
-      return qio_channel_read_int64(false, byteorder, _channel_internal, x);
+      return qio_channel_read_int64(false, byteorder:c_int, _channel_internal, x);
     } else if t == uint(64) {
-      return qio_channel_read_uint64(false, byteorder, _channel_internal, x);
+      return qio_channel_read_uint64(false, byteorder:c_int, _channel_internal, x);
     } else {
       compilerError("Unknown int type in _read_binary_internal ", t:string);
     }
   } else if isFloatType(t) {
     // handles real, imag
     if t == real(32) || t == imag(32) {
-      return qio_channel_read_float32(false, byteorder, _channel_internal, x);
+      return qio_channel_read_float32(false, byteorder:c_int, _channel_internal, x);
     } else if t == real(64) || t == imag(64) {
-      return qio_channel_read_float64(false, byteorder, _channel_internal, x);
+      return qio_channel_read_float64(false, byteorder:c_int, _channel_internal, x);
     } else {
       compilerError("Unknown float type in _read_binary_internal ", t:string);
     }
@@ -2873,14 +2893,14 @@ private inline proc _read_binary_internal(_channel_internal:qio_channel_ptr_t, p
     var im:x.im.type;
     var err:syserr = ENOERR;
     if re.type == real(32) {
-      err = qio_channel_read_float32(false, byteorder, _channel_internal, re);
+      err = qio_channel_read_float32(false, byteorder:c_int, _channel_internal, re);
       if ! err {
-        err = qio_channel_read_float32(false, byteorder, _channel_internal, im);
+        err = qio_channel_read_float32(false, byteorder:c_int, _channel_internal, im);
       }
     } else if re.type == real(64) {
-      err = qio_channel_read_float64(false, byteorder, _channel_internal, re);
+      err = qio_channel_read_float64(false, byteorder:c_int, _channel_internal, re);
       if ! err {
-        err = qio_channel_read_float64(false, byteorder, _channel_internal, im);
+        err = qio_channel_read_float64(false, byteorder:c_int, _channel_internal, im);
       }
     } else {
       compilerError("Unknown complex type in _read_binary_internal ", t:string);
@@ -2891,17 +2911,26 @@ private inline proc _read_binary_internal(_channel_internal:qio_channel_ptr_t, p
     // handle string
     var len:int(64);
     var tx: c_string;
-    var ret = qio_channel_read_string(false, byteorder,
+    var ret = qio_channel_read_string(false, byteorder:c_int,
                                       qio_channel_str_style(_channel_internal),
                                       _channel_internal, tx, len, -1);
-    x = new string(tx, length=len, needToCopy=false);
+    x = createStringWithOwnedBuffer(tx, length=len);
+    return ret;
+  } else if t == bytes {
+    // handle _bytes (nothing special for bytes vs string in this case)
+    var len:int(64);
+    var tx: c_string;
+    var ret = qio_channel_read_string(false, byteorder:c_int,
+                                      qio_channel_str_style(_channel_internal),
+                                      _channel_internal, tx, len, -1);
+    x = createBytesWithOwnedBuffer(tx, length=len);
     return ret;
   } else if isEnumType(t) {
-    var i:enum_mintype(t);
+    var i:chpl_enum_mintype(t);
     var err:syserr = ENOERR;
     // call the integer version
     err = _read_binary_internal(_channel_internal, byteorder, i);
-    x = i:t;
+    x = chpl__orderToEnum(i, t);
     return err;
   } else {
     compilerError("Unknown primitive type in _read_binary_internal ", t:string);
@@ -2917,25 +2946,25 @@ private inline proc _write_binary_internal(_channel_internal:qio_channel_ptr_t, 
     if numBytes(t) == 1 {
       return qio_channel_write_byte(false, _channel_internal, x:uint(8));
     } else if t == int(16) {
-      return qio_channel_write_int16(false, byteorder, _channel_internal, x);
+      return qio_channel_write_int16(false, byteorder:c_int, _channel_internal, x);
     } else if t == uint(16) {
-      return qio_channel_write_uint16(false, byteorder, _channel_internal, x);
+      return qio_channel_write_uint16(false, byteorder:c_int, _channel_internal, x);
     } else if t == int(32) {
-      return qio_channel_write_int32(false, byteorder, _channel_internal, x);
+      return qio_channel_write_int32(false, byteorder:c_int, _channel_internal, x);
     } else if t == uint(32) {
-      return qio_channel_write_uint32(false, byteorder, _channel_internal, x);
+      return qio_channel_write_uint32(false, byteorder:c_int, _channel_internal, x);
     } else if t == int(64) {
-      return qio_channel_write_int64(false, byteorder, _channel_internal, x);
+      return qio_channel_write_int64(false, byteorder:c_int, _channel_internal, x);
     } else if t == uint(64) {
-      return qio_channel_write_uint64(false, byteorder, _channel_internal, x);
+      return qio_channel_write_uint64(false, byteorder:c_int, _channel_internal, x);
     } else {
       compilerError("Unknown int type in _write_binary_internal ", t:string);
     }
   } else if isFloatType(t) {
     if t == real(32) || t == imag(32) {
-      return qio_channel_write_float32(false, byteorder, _channel_internal, x);
+      return qio_channel_write_float32(false, byteorder:c_int, _channel_internal, x);
     } else if t == real(64) || t == imag(64) {
-      return qio_channel_write_float64(false, byteorder, _channel_internal, x);
+      return qio_channel_write_float64(false, byteorder:c_int, _channel_internal, x);
     } else {
       compilerError("Unknown float type in _write_binary_internal ", t:string);
     }
@@ -2945,14 +2974,14 @@ private inline proc _write_binary_internal(_channel_internal:qio_channel_ptr_t, 
     var im = x.im;
     var err:syserr = ENOERR;
     if re.type == real(32) {
-      err = qio_channel_write_float32(false, byteorder, _channel_internal, re);
+      err = qio_channel_write_float32(false, byteorder:c_int, _channel_internal, re);
       if ! err {
-        err = qio_channel_write_float32(false, byteorder, _channel_internal, im);
+        err = qio_channel_write_float32(false, byteorder:c_int, _channel_internal, im);
       }
     } else if re.type == real(64) {
-      err = qio_channel_write_float64(false, byteorder, _channel_internal, re);
+      err = qio_channel_write_float64(false, byteorder:c_int, _channel_internal, re);
       if ! err {
-        err = qio_channel_write_float64(false, byteorder, _channel_internal, im);
+        err = qio_channel_write_float64(false, byteorder:c_int, _channel_internal, im);
       }
     } else {
       compilerError("Unknown complex type in _write_binary_internal ", t:string);
@@ -2960,9 +2989,12 @@ private inline proc _write_binary_internal(_channel_internal:qio_channel_ptr_t, 
     return err;
   } else if t == string {
     var local_x = x.localize();
-    return qio_channel_write_string(false, byteorder, qio_channel_str_style(_channel_internal), _channel_internal, local_x.c_str(), local_x.length: ssize_t);
+    return qio_channel_write_string(false, byteorder:c_int, qio_channel_str_style(_channel_internal), _channel_internal, local_x.c_str(), local_x.numBytes: ssize_t);
+  } else if t == bytes {
+    var local_x = x.localize();
+    return qio_channel_write_string(false, byteorder:c_int, qio_channel_str_style(_channel_internal), _channel_internal, local_x.c_str(), local_x.numBytes: ssize_t);
   } else if isEnumType(t) {
-    var i:enum_mintype(t) = x:enum_mintype(t);
+    var i = chpl__enumToOrder(x):chpl_enum_mintype(t);
     // call the integer version
     return _write_binary_internal(_channel_internal, byteorder, i);
   } else {
@@ -2976,7 +3008,7 @@ private inline proc _write_binary_internal(_channel_internal:qio_channel_ptr_t, 
 private inline proc _read_one_internal(_channel_internal:qio_channel_ptr_t,
                                        param kind:iokind,
                                        ref x:?t,
-                                       loc:locale):syserr where _isIoPrimitiveTypeOrNewline(t) {
+                                       loc:locale?):syserr where _isIoPrimitiveTypeOrNewline(t) {
   var e:syserr = ENOERR;
   if t == ioNewline {
     return qio_channel_skip_past_newline(false, _channel_internal, x.skipWhitespaceOnly);
@@ -2986,17 +3018,14 @@ private inline proc _read_one_internal(_channel_internal:qio_channel_ptr_t,
     //writeln("in scan literal ", x.val);
     return qio_channel_scan_literal(false, _channel_internal,
                                     x.val.localize().c_str(),
-                                    x.val.length: ssize_t, x.ignoreWhiteSpace);
-    //e = qio_channel_scan_literal(false, _channel_internal, x.val, x.val.length, x.ignoreWhiteSpace);
-    //writeln("Scanning literal ", x.val,  " yielded error ", e);
-    //return e;
+                                    x.val.numBytes: ssize_t, x.ignoreWhiteSpace);
   } else if t == ioBits {
     return qio_channel_read_bits(false, _channel_internal, x.v, x.nbits);
   } else if kind == iokind.dynamic {
     var binary:uint(8) = qio_channel_binary(_channel_internal);
     var byteorder:uint(8) = qio_channel_byteorder(_channel_internal);
     if binary {
-      select byteorder {
+      select byteorder:iokind {
         when iokind.big    do e = _read_binary_internal(_channel_internal, iokind.big, x);
         when iokind.little do e = _read_binary_internal(_channel_internal, iokind.little, x);
         otherwise             e = _read_binary_internal(_channel_internal, iokind.native, x);
@@ -3014,21 +3043,21 @@ private inline proc _read_one_internal(_channel_internal:qio_channel_ptr_t,
 private inline proc _write_one_internal(_channel_internal:qio_channel_ptr_t,
                                         param kind:iokind,
                                         x:?t,
-                                        loc:locale):syserr where _isIoPrimitiveTypeOrNewline(t) {
+                                        loc:locale?):syserr where _isIoPrimitiveTypeOrNewline(t) {
   var e:syserr = ENOERR;
   if t == ioNewline {
     return qio_channel_write_newline(false, _channel_internal);
   } else if t == ioChar {
     return qio_channel_write_char(false, _channel_internal, x.ch);
   } else if t == ioLiteral {
-    return qio_channel_print_literal(false, _channel_internal, x.val.localize().c_str(), x.val.length:ssize_t);
+    return qio_channel_print_literal(false, _channel_internal, x.val.localize().c_str(), x.val.numBytes:ssize_t);
   } else if t == ioBits {
     return qio_channel_write_bits(false, _channel_internal, x.v, x.nbits);
   } else if kind == iokind.dynamic {
     var binary:uint(8) = qio_channel_binary(_channel_internal);
     var byteorder:uint(8) = qio_channel_byteorder(_channel_internal);
     if binary {
-      select byteorder {
+      select byteorder:iokind {
         when iokind.big    do e = _write_binary_internal(_channel_internal, iokind.big, x);
         when iokind.little do e = _write_binary_internal(_channel_internal, iokind.little, x);
         otherwise             e = _write_binary_internal(_channel_internal, iokind.native, x);
@@ -3045,7 +3074,7 @@ private inline proc _write_one_internal(_channel_internal:qio_channel_ptr_t,
 private inline proc _read_one_internal(_channel_internal:qio_channel_ptr_t,
                                        param kind:iokind,
                                        ref x:?t,
-                                       loc:locale):syserr {
+                                       loc:locale?):syserr {
 
   // Create a new channel that borrows the pointer in the
   // existing channel so we can avoid locking (because we
@@ -3076,7 +3105,7 @@ pragma "suppress lvalue error"
 private inline proc _write_one_internal(_channel_internal:qio_channel_ptr_t,
                                         param kind:iokind,
                                         const x:?t,
-                                        loc:locale):syserr {
+                                        loc:locale?):syserr {
   // Create a new channel that borrows the pointer in the
   // existing channel so we can avoid locking (because we
   // already have the lock)
@@ -3091,16 +3120,24 @@ private inline proc _write_one_internal(_channel_internal:qio_channel_ptr_t,
   // to stop writing if there was an error.
   qio_channel_clear_error(_channel_internal);
 
-  if (isClassType(t) || chpl_isDdata(t) || isAnyCPtr(t)) && x == nil {
-    // future - write class IDs, have serialization format
-    var st = writer.styleElement(QIO_STYLE_ELEMENT_AGGREGATE);
-    var iolit:ioLiteral;
-    if st == QIO_AGGREGATE_FORMAT_JSON {
-      iolit = new ioLiteral("null");
+  if isClassType(t) || chpl_isDdata(t) || isAnyCPtr(t) {
+    if x == nil {
+      // future - write class IDs, have serialization format
+      var st = writer.styleElement(QIO_STYLE_ELEMENT_AGGREGATE);
+      var iolit:ioLiteral;
+      if st == QIO_AGGREGATE_FORMAT_JSON {
+        iolit = new ioLiteral("null");
+      } else {
+        iolit = new ioLiteral("nil");
+      }
+      _write_one_internal(_channel_internal, iokind.dynamic, iolit, loc);
+    } else if isClassType(t) {
+      var notNilX = x!;
+      notNilX.writeThis(writer);
     } else {
-      iolit = new ioLiteral("nil");
+      // ddata / cptr
+      x.writeThis(writer);
     }
-    _write_one_internal(_channel_internal, iokind.dynamic, iolit, loc);
   } else {
     x.writeThis(writer);
   }
@@ -3131,7 +3168,7 @@ proc channel.readIt(ref x) {
 }
 
 pragma "no doc"
-proc channel.writeIt(x) {
+proc channel.writeIt(const x) {
   if !writing then compilerError("write on read-only channel");
   const origLocale = this.getLocaleOfIoRequest();
   on this.home {
@@ -3151,9 +3188,8 @@ proc channel.writeIt(x) {
    For a writing channel, writes as with :proc:`channel.write`.
    For a reading channel, reads as with :proc:`channel.read`.
    Stores any error encountered in the channel. Does not return anything.
-
  */
-inline proc channel.readwrite(x) where this.writing {
+inline proc channel.readwrite(const x) where this.writing {
   this.writeIt(x);
 }
 // documented in the writing version.
@@ -3302,52 +3338,18 @@ inline proc channel.readwrite(ref x) where !this.writing {
 
   /*
      Write a sequence of bytes.
+
+     :throws SystemError: Thrown if the byte sequence could not be written.
    */
-  proc channel.writeBytes(x, len:ssize_t, out error:syserr):bool {
-    on this.home {
-      try! this.lock();
-      error = qio_channel_write_amt(false, _channel_internal, x, len);
-      this.unlock();
-    }
-    return !error;
-  }
-
-  pragma "no doc"
   proc channel.writeBytes(x, len:ssize_t):bool throws {
-    var e:syserr = ENOERR;
-    this.writeBytes(x, len, error=e);
-    if !e then return true;
-    else {
-      try this._ch_ioerror(e, "in channel.writeBytes()");
-      return false;
+    var err:syserr = ENOERR;
+    on this.home {
+      try this.lock(); defer { this.unlock(); }
+      err = qio_channel_write_amt(false, _channel_internal, x, len);
     }
+    if err then try this._ch_ioerror(err, "in channel.writeBytes()");
+    return true;
   }
-
-
-/* returns true if read successfully, false if we encountered EOF
-   (or possibly another error and didn't halt)*/
-inline proc channel.read(ref args ...?k, out error:syserr): bool {
-  if writing then compilerError("read on write-only channel");
-  error = ENOERR;
-  const origLocale = this.getLocaleOfIoRequest();
-  on this.home {
-    try! this.lock();
-    for param i in 1..k {
-      if !error {
-        if args[i].locale == here {
-          error = _read_one_internal(_channel_internal, kind, args[i], origLocale);
-        } else {
-          var tmp:args[i].type;
-          error = _read_one_internal(_channel_internal, kind, tmp, origLocale);
-          args[i] = tmp;
-        }
-      }
-    }
-    this.unlock();
-  }
-  return !error;
-}
-
 
 /*
   Iterate over all of the lines ending in ``\n`` in a channel - the channel
@@ -3479,7 +3481,7 @@ proc stringify(const args ...?k):string {
       // Add the terminating NULL byte to make C string conversion easy.
       buf[offset] = 0;
 
-      return new string(buf, offset, offset+1, owned=true, needToCopy=false);
+      return createStringWithOwnedBuffer(buf, offset, offset+1);
     }
   }
 }
@@ -3497,23 +3499,39 @@ private proc _args_to_proto(const args ...?k, preArg:string) {
     err_args += preArg + name + ":" + args(i).type:string;
     if i != k then err_args += ", ";
   }
-  const ret = err_args:string;
-  return ret;
+  return err_args;
 }
 
-// documented in the style= error= version
-pragma "no doc"
+/* returns true if read successfully, false if we encountered EOF */
+// better documented in the style= version
 inline proc channel.read(ref args ...?k):bool throws {
-  var e:syserr = ENOERR;
-  this.read((...args), error=e);
-  if !e then return true;
-  else if e == EEOF then return false;
-  else {
-    try this._ch_ioerror(e, "in channel.read(" +
-                            _args_to_proto((...args), preArg="ref ") +
-                            ")");
-    return false;
+  if writing then compilerError("read on write-only channel");
+  const origLocale = this.getLocaleOfIoRequest();
+  var err:syserr = ENOERR;
+  on this.home {
+    try this.lock(); defer { this.unlock(); }
+    for param i in 1..k {
+      if !err {
+        if args[i].locale == here {
+          err = _read_one_internal(_channel_internal, kind, args[i], origLocale);
+        } else {
+          var tmp = args[i];
+          err = _read_one_internal(_channel_internal, kind, tmp, origLocale);
+          args[i] = tmp;
+        }
+      }
+    }
   }
+
+  if !err {
+    return true;
+  } else if err == EEOF {
+    return false;
+  } else {
+    try this._ch_ioerror(err, "in channel.read(" +
+                              _args_to_proto((...args), preArg="ref ") + ")");
+  }
+  return false;
 }
 
 /*
@@ -3528,101 +3546,83 @@ inline proc channel.read(ref args ...?k):bool throws {
    :arg style: optional argument to provide an :type:`iostyle` for this read.
                If this argument is not provided, use the current style
                associated with this channel.
-   :arg error: optional argument to capture an error code. If this argument
-              is not provided and an error is encountered, this function
-              will halt with an error message.
-   :returns: `true` if the read succeeded, and `false` on error or end of file.
+   :returns: `true` if the read succeeded, and `false` on end of file.
 
+   :throws SystemError: Thrown if the channel could not be read.
  */
-proc channel.read(ref args ...?k,
-                  style:iostyle,
-                  out error:syserr):bool {
+proc channel.read(ref args ...?k, style:iostyle):bool throws {
   if writing then compilerError("read on write-only channel");
-  error = ENOERR;
   const origLocale = this.getLocaleOfIoRequest();
+  var err:syserr = ENOERR;
   on this.home {
-    try! this.lock();
+    try this.lock(); defer { this.unlock(); }
     var save_style = this._style();
     this._set_style(style);
     for param i in 1..k {
-      if !error {
-        error = _read_one_internal(_channel_internal, kind, args[i], origLocale);
+      if !err {
+        err = _read_one_internal(_channel_internal, kind, args[i], origLocale);
       }
     }
     this._set_style(save_style);
-    this.unlock();
   }
-  return !error;
-}
 
-// documented in the style= error= version
-pragma "no doc"
-proc channel.read(ref args ...?k, style:iostyle):bool throws {
-  var e:syserr = ENOERR;
-  this.read((...args), style=style, error=e);
-  if !e then return true;
-  else if e == EEOF then return false;
-  else {
-    try this._ch_ioerror(e, "in channel.read(" +
-                            _args_to_proto((...args), preArg="ref ") +
-                            "style:iostyle)");
+  if !err {
+    return true;
+  } else if err == EEOF {
     return false;
+  } else {
+    try this._ch_ioerror(err, "in channel.read(" +
+                              _args_to_proto((...args), preArg="ref ") +
+                              "style:iostyle)");
   }
-}
-
-// documented in the error= version
-pragma "no doc"
-proc channel.readline(arg: [] uint(8), out numRead : int, start = arg.domain.low, amount = arg.domain.high - start + 1) : bool
-  throws where arg.rank == 1 && isRectangularArr(arg)
-{
-  var e:syserr = ENOERR;
-  var got = this.readline(arg, numRead, start, amount, error=e);
-  if !e && got then return true;
-  else if e == EEOF || !got then return false;
-  else {
-    try this._ch_ioerror(e, "in channel.readline(arg : [] uint(8))");
-    return false;
-  }
+  return false;
 }
 
 /*
   Read a line into a Chapel array of bytes. Reads until a ``\n`` is reached.
   The ``\n`` is returned in the array.
 
+  Throws a SystemError if a line could not be read from the channel.
+
   :arg arg: A 1D DefaultRectangular array which must have at least 1 element.
   :arg numRead: The number of bytes read.
   :arg start: Index to begin reading into.
   :arg amount: The maximum amount of bytes to read.
-  :arg error: optional argument to capture an error code. If this argument
-              is not provided and an error is encountered, this function
-              will halt with an error message.
   :returns: true if the bytes were read without error.
 */
-proc channel.readline(arg: [] uint(8), out numRead : int, start = arg.domain.low, amount = arg.domain.high - start + 1, out error:syserr) : bool
-where arg.rank == 1 && isRectangularArr(arg)
-{
-  error = ENOERR;
+proc channel.readline(arg: [] uint(8), out numRead : int, start = arg.domain.low,
+                      amount = arg.domain.high - start + 1) : bool throws
+                      where arg.rank == 1 && isRectangularArr(arg) {
 
-  // Make sure the arguments are valid
-  if arg.size == 0 || !arg.domain.member(start) || amount <= 0 || (start + amount - 1 > arg.domain.high)  then return false;
+  if arg.size == 0 || !arg.domain.contains(start) ||
+     amount <= 0 || (start + amount - 1 > arg.domain.high) then return false;
 
+  var err:syserr = ENOERR;
   on this.home {
-    try! this.lock();
+    try this.lock(); defer { this.unlock(); }
     param newLineChar = 0x0A;
-    var got : int;
+    var got: int;
     var i = start;
     const maxIdx = start + amount - 1;
     while i <= maxIdx {
       got = qio_channel_read_byte(false, this._channel_internal);
+      if got < 0 then break;
       arg[i] = got:uint(8);
       i += 1;
-      if got < 0 || got == newLineChar then break;
+      if got == newLineChar then break;
     }
     numRead = i - start;
-    if got < 0 then error = (-got):syserr;
-    this.unlock();
+    if i == start && got < 0 then err = (-got):syserr;
   }
-  return !error;
+
+  if !err {
+    return true;
+  } else if err == EEOF {
+    return false;
+  } else {
+    try this._ch_ioerror(err, "in channel.readline(arg : [] uint(8))");
+  }
+  return false;
 }
 
 /*
@@ -3630,40 +3630,34 @@ where arg.rank == 1 && isRectangularArr(arg)
   The ``\n`` is included in the resulting string.
 
   :arg arg: a string to receive the line
-  :arg error: optional argument to capture an error code. If this argument
-              is not provided and an error is encountered, this function
-              will halt with an error message.
-  :returns: `true` if a line was read without error, `false` on error or EOF
+  :returns: `true` if a line was read without error, `false` upon EOF
+
+  :throws SystemError: Thrown if a string could not be read from the channel.
 */
-proc channel.readline(ref arg:string, out error:syserr):bool {
+proc channel.readline(ref arg:string):bool throws {
   if writing then compilerError("read on write-only channel");
-  error = ENOERR;
   const origLocale = this.getLocaleOfIoRequest();
+
+  var err:syserr = ENOERR;
   on this.home {
-    try! this.lock();
+    try this.lock(); defer { this.unlock(); }
     var save_style = this._style();
     var mystyle = save_style.text();
     mystyle.string_format = QIO_STRING_FORMAT_TOEND;
     mystyle.string_end = 0x0a; // ascii newline.
     this._set_style(mystyle);
-    error = _read_one_internal(_channel_internal, iokind.dynamic, arg, origLocale);
+    err = _read_one_internal(_channel_internal, iokind.dynamic, arg, origLocale);
     this._set_style(save_style);
-    this.unlock();
   }
-  return !error;
-}
 
-// documented in error= version
-pragma "no doc"
-proc channel.readline(ref arg:string):bool throws {
-  var e:syserr = ENOERR;
-  this.readline(arg, error=e);
-  if !e then return true;
-  else if e == EEOF then return false;
-  else {
-    try this._ch_ioerror(e, "in channel.readline(ref arg:string)");
+  if !err {
+    return true;
+  } else if err == EEOF {
     return false;
+  } else {
+    try this._ch_ioerror(err, "in channel.readline(ref arg:string)");
   }
+  return false;
 }
 
 /* read a given number of bytes from a channel
@@ -3673,13 +3667,12 @@ proc channel.readline(ref arg:string):bool throws {
              (or some kind of I/O error). If the default value of -1
              is provided, read until EOF starting from the channel's
              current offset.
-   :arg error: optional argument to capture an error code. If this argument
-               is not provided and an error is encountered, this function
-               will halt with an error message.
-   :returns: `true` if we read something, `false` on EOF or error
+   :returns: `true` if we read something, `false` upon EOF
+
+   :throws SystemError: Thrown if the bytes could not be read from the channel.
  */
-proc channel.readstring(ref str_out:string, len:int(64) = -1, out error:syserr):bool {
-  error = ENOERR;
+proc channel.readstring(ref str_out:string, len:int(64) = -1):bool throws {
+  var err:syserr = ENOERR;
   on this.home {
     var lenread:int(64);
     var tx:c_string;
@@ -3693,47 +3686,39 @@ proc channel.readstring(ref str_out:string, len:int(64) = -1, out error:syserr):
       if ssize_t != int(64) then assert( len == uselen );
     }
 
-    try! this.lock();
+    try this.lock(); defer { this.unlock(); }
 
     var binary:uint(8) = qio_channel_binary(_channel_internal);
     var byteorder:uint(8) = qio_channel_byteorder(_channel_internal);
 
     if binary {
-      error = qio_channel_read_string(false, byteorder,
-                                      iostringstyle.data_toeof,
-                                      this._channel_internal, tx,
-                                      lenread, uselen);
+      err = qio_channel_read_string(false, byteorder,
+                                    iostringstyle.data_toeof:int(64),
+                                    this._channel_internal, tx,
+                                    lenread, uselen);
     } else {
       var save_style = this._style();
       var style = this._style();
       style.string_format = QIO_STRING_FORMAT_TOEOF;
       this._set_style(style);
 
-      error = qio_channel_scan_string(false,
-                                      this._channel_internal, tx,
-                                      lenread, uselen);
+      err = qio_channel_scan_string(false,
+                                    this._channel_internal, tx,
+                                    lenread, uselen);
       this._set_style(save_style);
     }
 
-    this.unlock();
-
-    str_out = new string(tx, length=lenread, needToCopy=false);
+    str_out = createStringWithOwnedBuffer(tx, length=lenread);
   }
 
-  return !error;
-}
-
-// documented in the error= version
-pragma "no doc"
-proc channel.readstring(ref str_out:string, len:int(64) = -1):bool throws {
-  var e:syserr = ENOERR;
-  this.readstring(str_out, len, error=e);
-  if !e then return true;
-  else if e == EEOF then return false;
-  else {
-    try this._ch_ioerror(e, "in channel.readstring(ref str_out:string, len:int(64))");
+  if !err {
+    return true;
+  } else if err == EEOF {
     return false;
+  } else {
+    try this._ch_ioerror(err, "in channel.readstring(ref str_out:string, len:int(64))");
   }
+  return false;
 }
 
 /*
@@ -3742,44 +3727,26 @@ proc channel.readstring(ref str_out:string, len:int(64) = -1):bool throws {
    :arg v: where to store the read bits. This value will have its *nbits*
            least-significant bits set.
    :arg nbits: how many bits to read
-   :arg error: optional argument to capture an error code. If this argument
-               is not provided and an error is encountered, this function
-               will halt with an error message.
-   :returns: `true` if the bits were read without error, `false` on error or EOF
+   :returns: `true` if the bits were read without error, `false` upon EOF
+
+   :throws SystemError: Thrown if the bits could not be read from the channel.
  */
-inline proc channel.readbits(out v:integral, nbits:integral, out error:syserr):bool {
-  var tmp:ioBits;
-  var ret:bool;
-
-  error = ENOERR;
-
-  if castChecking { // mimic safeCast
+inline proc channel.readbits(out v:integral, nbits:integral):bool throws {
+  if castChecking {
     // Error if reading more bits than fit into v
     if numBits(v.type) < nbits then
-      halt("readbits nbits=", nbits, " > bits in v:", v.type:string);
+      throw new owned IllegalArgumentError("v, nbits", "readbits nbits=" + nbits:string +
+                                                 " > bits in v:" + v.type:string);
     // Error if reading negative number of bits
     if isIntType(nbits.type) && nbits < 0 then
-      halt("readbits nbits=", nbits, " < 0");
+      throw new owned IllegalArgumentError("nbits", "readbits nbits=" + nbits:string + " < 0");
   }
 
+  var tmp:ioBits;
   tmp.nbits = nbits:int(8);
-  ret = this.read(tmp, error=error);
+  var ret = try this.read(tmp);
   v = tmp.v:v.type;
-
   return ret;
-}
-
-// documented in the error= version
-pragma "no doc"
-proc channel.readbits(out v:integral, nbits:integral):bool throws {
-  var e:syserr = ENOERR;
-  this.readbits(v, nbits, error=e);
-  if !e then return true;
-  else if e == EEOF then return false;
-  else {
-    try this._ch_ioerror(e, "in channel.readbits(out v:uint(64), nbits:int(8))");
-    return false;
-  }
 }
 
 /*
@@ -3787,66 +3754,37 @@ proc channel.readbits(out v:integral, nbits:integral):bool throws {
 
    :arg v: a value containing *nbits* bits to write the least-significant bits
    :arg nbits: how many bits to write
-   :arg error: optional argument to capture an error code. If this argument
-               is not provided and an error is encountered, this function
-               will halt with an error message.
    :returns: `true` if the bits were written without error, `false` on error
+
+   :throws IllegalArgumentError: Thrown if writing more bits than fit into `v`.
+   :throws SystemError: Thrown if the bits could not be written to the channel.
  */
-inline proc channel.writebits(v:integral, nbits:integral, out error:syserr):bool {
-  if castChecking { // mimic safeCast
+proc channel.writebits(v:integral, nbits:integral):bool throws {
+  if castChecking {
     // Error if writing more bits than fit into v
     if numBits(v.type) < nbits then
-      halt("writebits nbits=", nbits, " > bits in v:", v.type:string);
+      throw new owned IllegalArgumentError("v, nbits", "writebits nbits=" + nbits:string +
+                                                 " > bits in v:" + v.type:string);
     // Error if writing negative number of bits
     if isIntType(nbits.type) && nbits < 0 then
-      halt("writebits nbits=", nbits, " < 0");
+      throw new owned IllegalArgumentError("nbits", "writebits nbits=" + nbits:string + " < 0");
   }
 
-  return this.write(new ioBits(v:uint(64), nbits:int(8)), error=error);
-}
-
-// documented in the error= version
-pragma "no doc"
-proc channel.writebits(v:integral, nbits:integral):bool throws {
-  var e:syserr = ENOERR;
-  this.writebits(v, nbits, error=e);
-  if !e then return true;
-  else {
-    try this._ch_ioerror(e, "in channel.writebits(v:uint(64), nbits:int(8))");
-    return false;
-  }
-}
-
-
-
-// documented in the style= error= version
-pragma "no doc"
-proc channel.readln(out error:syserr):bool {
-  var nl = new ioNewline();
-  return this.read(nl, error=error);
+  return try this.write(new ioBits(v:uint(64), nbits:int(8)));
 }
 
 // documented in the style= error= version
 pragma "no doc"
 proc channel.readln():bool throws {
   var nl = new ioNewline();
-  return this.read(nl);
+  return try this.read(nl);
 }
-
 
 // documented in the style= error= version
 pragma "no doc"
 proc channel.readln(ref args ...?k):bool throws {
   var nl = new ioNewline();
-  return this.read((...args), nl);
-}
-
-// documented in the style= error= version
-pragma "no doc"
-proc channel.readln(ref args ...?k,
-                    out error:syserr):bool {
-  var nl = new ioNewline();
-  return this.read((...args), nl, error=error);
+  return try this.read((...args), nl);
 }
 
 /*
@@ -3863,29 +3801,18 @@ proc channel.readln(ref args ...?k,
    :arg style: optional argument to provide an :type:`iostyle` for this read.
                If this argument is not provided, use the current style
                associated with this channel.
-   :arg error: optional argument to capture an error code. If this argument
-              is not provided and an error is encountered, this function
-              will halt with an error message.
-   :returns: `true` if the read succeeded, and `false` on error or end of file.
+   :returns: `true` if the read succeeded, and `false` upon end of file.
 
+   :throws SystemError: Thrown if a line could not be read from the channel.
  */
 proc channel.readln(ref args ...?k,
-                    style:iostyle,
-                    out error:syserr):bool {
+                    style:iostyle):bool throws {
   var nl = new ioNewline();
-  return this.read((...args), nl, style=style, error=error);
-}
-// documented in the style= error= version
-pragma "no doc"
-proc channel.readln(ref args ...?k,
-                    style:iostyle):bool {
-  var nl = new ioNewline();
-  return this.read((...args), nl, style=style);
+  return try this.read((...args), nl, style=style);
 }
 
 /*
    Read a value of passed type.
-   Halts if an error is encountered.
 
    .. note::
 
@@ -3903,18 +3830,17 @@ proc channel.readln(ref args ...?k,
 
    :arg t: the type to read
    :returns: the value read
+
+   :throws SystemError: Thrown if the type could not be read from the channel.
  */
 proc channel.read(type t) throws {
   var tmp:t;
-  var e:syserr = ENOERR;
-  this.read(tmp, error=e);
-  if e then try this._ch_ioerror(e, "in channel.read(type)");
+  try this.read(tmp);
   return tmp;
 }
 
 /*
    Read a value of passed type followed by a newline.
-   Halts if an error is encountered.
 
    .. note::
 
@@ -3925,22 +3851,23 @@ proc channel.read(type t) throws {
 
    :arg t: the type to read
    :returns: the value read
+
+   :throws SystemError: Thrown if the type could not be read from the channel.
  */
 proc channel.readln(type t) throws {
   var tmp:t;
-  var e:syserr = ENOERR;
-  this.readln(tmp, error=e);
-  if e then try this._ch_ioerror(e, "in channel.readln(type)");
+  try this.readln(tmp);
   return tmp;
 }
 
 /*
    Read values of passed types followed by a newline
    and return a tuple containing the read values.
-   Halts if an error is encountered.
 
    :arg t: more than one type to read
    :returns: a tuple of the read values
+
+   :throws SystemError: Thrown if the types could not be read from the channel.
  */
 proc channel.readln(type t ...?numTypes) throws where numTypes > 1 {
   var tupleVal: t;
@@ -3952,10 +3879,11 @@ proc channel.readln(type t ...?numTypes) throws where numTypes > 1 {
 
 /*
    Read values of passed types and return a tuple containing the read values.
-   Halts if an error is encountered.
 
    :arg t: more than one type to read
    :returns: a tuple of the read values
+
+   :throws SystemError: Thrown if the types could not be read from the channel.
  */
 proc channel.read(type t ...?numTypes) throws where numTypes > 1 {
   var tupleVal: t;
@@ -3966,34 +3894,22 @@ proc channel.read(type t ...?numTypes) throws where numTypes > 1 {
 
 // documented in style= error= version
 pragma "no doc"
-inline proc channel.write(const args ...?k, out error:syserr):bool {
+inline proc channel.write(const args ...?k):bool throws {
   if !writing then compilerError("write on read-only channel");
-  error = ENOERR;
+  var err:syserr = ENOERR;
   const origLocale = this.getLocaleOfIoRequest();
   on this.home {
-    try! this.lock();
+    try this.lock(); defer { this.unlock(); }
     for param i in 1..k {
-      if !error {
-        error = _write_one_internal(_channel_internal, kind, args(i), origLocale);
+      if !err {
+        err = _write_one_internal(_channel_internal, kind, args(i), origLocale);
       }
     }
-    this.unlock();
   }
-  return !error;
-}
-
-// documented in style= error= version
-pragma "no doc"
-inline proc channel.write(const args ...?k):bool throws {
-  var e:syserr = ENOERR;
-  this.write((...args), error=e);
-  if !e then return true;
-  else {
-    try this._ch_ioerror(e, "in channel.write(" +
-                            _args_to_proto((...args), preArg="") +
-                            ")");
-    return false;
-  }
+  if err then try this._ch_ioerror(err, "in channel.write(" +
+                                        _args_to_proto((...args), preArg="") +
+                                        ")");
+  return true;
 }
 
 /*
@@ -4007,84 +3923,43 @@ inline proc channel.write(const args ...?k):bool throws {
    :arg style: optional argument to provide an :type:`iostyle` for this write.
                If this argument is not provided, use the current style
                associated with this channel.
-   :arg error: optional argument to capture an error code. If this argument
-              is not provided and an error is encountered, this function
-              will halt with an error message.
    :returns: `true` if the write succeeded
 
+   :throws SystemError: Thrown if the values could not be written to the channel.
  */
-proc channel.write(const args ...?k,
-                   style:iostyle,
-                   out error:syserr):bool {
+proc channel.write(const args ...?k, style:iostyle):bool throws {
   if !writing then compilerError("write on read-only channel");
-  error = ENOERR;
   const origLocale = this.getLocaleOfIoRequest();
+  var err:syserr = ENOERR;
   on this.home {
-    try! this.lock();
+    try this.lock(); defer { this.unlock(); }
     var save_style = this._style();
     this._set_style(style);
     for param i in 1..k {
-      if !error {
-        error = _write_one_internal(_channel_internal, iokind.dynamic, args(i), origLocale);
+      if !err {
+        err = _write_one_internal(_channel_internal, iokind.dynamic, args(i), origLocale);
       }
     }
     this._set_style(save_style);
-    this.unlock();
   }
-  return !error;
-}
 
-// documented in style= error= version
-pragma "no doc"
-proc channel.write(const args ...?k, style:iostyle):bool throws {
-  var e:syserr = ENOERR;
-  this.write((...args), style=style, error=e);
-  if !e then return true;
-  else {
-    try this._ch_ioerror(e, "in channel.write(" +
-                            _args_to_proto((...args), preArg="") +
-                            "style:iostyle)");
-    return false;
-  }
-}
-
-// documented in style= error= version
-pragma "no doc"
-proc channel.writeln(out error:syserr):bool {
-  return this.write(new ioNewline(), error=error);
+  if err then try this._ch_ioerror(err, "in channel.write(" +
+                                        _args_to_proto((...args), preArg="") +
+                                        "style:iostyle)");
+  return true;
 }
 
 // documented in style= error= version
 pragma "no doc"
 proc channel.writeln():bool throws {
-  try {
-    return this.write(new ioNewline());
-  }
-}
-
-// documented in style= error= version
-pragma "no doc"
-proc channel.writeln(const args ...?k, out error:syserr):bool {
-  return this.write((...args), new ioNewline(), error=error);
+  return try this.write(new ioNewline());
 }
 
 // documented in style= error= version
 pragma "no doc"
 proc channel.writeln(const args ...?k):bool throws {
-  try {
-    return this.write((...args), new ioNewline());
-  }
+  return try this.write((...args), new ioNewline());
 }
-
-// documented in style= error= version
-pragma "no doc"
-proc channel.writeln(const args ...?k,
-                     style:iostyle):bool throws {
-  try {
-    return this.write((...args), new ioNewline(), style=style);
-  }
-}
-
 
 /*
 
@@ -4099,16 +3974,12 @@ proc channel.writeln(const args ...?k,
    :arg style: optional argument to provide an :type:`iostyle` for this write.
                If this argument is not provided, use the current style
                associated with this channel.
-   :arg error: optional argument to capture an error code. If this argument
-              is not provided and an error is encountered, this function
-              will halt with an error message.
    :returns: `true` if the write succeeded
 
+   :throws SystemError: Thrown if the values could not be written to the channel.
  */
-proc channel.writeln(const args ...?k,
-                     style:iostyle,
-                     out error:syserr):bool {
-  return this.write((...args), new ioNewline(), style=style, error=error);
+proc channel.writeln(const args ...?k, style:iostyle):bool throws {
+  return try this.write((...args), new ioNewline(), style=style);
 }
 
 /*
@@ -4119,42 +3990,50 @@ proc channel.writeln(const args ...?k,
   Unlike :proc:`file.fsync`, this does not commit the written data
   to the file's device.
 
-  :arg error: optional argument to capture an error code. If this argument
-              is not provided and an error is encountered, this function
-              will halt with an error message.
-
+  :throws SystemError: Thrown if the flush fails.
 */
-proc channel.flush(out error:syserr) {
-  error = ENOERR;
+proc channel.flush() throws {
+  var err:syserr = ENOERR;
   on this.home {
-    error = qio_channel_flush(locking, _channel_internal);
+    err = qio_channel_flush(locking, _channel_internal);
   }
+  if err then try this._ch_ioerror(err, "in channel.flush");
 }
 // documented in error= version
 pragma "no doc"
-proc channel.flush() throws {
-  var e:syserr = ENOERR;
-  this.flush(error=e);
-  if e then try this._ch_ioerror(e, "in channel.flush");
+proc channel.flush(out error:syserr) {
+  error = ENOERR;
+  try {
+    this.flush();
+  } catch e: SystemError {
+    error = e.err;
+  } catch {
+    error = EINVAL;
+  }
 }
 
-/* Assert that a channel has reached end-of-file.
-   Throws an error if the receiving channel is not currently
-   at EOF.
-
-   :arg error: an optional string argument which will be printed
-               out if the assert fails. The default prints "Not at EOF".
+/* Assert that a channel has reached end-of-file and that there was no error
+   doing the read.
  */
-proc channel.assertEOF(error:string = "- Not at EOF") throws {
+proc channel.assertEOF(errStr: string = "- Not at EOF") {
+  var isEOF = try! this.atEOF();
+  if !isEOF then
+    try! this._ch_ioerror("assert failed", errStr);
+}
+
+/* Returns true if a channel has reached end-of-file, false if not.
+   Throws an error if this is a writing channel, or if there was
+   an error doing the read.
+
+   Inherently racy for channels, hence no doc.
+ */
+pragma "no doc"
+proc channel.atEOF(): bool throws {
   if writing {
     try this._ch_ioerror(EINVAL, "assertEOF on writing channel");
   } else {
     var tmp:uint(8);
-    var err:syserr;
-    this.read(tmp, error=err);
-    if err != EEOF {
-      try this._ch_ioerror("assert failed", error);
-    }
+    return !(try this.read(tmp));
   }
 }
 
@@ -4162,22 +4041,18 @@ proc channel.assertEOF(error:string = "- Not at EOF") throws {
   Close a channel. Implicitly performs the :proc:`channel.flush` operation
   (see :ref:`about-io-channel-synchronization`).
 
-  :arg error: optional argument to capture an error code. If this argument
-              is not provided and an error is encountered, this function
-              will halt with an error message.
+  :throws SystemError: Thrown if the channel is not successfully closed.
 */
-proc channel.close(out error:syserr) {
-  error = ENOERR;
-  on this.home {
-    error = qio_channel_close(locking, _channel_internal);
-  }
-}
-
-pragma "no doc"
 proc channel.close() throws {
-  var e:syserr = ENOERR;
-  this.close(error=e);
-  if e then try this._ch_ioerror(e, "in channel.close");
+  var err:syserr = ENOERR;
+
+  if is_c_nil(_channel_internal) then
+    throw SystemError.fromSyserr(EINVAL, "cannot close invalid channel");
+
+  on this.home {
+    err = qio_channel_close(locking, _channel_internal);
+  }
+  if err then try this._ch_ioerror(err, "in channel.close");
 }
 
 /*
@@ -4196,17 +4071,11 @@ proc channel.isclosed() {
 // in the type of the argument will only be caught by a type mismatch
 // in the call to qio_channel_read_amt.
 pragma "no doc"
-proc channel.readBytes(x, len:ssize_t, out error:syserr) {
-  error = ENOERR;
-  if here != this.home then halt("bad remote channel.readBytes");
-  error = qio_channel_read_amt(false, _channel_internal, x, len);
-}
-
-pragma "no doc"
 proc channel.readBytes(x, len:ssize_t) throws {
-  var e:syserr = ENOERR;
-  this.readBytes(x, len, error=e);
-  if e then try this._ch_ioerror(e, "in channel.readBytes");
+  if here != this.home then
+    throw new owned IllegalArgumentError("bad remote channel.readBytes");
+  var err = qio_channel_read_amt(false, _channel_internal, x, len);
+  if err then try this._ch_ioerror(err, "in channel.readBytes");
 }
 
 /*
@@ -4235,10 +4104,6 @@ record ItemReader {
   param locking:bool;
   /* our channel */
   var ch:channel(false,kind,locking);
-  /* read a single item, returning an error */
-  proc read(out arg:ItemType, out error:syserr):bool {
-    return ch.read(arg, error=error);
-  }
   /* read a single item, throwing on error */
   proc read(out arg:ItemType):bool throws {
     return ch.read(arg);
@@ -4275,10 +4140,6 @@ record ItemWriter {
   param locking:bool;
   /* our channel */
   var ch:channel(true,kind,locking);
-  /* write a single item, returning an error */
-  proc write(arg:ItemType, out error:syserr):bool {
-    return ch.write(arg, error=error);
-  }
   /* write a single item, throwing on error */
   proc write(arg:ItemType):bool throws {
     return ch.write(arg);
@@ -4363,22 +4224,14 @@ proc read(type t ...?numTypes) throws {
    by :proc:`FileSystem.remove`.
 
    :arg path: the path to the file to remove
-   :arg error: optional argument to capture an error code. If this argument
-               is not provided and an error is encountered, this function
-               will halt with an error message.
+
+   :throws SystemError: Thrown if the file is not successfully deleted.
  */
 // TODO -- change to FileSystem.remove
-proc unlink(path:string, out error:syserr) {
-  extern proc sys_unlink(path:c_string):err_t;
-  error = sys_unlink(path.localize().c_str());
-}
-
-// documented in the error= version
-pragma "no doc"
 proc unlink(path:string) throws {
-  var err:syserr = ENOERR;
-  unlink(path, err);
-  if err then try ioerror(err, "in unlink", path);
+  extern proc sys_unlink(path:c_string):err_t;
+  var err = sys_unlink(path.localize().c_str());
+  if err then try ioerror(err:syserr, "in unlink", path);
 }
 
 /*
@@ -4393,9 +4246,7 @@ proc unicodeSupported():bool {
 /************** Distributed File Systems ***************/
 
 private extern const FTYPE_NONE   : c_int;
-private extern const FTYPE_HDFS   : c_int;
 private extern const FTYPE_LUSTRE : c_int;
-private extern const FTYPE_CURL   : c_int;
 
 pragma "no doc"
 proc file.fstype():int throws {
@@ -4420,6 +4271,8 @@ proc file.fstype():int throws {
    :returns: a tuple of (chunkStart, chunkEnd) so that the bytes
              in chunkStart..chunkEnd-1 are stored in a manner that makes
              reading that chunk at a time most efficient
+
+   :throws SystemError: Thrown if the chunk is not attained.
  */
 proc file.getchunk(start:int(64) = 0, end:int(64) = max(int(64))):(int(64),int(64)) throws {
   var err:syserr = ENOERR;
@@ -4492,7 +4345,7 @@ proc file.localesForRegion(start:int(64), end:int(64)) {
     var err:syserr;
     var locs: c_ptr(c_string);
     var num_hosts:c_int;
-    err = qio_locales_for_region(this._file_internal, start, end, locs, num_hosts);
+    err = qio_locales_for_region(this._file_internal, start, end, c_ptrTo(locs), num_hosts);
     // looping over Locales enforces the ordering constraint on the locales.
     for loc in Locales {
       if (findloc(loc.name, locs, num_hosts:int)) then
@@ -4806,7 +4659,7 @@ String and Bytes Conversions
    if needed - the periods, so the shortest truncated
    string is ``""...``  Generally, you won't be able to read
    these back in.
- * when reading - read exactly 17 Unicode code points
+ * when reading - read exactly 17 Unicode codepoints
 ``%|17s``
  * when writing - emit string but cause runtime error if length
    does not match
@@ -5044,7 +4897,7 @@ Going through each section for text conversions:
    precision indicates the maximum number of columns to print - and the result
    will be truncated if it does not fit. In readf for these textual string
    conversions, the precision indicates the maximum number of characters
-   (e.g. Unicode code points) to input.
+   (e.g. Unicode codepoints) to input.
 
    The precision is silently ignored for integral conversions
    (``%i``, ``%u``, etc) and for ``%//`` conversions.
@@ -5079,7 +4932,8 @@ Going through each section for text conversions:
 [conversion type]
    ``t``
     means *type-based* or *thing* - uses writeThis/readThis but ignores
-    width and precision
+    width. Precision will impact any floating point values output
+    in this conversion.
    ``n``
     means type-based number, allowing width and precision
    ``i``
@@ -5302,7 +5156,10 @@ proc _toIntegral(x:?t) where _isIoPrimitiveType(t) && !isIntegralType(t)
 {
   var ret: (int, bool);
   try {
-    ret = (x:int, true);
+    if isAbstractEnumType(t) then
+      ret = (0, false);
+    else
+      ret = (x:int, true);
   } catch {
     ret = (0, false);
   }
@@ -5345,7 +5202,10 @@ proc _toSigned(x:?t) where _isIoPrimitiveType(t) && !isIntegralType(t)
 {
   var ret: (int, bool);
   try {
-    ret = (x:int, true);
+    if isAbstractEnumType(t) then
+      ret = (0, false);
+    else
+      ret = (x:int, true);
   } catch {
     ret = (0, false);
   }
@@ -5389,7 +5249,10 @@ proc _toUnsigned(x:?t) where _isIoPrimitiveType(t) && !isIntegralType(t)
 {
   var ret: (uint, bool);
   try {
-    ret = (x:uint, true);
+    if isAbstractEnumType(t) then
+      ret = (0:uint, false);
+    else
+      ret = (x:uint, true);
   } catch {
     ret = (0:uint, false);
   }
@@ -5412,7 +5275,10 @@ proc _toReal(x:?t) where _isIoPrimitiveType(t) && !isRealType(t)
 {
   var ret: (real, bool);
   try {
-    ret = (x:real, true);
+    if isAbstractEnumType(t) then
+      ret = (0.0, false);
+    else
+      ret = (x:real, true);
   } catch {
     ret = (0.0, false);
   }
@@ -5434,7 +5300,10 @@ proc _toImag(x:?t) where _isIoPrimitiveType(t) && !isImagType(t)
 {
   var ret: (imag, bool);
   try {
-    ret = (x:imag, true);
+    if isAbstractEnumType(t) then
+      ret = (0.0i, false);
+    else
+      ret = (x:imag, true);
   } catch {
     ret = (0.0i, false);
   }
@@ -5457,7 +5326,10 @@ proc _toComplex(x:?t) where _isIoPrimitiveType(t) && !isComplexType(t)
 {
   var ret: (complex, bool);
   try {
-    ret = (x:complex, true);
+    if isAbstractEnumType(t) then
+      ret = (0.0+0.0i, false);
+    else
+      ret = (x:complex, true);
   } catch {
     ret = (0.0+0.0i, false);
   }
@@ -5501,7 +5373,10 @@ proc _toNumeric(x:?t) where _isIoPrimitiveType(t) && !isNumericType(t)
   // enums, bools get cast to int.
   var ret: (int, bool);
   try {
-    ret = (x:int, true);
+    if isAbstractEnumType(t) then
+      ret = (0, false);
+    else
+      ret = (x:int, true);
   } catch {
     ret = (0, false);
   }
@@ -5514,19 +5389,58 @@ proc _toNumeric(x:?t) where !_isIoPrimitiveType(t)
   return (0, false);
 }
 
+private inline
+proc _toBytes(x:bytes)
+{
+  return (x, true);
+}
 
 private inline
-proc _toString(x:?t) where t==string
+proc _toBytes(x:string)
+{
+  return (x:bytes, true);
+}
+
+// don't allow anything else to be cast to bytes for now
+private inline
+proc _toBytes(x:?t)
+{
+  return ("":bytes, false);
+}
+
+private inline
+proc _toString(x:string)
 {
   return (x, true);
 }
 private inline
-proc _toString(x:?t) where (_isIoPrimitiveType(t) && t!=string)
+proc _toString(x:bytes)
+{
+  return ("", false);
+}
+private inline
+proc _toString(x:?t) where (_isIoPrimitiveType(t) && t!=bytes && t!=string)
 {
   return (x:string, true);
 }
 private inline
 proc _toString(x:?t) where !_isIoPrimitiveType(t)
+{
+  return ("", false);
+}
+private inline
+proc _toStringFromBytesOrString(x:bytes)
+{
+  return (createStringWithBorrowedBuffer(x.buff, length=x.length, size=x._size),
+          true);
+}
+private inline
+proc _toStringFromBytesOrString(x:string)
+{
+  return (x, true);
+}
+private inline
+proc _toStringFromBytesOrString(x)
 {
   return ("", false);
 }
@@ -5542,7 +5456,7 @@ proc _toChar(x:?t) where t == string
   var chr:int(32);
   var nbytes:c_int;
   var local_x = x.localize();
-  qio_decode_char_buf(chr, nbytes, local_x.c_str(), local_x.length:ssize_t);
+  qio_decode_char_buf(chr, nbytes, local_x.c_str(), local_x.numBytes:ssize_t);
   return (chr, true);
 }
 private inline
@@ -5570,7 +5484,26 @@ private inline
 proc _setIfPrimitive(ref lhs:?t, rhs:?t2, argi:int):syserr where t!=bool&&_isIoPrimitiveType(t)
 {
   try {
-    lhs = rhs:t;
+    if isAbstractEnumType(t) {
+      if isStringType(t2) {
+        lhs = rhs:t;
+      } else {
+        return ERANGE;
+      }
+    } else if isEnumType(t) {
+      if (isIntType(t2) || isStringType(t2)) {
+        lhs = rhs:t;
+      } else {
+        lhs = rhs:int:t;
+      }
+    } else {
+      if isBytesType(t2) && isStringType(t) {
+        lhs = rhs.decode(decodePolicy.strict);
+      }
+      else {
+        lhs = rhs:t;
+      }
+    }
   } catch {
     return ERANGE;
   }
@@ -5643,10 +5576,18 @@ class _channel_regexp_info {
   proc deinit() {
     clear();
   }
+  override proc writeThis(f) {
+    f <~> "{hasRegexp = " + hasRegexp: string;
+    f <~> ", matchedRegexp = " + matchedRegexp: string;
+    f <~> ", releaseRegexp = " + releaseRegexp: string;
+    f <~> ", ... capturei = " + capturei: string;
+    f <~> ", ncaptures = " + ncaptures: string + "}";
+  }
 }
 
 pragma "no doc"
-proc channel._match_regexp_if_needed(cur:size_t, len:size_t, ref error:syserr, ref style:iostyle, ref r:_channel_regexp_info)
+proc channel._match_regexp_if_needed(cur:size_t, len:size_t, ref error:syserr,
+    ref style:iostyle, r:unmanaged _channel_regexp_info)
 {
   if qio_regexp_ok(r.theRegexp) {
     if r.matchedRegexp then return;
@@ -5686,7 +5627,7 @@ proc channel._match_regexp_if_needed(cur:size_t, len:size_t, ref error:syserr, r
       }
       // And, advance the channel to the end of the match.
       var cur = qio_channel_offset_unlocked(_channel_internal);
-      var target = r.matches[0].offset + r.matches[0].len;
+      var target = (r.matches[0].offset + r.matches[0].len):int;
       error = qio_channel_advance(false, _channel_internal, target - cur);
     } else {
       // otherwise, clear out caps...
@@ -5712,10 +5653,10 @@ pragma "no doc"
 proc channel._format_reader(
     fmt:c_string, ref cur:size_t, len:size_t, ref error:syserr,
     ref conv:qio_conv_t, ref gotConv:bool, ref style:iostyle,
-    ref r:_channel_regexp_info,
+    ref r:unmanaged _channel_regexp_info?,
     isReadf:bool)
 {
-  if r != nil then r.hasRegexp = false;
+  if r != nil then r!.hasRegexp = false;
   if !error {
     while cur < len {
       gotConv = false;
@@ -5765,20 +5706,21 @@ proc channel._format_reader(
           error = qio_format_error_write_regexp();
         } else {
           // allocate regexp info if needed
-          if r == nil then r = new _channel_regexp_info();
+          if r == nil then r = new unmanaged _channel_regexp_info();
+          const rnn = r!;  // indicate that it is non-nil
           // clear out old data, if there is any.
-          r.clear();
+          rnn.clear();
           // Compile a regexp from the format string
           var errstr:string;
           // build a regexp out of regexp and regexp_flags
-          qio_regexp_create_compile_flags_2(conv.regexp, conv.regexp_length, conv.regexp_flags, conv.regexp_flags_length, /* utf8? */ true, r.theRegexp);
-          r.releaseRegexp = true;
-          if qio_regexp_ok(r.theRegexp) {
-            r.hasRegexp = true;
-            r.ncaptures = qio_regexp_get_ncaptures(r.theRegexp);
+          qio_regexp_create_compile_flags_2(conv.regexp, conv.regexp_length, conv.regexp_flags, conv.regexp_flags_length, /* utf8? */ true, rnn.theRegexp);
+          rnn.releaseRegexp = true;
+          if qio_regexp_ok(rnn.theRegexp) {
+            rnn.hasRegexp = true;
+            rnn.ncaptures = qio_regexp_get_ncaptures(rnn.theRegexp);
             // If there are no captures, and we don't have arguments
             // to consume, go ahead and match the regexp.
-            if r.ncaptures > 0 ||
+            if rnn.ncaptures > 0 ||
                conv.preArg1 != QIO_CONV_UNK ||
                conv.preArg2 != QIO_CONV_UNK ||
                conv.preArg3 != QIO_CONV_UNK
@@ -5788,7 +5730,7 @@ proc channel._format_reader(
               break;
             } else {
               // No args will be consumed.
-              _match_regexp_if_needed(cur, len, error, style, r);
+              _match_regexp_if_needed(cur, len, error, style, rnn);
             }
           } else {
             error = qio_format_error_bad_regexp();
@@ -6132,17 +6074,18 @@ proc channel._read_complex(width:uint(32), out t:complex, i:int)
    :ref:`about-io-formatted-io`.
 
    :arg fmt: the format string
-   :arg args: the arguments to write
-   :arg error: optional argument to capture an error code. If this argument
-               is not provided and an error is encountered, this function
-               will halt with an error message.
+   :arg args: 0 or more arguments to write
+   :returns: true
+
+   :throws IllegalArgumentError: if an unsupported argument type is encountered.
+   :throws SystemError: if the arguments could not be written.
  */
-proc channel.writef(fmtStr:string, const args ...?k, out error:syserr):bool {
+proc channel.writef(fmtStr: string, const args ...?k): bool throws {
   if !writing then compilerError("writef on read-only channel");
-  error = ENOERR;
   const origLocale = this.getLocaleOfIoRequest();
+  var err: syserr = ENOERR;
   on this.home {
-    try! this.lock();
+    try this.lock(); defer { this.unlock(); }
     var fmt = fmtStr.localize().c_str();
     var save_style = this._style();
     var cur:size_t = 0;
@@ -6153,7 +6096,10 @@ proc channel.writef(fmtStr:string, const args ...?k, out error:syserr):bool {
     var end:size_t;
     var argType:(k+5)*c_int;
 
-    var r:_channel_regexp_info = nil;
+    var r:unmanaged _channel_regexp_info?;
+    defer {
+      if r then delete r;
+    }
 
     for i in 1..argType.size {
       argType(i) = QIO_CONV_UNK;
@@ -6169,14 +6115,14 @@ proc channel.writef(fmtStr:string, const args ...?k, out error:syserr):bool {
       gotConv = false;
 
       if j <= i {
-        _format_reader(fmt, cur, len, error,
+        _format_reader(fmt, cur, len, err,
                        conv, gotConv, style, r,
                        false);
       }
 
-      _conv_helper(error, conv, gotConv, j, argType);
+      _conv_helper(err, conv, gotConv, j, argType);
 
-      var domore = _conv_sethandler(error, argType(i), style, i,args(i),false);
+      var domore = _conv_sethandler(err, argType(i), style, i,args(i),false);
 
       if domore {
         this._set_style(style);
@@ -6185,109 +6131,113 @@ proc channel.writef(fmtStr:string, const args ...?k, out error:syserr):bool {
           when QIO_CONV_ARG_TYPE_SIGNED, QIO_CONV_ARG_TYPE_BINARY_SIGNED {
             var (t,ok) = _toSigned(args(i));
             if ! ok {
-              error = qio_format_error_arg_mismatch(i);
+              err = qio_format_error_arg_mismatch(i);
             } else {
               if argType(i) == QIO_CONV_ARG_TYPE_BINARY_SIGNED then
-                error = _write_signed(style.max_width_bytes, t, i);
+                err = _write_signed(style.max_width_bytes, t, i);
               else
-                error = _write_one_internal(_channel_internal, iokind.dynamic, t, origLocale);
+                err = _write_one_internal(_channel_internal, iokind.dynamic, t, origLocale);
             }
           } when QIO_CONV_ARG_TYPE_UNSIGNED, QIO_CONV_ARG_TYPE_BINARY_UNSIGNED {
             var (t,ok) = _toUnsigned(args(i));
             if ! ok {
-              error = qio_format_error_arg_mismatch(i);
+              err = qio_format_error_arg_mismatch(i);
             } else {
               if argType(i) == QIO_CONV_ARG_TYPE_BINARY_UNSIGNED then
-                error = _write_unsigned(style.max_width_bytes, t, i);
+                err = _write_unsigned(style.max_width_bytes, t, i);
               else
-                error = _write_one_internal(_channel_internal, iokind.dynamic, t, origLocale);
+                err = _write_one_internal(_channel_internal, iokind.dynamic, t, origLocale);
             }
           } when QIO_CONV_ARG_TYPE_REAL, QIO_CONV_ARG_TYPE_BINARY_REAL {
             var (t,ok) = _toReal(args(i));
             if ! ok {
-              error = qio_format_error_arg_mismatch(i);
+              err = qio_format_error_arg_mismatch(i);
             } else {
               if argType(i) == QIO_CONV_ARG_TYPE_BINARY_REAL then
-                error = _write_real(style.max_width_bytes, t, i);
+                err = _write_real(style.max_width_bytes, t, i);
               else
-                error = _write_one_internal(_channel_internal, iokind.dynamic, t, origLocale);
+                err = _write_one_internal(_channel_internal, iokind.dynamic, t, origLocale);
             }
           } when QIO_CONV_ARG_TYPE_IMAG, QIO_CONV_ARG_TYPE_BINARY_IMAG {
             var (t,ok) = _toImag(args(i));
             if ! ok {
-              error = qio_format_error_arg_mismatch(i);
+              err = qio_format_error_arg_mismatch(i);
             } else {
               if argType(i) == QIO_CONV_ARG_TYPE_BINARY_IMAG then
-                error = _write_real(style.max_width_bytes, t:real, i);
+                err = _write_real(style.max_width_bytes, t:real, i);
               else
-                error = _write_one_internal(_channel_internal, iokind.dynamic, t, origLocale);
+                err = _write_one_internal(_channel_internal, iokind.dynamic, t, origLocale);
             }
           } when QIO_CONV_ARG_TYPE_COMPLEX, QIO_CONV_ARG_TYPE_BINARY_COMPLEX {
             var (t,ok) = _toComplex(args(i));
             if ! ok {
-              error = qio_format_error_arg_mismatch(i);
+              err = qio_format_error_arg_mismatch(i);
             } else {
               if argType(i) == QIO_CONV_ARG_TYPE_BINARY_COMPLEX then
-                error = _write_complex(style.max_width_bytes, t, i);
-              else error = _write_one_internal(_channel_internal, iokind.dynamic, t, origLocale);
+                err = _write_complex(style.max_width_bytes, t, i);
+              else err = _write_one_internal(_channel_internal, iokind.dynamic, t, origLocale);
             }
           } when QIO_CONV_ARG_TYPE_NUMERIC {
             var (t,ok) = _toNumeric(args(i));
             if ! ok {
-              error = qio_format_error_arg_mismatch(i);
-            } else error = _write_one_internal(_channel_internal, iokind.dynamic, t, origLocale);
+              err = qio_format_error_arg_mismatch(i);
+            } else err = _write_one_internal(_channel_internal, iokind.dynamic, t, origLocale);
           } when QIO_CONV_ARG_TYPE_CHAR {
             var (t,ok) = _toChar(args(i));
             if ! ok {
-              error = qio_format_error_arg_mismatch(i);
-            } else error = _write_one_internal(_channel_internal, iokind.dynamic, new ioChar(t), origLocale);
-          } when QIO_CONV_ARG_TYPE_STRING {
+              err = qio_format_error_arg_mismatch(i);
+            } else err = _write_one_internal(_channel_internal, iokind.dynamic, new ioChar(t), origLocale);
+          } when QIO_CONV_ARG_TYPE_BINARY_STRING {
+            var (t,ok) = _toStringFromBytesOrString(args(i));
+            if ! ok {
+              err = qio_format_error_arg_mismatch(i);
+            } else err = _write_one_internal(_channel_internal, iokind.dynamic, t, origLocale);
+          } when QIO_CONV_ARG_TYPE_STRING { // can only happen with string
             var (t,ok) = _toString(args(i));
             if ! ok {
-              error = qio_format_error_arg_mismatch(i);
-            } else error = _write_one_internal(_channel_internal, iokind.dynamic, t, origLocale);
-          } when QIO_CONV_ARG_TYPE_REGEXP {
-            // It's not so clear what to do when printing
+              err = qio_format_error_arg_mismatch(i);
+            } else err = _write_one_internal(_channel_internal, iokind.dynamic, t, origLocale);
+          } when QIO_CONV_ARG_TYPE_REGEXP { // It's not so clear what to do when printing
             // a regexp. So we just don't handle it.
-            error = qio_format_error_write_regexp();
+            err = qio_format_error_write_regexp();
           } when QIO_CONV_ARG_TYPE_REPR {
-            error = _write_one_internal(_channel_internal, iokind.dynamic, args(i), origLocale);
+            err = _write_one_internal(_channel_internal, iokind.dynamic, args(i), origLocale);
           } otherwise {
             // Unhandled argument type!
-            halt("readf/writef internal error ", argType(i));
+            throw new owned IllegalArgumentError("args(" + i:string + ")",
+                                           "writef internal error " + argType(i):string);
           }
         }
       }
     }
 
-    if ! error {
+    if ! err {
       if cur < len {
         var dummy:c_int;
-        _format_reader(fmt, cur, len, error,
+        _format_reader(fmt, cur, len, err,
                        conv, gotConv, style, r,
                        false);
       }
 
       if cur < len {
         // Mismatched number of arguments!
-        error = qio_format_error_too_few_args();
+        err = qio_format_error_too_few_args();
       }
     }
 
     this._set_style(save_style);
-    this.unlock();
   }
-  return !error;
+
+  if err then try this._ch_ioerror(err, "in channel.writef(fmt:string)");
+  return true;
 }
 
-
-// documented in string error= version
-pragma "no doc"
-proc channel.writef(fmtStr:string, out error:syserr):bool {
+// documented in varargs version
+proc channel.writef(fmtStr:string): bool throws {
   if !writing then compilerError("writef on read-only channel");
-  error = ENOERR;
+  var err:syserr = ENOERR;
   on this.home {
-    try! this.lock();
+    try this.lock(); defer { this.unlock(); }
     var fmt = fmtStr.localize().c_str();
     var save_style = this._style();
     var cur:size_t = 0;
@@ -6298,29 +6248,33 @@ proc channel.writef(fmtStr:string, out error:syserr):bool {
     var end:size_t;
     var dummy:c_int;
 
-    var r:_channel_regexp_info = nil;
+    var r:unmanaged _channel_regexp_info?;
+    defer {
+      if r then delete r;
+    }
 
-    _format_reader(fmt, cur, len, error,
+    _format_reader(fmt, cur, len, err,
                    conv, gotConv, style, r,
                    false);
 
-    if ! error {
+    if ! err {
       if gotConv {
-        error = qio_format_error_too_few_args();
+        err = qio_format_error_too_few_args();
       }
     }
 
-    if ! error {
+    if ! err {
       if cur < len {
         // Mismatched number of arguments!
-        error = qio_format_error_too_few_args();
+        err = qio_format_error_too_few_args();
       }
     }
 
     this._set_style(save_style);
-    this.unlock();
   }
-  return !error;
+
+  if err then try this._ch_ioerror(err, "in channel.writef(fmt:string, ...)");
+  return true;
 }
 
 /*
@@ -6328,23 +6282,26 @@ proc channel.writef(fmtStr:string, out error:syserr):bool {
    Read arguments according to a format string. See
    :ref:`about-io-formatted-io`.
 
+   .. note::
+
+      Intents for all arguments except the format string are `ref`. If `readf`
+      is used with formats that require an additional argument such as `%*i` and
+      `%*S`, then those arguments cannot be constants. Instead, store the value
+      into a variable and pass that.
+
    :arg fmt: the format string
    :arg args: the arguments to read
-   :arg error: optional argument to capture an error code. If this argument
-               is not provided and an error is encountered, this function
-               will halt with an error message.
    :returns: true if all arguments were read according to the format string,
-             false on EOF. If the format did not match the input, returns
-             false with error=EFORMAT or halts if no error argument was
-             provided.
- */
+             false on EOF or if the format did not match the input.
 
-proc channel.readf(fmtStr:string, ref args ...?k, out error:syserr):bool {
+   :throws SystemError: Thrown if the arguments could not be read.
+ */
+proc channel.readf(fmtStr:string, ref args ...?k): bool throws {
   if writing then compilerError("readf on write-only channel");
-  error = ENOERR;
   const origLocale = this.getLocaleOfIoRequest();
+  var err:syserr = ENOERR;
   on this.home {
-    try! this.lock();
+    try this.lock(); defer { this.unlock(); }
     var fmt = fmtStr.localize().c_str();
     var save_style = this._style();
     var cur:size_t = 0;
@@ -6355,14 +6312,17 @@ proc channel.readf(fmtStr:string, ref args ...?k, out error:syserr):bool {
     var end:size_t;
     var argType:(k+5)*c_int;
 
-    var r:_channel_regexp_info = nil;
+    var r:unmanaged _channel_regexp_info?;
+    defer {
+      if r then delete r;
+    }
 
     for i in 1..argType.size {
       argType(i) = QIO_CONV_UNK;
     }
 
-    error = qio_channel_mark(false, _channel_internal);
-    if !error {
+    err = qio_channel_mark(false, _channel_internal);
+    if !err {
       var j = 1;
 
       for param i in 1..k {
@@ -6370,26 +6330,29 @@ proc channel.readf(fmtStr:string, ref args ...?k, out error:syserr):bool {
         // we're writing it all in a param for in order to
         // get generic argument handling.
         if j <= i {
-          _format_reader(fmt, cur, len, error,
+          _format_reader(fmt, cur, len, err,
                          conv, gotConv, style, r,
                          true);
 
-          if r != nil && r.hasRegexp {
+          if r != nil {
+           const rnn = r!;  // indicate that it is non-nil
+           if (rnn.hasRegexp) {
             // We need to handle the next ncaptures arguments.
-            if i + r.ncaptures - 1 > k {
-              error = qio_format_error_too_few_args();
+            if i + rnn.ncaptures - 1 > k {
+              err= qio_format_error_too_few_args();
             }
-            for z in 0..#r.ncaptures {
+            for z in 0..#rnn.ncaptures {
               if i+z <= argType.size {
                 argType(i+z) = QIO_CONV_SET_CAPTURE;
               }
             }
+           }
           }
         }
 
-        _conv_helper(error, conv, gotConv, j, argType);
+        _conv_helper(err, conv, gotConv, j, argType);
 
-        var domore = _conv_sethandler(error, argType(i),style,i,args(i),false);
+        var domore = _conv_sethandler(err, argType(i),style,i,args(i),false);
 
         if domore {
           this._set_style(style);
@@ -6398,122 +6361,131 @@ proc channel.readf(fmtStr:string, ref args ...?k, out error:syserr):bool {
             when QIO_CONV_ARG_TYPE_SIGNED, QIO_CONV_ARG_TYPE_BINARY_SIGNED {
               var (t,ok) = _toSigned(args(i));
               if ! ok {
-                error = qio_format_error_arg_mismatch(i);
+                err = qio_format_error_arg_mismatch(i);
               } else {
                 var ti:int;
                 if argType(i) == QIO_CONV_ARG_TYPE_BINARY_SIGNED then
-                  error = _read_signed(style.max_width_bytes, ti, i);
+                  err = _read_signed(style.max_width_bytes, ti, i);
                 else
-                  error = _read_one_internal(_channel_internal, iokind.dynamic, ti, origLocale);
-                if ! error then error = _setIfPrimitive(args(i),ti,i);
+                  err = _read_one_internal(_channel_internal, iokind.dynamic, ti, origLocale);
+                if ! err then err = _setIfPrimitive(args(i),ti,i);
               }
             }
             when QIO_CONV_ARG_TYPE_UNSIGNED, QIO_CONV_ARG_TYPE_BINARY_UNSIGNED {
               var (t,ok) = _toUnsigned(args(i));
               if ! ok {
-                error = qio_format_error_arg_mismatch(i);
+                err = qio_format_error_arg_mismatch(i);
               } else {
                 var ti:uint;
                 if argType(i) == QIO_CONV_ARG_TYPE_BINARY_UNSIGNED then
-                  error = _read_unsigned(style.max_width_bytes, ti, i);
+                  err = _read_unsigned(style.max_width_bytes, ti, i);
                 else
-                  error = _read_one_internal(_channel_internal, iokind.dynamic, ti, origLocale);
-                if ! error then error = _setIfPrimitive(args(i),ti,i);
+                  err = _read_one_internal(_channel_internal, iokind.dynamic, ti, origLocale);
+                if ! err then err = _setIfPrimitive(args(i),ti,i);
               }
             } when QIO_CONV_ARG_TYPE_REAL, QIO_CONV_ARG_TYPE_BINARY_REAL {
               var (t,ok) = _toReal(args(i));
               if ! ok {
-                error = qio_format_error_arg_mismatch(i);
+                err = qio_format_error_arg_mismatch(i);
               } else {
                 var ti:real;
                 if argType(i) == QIO_CONV_ARG_TYPE_BINARY_REAL then
-                  error = _read_real(style.max_width_bytes, ti, i);
+                  err = _read_real(style.max_width_bytes, ti, i);
                 else
-                  error = _read_one_internal(_channel_internal, iokind.dynamic, ti, origLocale);
-                if ! error then error = _setIfPrimitive(args(i),ti,i);
+                  err = _read_one_internal(_channel_internal, iokind.dynamic, ti, origLocale);
+                if ! err then err = _setIfPrimitive(args(i),ti,i);
               }
             } when QIO_CONV_ARG_TYPE_IMAG, QIO_CONV_ARG_TYPE_BINARY_IMAG {
               var (t,ok) = _toImag(args(i));
               if ! ok {
-                error = qio_format_error_arg_mismatch(i);
+                err = qio_format_error_arg_mismatch(i);
               } else {
                 var ti:imag;
                 if argType(i) == QIO_CONV_ARG_TYPE_BINARY_IMAG {
                   var tr:real;
-                  error = _read_real(style.max_width_bytes, tr, i);
+                  err = _read_real(style.max_width_bytes, tr, i);
                   ti = tr:imag;
                 } else
-                  error = _read_one_internal(_channel_internal, iokind.dynamic, ti, origLocale);
-                if ! error then error = _setIfPrimitive(args(i),ti,i);
+                  err = _read_one_internal(_channel_internal, iokind.dynamic, ti, origLocale);
+                if ! err then err = _setIfPrimitive(args(i),ti,i);
               }
             } when QIO_CONV_ARG_TYPE_COMPLEX, QIO_CONV_ARG_TYPE_BINARY_COMPLEX {
               var (t,ok) = _toComplex(args(i));
               if ! ok {
-                error = qio_format_error_arg_mismatch(i);
+                err = qio_format_error_arg_mismatch(i);
               } else {
                 var ti:complex;
                 if argType(i) == QIO_CONV_ARG_TYPE_BINARY_COMPLEX then
-                 error = _read_complex(style.max_width_bytes, ti, i);
+                 err = _read_complex(style.max_width_bytes, ti, i);
                 else
-                  error = _read_one_internal(_channel_internal, iokind.dynamic, ti, origLocale);
-                if ! error then error = _setIfPrimitive(args(i),ti,i);
+                  err = _read_one_internal(_channel_internal, iokind.dynamic, ti, origLocale);
+                if ! err then err = _setIfPrimitive(args(i),ti,i);
               }
             } when QIO_CONV_ARG_TYPE_NUMERIC {
               var (t,ok) = _toNumeric(args(i));
               if ! ok {
-                error = qio_format_error_arg_mismatch(i);
+                err = qio_format_error_arg_mismatch(i);
               } else {
                 var ti = t;
-                error = _read_one_internal(_channel_internal, iokind.dynamic, ti, origLocale);
-                if ! error then error = _setIfPrimitive(args(i),ti,i);
+                err = _read_one_internal(_channel_internal, iokind.dynamic, ti, origLocale);
+                if ! err then err = _setIfPrimitive(args(i),ti,i);
               }
             } when QIO_CONV_ARG_TYPE_CHAR {
               var (t,ok) = _toChar(args(i));
               var chr = new ioChar(t);
               if ! ok {
-                error = qio_format_error_arg_mismatch(i);
-              } else error = _read_one_internal(_channel_internal, iokind.dynamic, chr, origLocale);
-              if ! error then _setIfChar(args(i),chr.ch);
+                err = qio_format_error_arg_mismatch(i);
+              } else err = _read_one_internal(_channel_internal, iokind.dynamic, chr, origLocale);
+              if ! err then _setIfChar(args(i),chr.ch);
+            } when QIO_CONV_ARG_TYPE_BINARY_STRING {
+              var (t,ok) = _toStringFromBytesOrString(args(i));
+              if ! ok {
+                err = qio_format_error_arg_mismatch(i);
+              }
+              else err = _read_one_internal(_channel_internal, iokind.dynamic, t, origLocale);
+              if ! err then err = _setIfPrimitive(args(i),t,i);
             } when QIO_CONV_ARG_TYPE_STRING {
               var (t,ok) = _toString(args(i));
               if ! ok {
-                error = qio_format_error_arg_mismatch(i);
+                err = qio_format_error_arg_mismatch(i);
               }
-              else error = _read_one_internal(_channel_internal, iokind.dynamic, t, origLocale);
-              if ! error then error = _setIfPrimitive(args(i),t,i);
+              else err = _read_one_internal(_channel_internal, iokind.dynamic, t, origLocale);
+              if ! err then err = _setIfPrimitive(args(i),t,i);
             } when QIO_CONV_ARG_TYPE_REGEXP {
               var (t,ok) = _toRegexp(args(i));
               if ! ok {
-                error = qio_format_error_arg_mismatch(i);
+                err = qio_format_error_arg_mismatch(i);
               }
               // match it here.
-              if r == nil then r = new _channel_regexp_info();
-              r.clear();
-              r.theRegexp = t._regexp;
-              r.hasRegexp = true;
-              r.releaseRegexp = false;
-              _match_regexp_if_needed(cur, len, error, style, r);
+              if r == nil then r = new unmanaged _channel_regexp_info();
+              const rnn = r!;  // indicate that it is non-nil
+              rnn.clear();
+              rnn.theRegexp = t._regexp;
+              rnn.hasRegexp = true;
+              rnn.releaseRegexp = false;
+              _match_regexp_if_needed(cur, len, err, style, rnn);
 
               // Set the capture groups.
               // We need to handle the next ncaptures arguments.
-              if i + r.ncaptures - 1 > k {
-                error = qio_format_error_too_few_args();
+              if i + rnn.ncaptures - 1 > k {
+                err = qio_format_error_too_few_args();
               }
-              for z in 0..#r.ncaptures {
+              for z in 0..#rnn.ncaptures {
                 if i+z <= argType.size {
                   argType(i+z+1) = QIO_CONV_SET_CAPTURE;
                 }
               }
             } when QIO_CONV_ARG_TYPE_REPR {
-              error = _read_one_internal(_channel_internal, iokind.dynamic, args(i), origLocale);
+              err = _read_one_internal(_channel_internal, iokind.dynamic, args(i), origLocale);
             } when QIO_CONV_SET_CAPTURE {
               if r == nil {
-                error = qio_format_error_bad_regexp();
+                err = qio_format_error_bad_regexp();
               } else {
-                _match_regexp_if_needed(cur, len, error, style, r);
+                const rnn = r!;  // indicate that it is non-nil
+                _match_regexp_if_needed(cur, len, err, style, rnn);
                 // Set args(i) to the capture at capturei.
-                if r.capturei >= r.ncaptures {
-                  error = qio_format_error_bad_regexp();
+                if rnn.capturei >= rnn.ncaptures {
+                  err = qio_format_error_bad_regexp();
                 } else {
                   // We have a string in captures[capturei] and
                   // we need to set args(i) to that.
@@ -6521,42 +6493,39 @@ proc channel.readf(fmtStr:string, ref args ...?k, out error:syserr):bool {
                     // but only if it's a primitive type
                     // (so that we can avoid problems with string-to-record).
                     try {
-                      args(i) = r.capArr[r.capturei]:args(i).type;
+                      args(i) = rnn.capArr[rnn.capturei]:args(i).type;
                     } catch {
-                      error = qio_format_error_bad_regexp();
+                      err = qio_format_error_bad_regexp();
                     }
                   }
-                  r.capturei += 1;
+                  rnn.capturei += 1;
                 }
               }
             } otherwise {
-              halt("Internal error in readf/writef");
+              throw new owned IllegalArgumentError("args(" + i:string + ")",
+                                             "readf internal error " + argType(i):string);
             }
           }
         }
       }
 
-      if ! error {
+      if ! err {
         if cur < len {
           var dummy:c_int;
-          _format_reader(fmt, cur, len, error,
+          _format_reader(fmt, cur, len, err,
                          conv, gotConv, style, r,
                          true);
         }
       }
 
-      if ! error {
+      if ! err {
         if cur < len {
           // Mismatched number of arguments!
-          error = qio_format_error_too_few_args();
+          err = qio_format_error_too_few_args();
         }
       }
 
-      if r != nil {
-        delete r;
-      }
-
-      if ! error {
+      if ! err {
         // commit.
         qio_channel_commit_unlocked(_channel_internal);
       } else {
@@ -6565,18 +6534,25 @@ proc channel.readf(fmtStr:string, ref args ...?k, out error:syserr):bool {
       }
     }
     this._set_style(save_style);
-    this.unlock();
   }
-  return !error;
+
+  if !err {
+    return true;
+  } else if err == EEOF {
+    return false;
+  } else {
+    try this._ch_ioerror(err, "in channel.readf(fmt:string, ...)");
+  }
+  return false;
 }
 
-// documented in string error= version
+// documented in varargs version
 pragma "no doc"
-proc channel.readf(fmtStr:string, out error:syserr):bool {
+proc channel.readf(fmtStr:string) throws {
   if writing then compilerError("readf on write-only channel");
-  error = ENOERR;
+  var err:syserr = ENOERR;
   on this.home {
-    try! this.lock();
+    try this.lock(); defer { this.unlock(); }
     var fmt = fmtStr.localize().c_str();
     var save_style = this._style();
     var cur:size_t = 0;
@@ -6587,23 +6563,26 @@ proc channel.readf(fmtStr:string, out error:syserr):bool {
     var end:size_t;
     var dummy:c_int;
 
-    var r:_channel_regexp_info = nil;
+    var r:unmanaged _channel_regexp_info?;
+    defer {
+      if r then delete r;
+    }
 
-    error = qio_channel_mark(false, _channel_internal);
-    if !error {
-      _format_reader(fmt, cur, len, error,
+    err = qio_channel_mark(false, _channel_internal);
+    if !err {
+      _format_reader(fmt, cur, len, err,
                      conv, gotConv, style, r,
                      true);
       if gotConv {
-        error = qio_format_error_too_few_args();
+        err = qio_format_error_too_few_args();
       }
     }
-    if !error {
+    if !err {
       if cur < len {
-        error = qio_format_error_too_few_args();
+        err = qio_format_error_too_few_args();
       }
     }
-    if ! error {
+    if ! err {
       // commit.
       qio_channel_commit_unlocked(_channel_internal);
     } else {
@@ -6612,58 +6591,14 @@ proc channel.readf(fmtStr:string, out error:syserr):bool {
     }
 
     this._set_style(save_style);
-    this.unlock();
   }
-  return !error;
-}
 
-// documented in string error= version
-pragma "no doc"
-proc channel.writef(fmt: string, const args ...?k) throws {
-  var e:syserr = ENOERR;
-  this.writef(fmt, (...args), error=e);
-  if !e then return true;
-  else {
-    try this._ch_ioerror(e, "in channel.writef(fmt:string, ...)");
+  if !err {
+    return true;
+  } else if err == EEOF || err == EFORMAT {
     return false;
-  }
-}
-
-// documented in string error= version
-pragma "no doc"
-proc channel.writef(fmt: string) throws {
-  var e:syserr = ENOERR;
-  this.writef(fmt, error=e);
-  if !e then return true;
-  else {
-    try this._ch_ioerror(e, "in channel.writef(fmt:string, ...)");
-    return false;
-  }
-}
-
-// documented in string error= version
-pragma "no doc"
-proc channel.readf(fmt:string, ref args ...?k) throws {
-  var e:syserr = ENOERR;
-  this.readf(fmt, (...args), error=e);
-  if !e then return true;
-  else if e == EEOF then return false;
-  else {
-    try this._ch_ioerror(e, "in channel.readf(fmt:string, ...)");
-    return false;
-  }
-}
-
-// documented in string error= version
-pragma "no doc"
-proc channel.readf(fmt:string) throws {
-  var e:syserr = ENOERR;
-  this.readf(fmt, error=e);
-  if !e then return true;
-  else if e == EEOF then return false;
-  else if e == EFORMAT then return false;
-  else {
-    try this._ch_ioerror(e, "in channel.readf(fmt:string, ...)");
+  } else {
+    try this._ch_ioerror(err, "in channel.readf(fmt:string)");
     return false;
   }
 }
@@ -6681,14 +6616,14 @@ proc writef(fmt:string):bool {
     return stdout.writef(fmt);
   }
 }
-/* Call ``stdout.readf``; see :proc:`channel.readf`. */
+/* Call ``stdin.readf``; see :proc:`channel.readf`. */
 proc readf(fmt:string, ref args ...?k):bool throws {
-  return stdin.readf(fmt, (...args));
+  return try stdin.readf(fmt, (...args));
 }
 // documented in string version
 pragma "no doc"
 proc readf(fmt:string):bool throws {
-  return stdin.readf(fmt);
+  return try stdin.readf(fmt);
 }
 
 
@@ -6707,92 +6642,20 @@ proc readf(fmt:string):bool throws {
    this function will skip to (but leave unread) the comma after
    the first field value.
 
-   :arg error: optional argument to capture an error code. If this argument
-               is not provided and an error is encountered, this function
-               will halt with an error message.
+   :throws SystemError: Thrown if the field could not be skipped.
  */
-proc channel.skipField(out error:syserr) {
+proc channel.skipField() throws {
+  var err:syserr = ENOERR;
   on this.home {
-    try! this.lock();
+    try this.lock(); defer { this.unlock(); }
     var st = this.styleElement(QIO_STYLE_ELEMENT_AGGREGATE);
     if st == QIO_AGGREGATE_FORMAT_JSON {
-      error = qio_channel_skip_json_field(false, _channel_internal);
+      err = qio_channel_skip_json_field(false, _channel_internal);
     } else {
-      error = ENOTSUP;
+      err = ENOTSUP;
     }
-    this.unlock();
   }
-}
-pragma "no doc"
-proc channel.skipField() throws {
-  var err:syserr;
-  this.skipField(err);
   if err then try this._ch_ioerror(err, "in skipField");
-}
-
-
-private inline proc chpl_do_format(fmt:string, args ...?k, out error:syserr):string {
-
-  // Open a memory buffer to store the result
-  var f = openmem(error=error);
-  defer {
-    var closeError:syserr;
-    f.close(error=closeError);
-    // Propagate an error on closing only if there wasn't an original error.
-    if !error then
-      error = closeError;
-  }
-
-  if error then return "";
-
-  var offset:int = 0;
-
-  {
-    var w = f.writer(error=error, locking=false);
-    defer {
-      var closeError:syserr;
-      w.close(error=closeError);
-      if !error then
-        error = closeError;
-    }
-
-    // Don't try to write if there was an error creating it
-    if error then return "";
-
-    w.writef(fmt, (...args), error=error);
-
-    offset = w.offset();
-
-    // w should be closed by the defer statement at this point.
-  }
-
-  // Don't try to read if there was an error writing
-  if error then return "";
-
-  var buf = c_malloc(uint(8), offset+1);
-
-  var r = f.reader(error=error, locking=false);
-  defer {
-    var closeError:syserr;
-    r.close(error=closeError);
-    if !error then
-      error = closeError;
-  }
-
-
-  r.readBytes(buf, offset:ssize_t, error=error);
-
-  // Add the terminating NULL byte to make C string conversion easy.
-  buf[offset] = 0;
-
-  return new string(buf, offset, offset+1, owned=true, needToCopy=false);
-}
-
-
-// This function is no longer available.
-pragma "no doc"
-proc format(fmt:string, args ...?k):string {
-  compilerError("use string.format(args ...) not format(fmt, args ...)");
 }
 
 /*
@@ -6802,23 +6665,63 @@ proc format(fmt:string, args ...?k):string {
 
   :arg this: the format string
   :arg args: the arguments to format
-  :arg error: optional argument to capture an error code. If this argument
-             is not provided and an error is encountered, this function
-             will halt with an error message.
   :returns: the resulting string
 
+  :throws SystemError: Thrown if the string could not be formatted.
  */
-proc string.format(args ...?k, out error:syserr):string {
-  return chpl_do_format(this, (...args), error);
+proc string.format(args ...?k): string throws {
+  try {
+    return chpl_do_format(this, (...args));
+  } catch e: SystemError {
+    try ioerror(e.err, "in string.format");
+  } catch {
+    try ioerror(EINVAL:syserr, "in string.format");
+  }
+  return "";
 }
 
-// documented in the error= version
-pragma "no doc"
-proc string.format(args ...?k):string throws {
-  var err:syserr = ENOERR;
-  var ret = chpl_do_format(this, (...args), error=err);
-  if err then try ioerror(err, "in string.format");
-  return ret;
+private inline proc chpl_do_format(fmt:string, args ...?k): string throws {
+  // Open a memory buffer to store the result
+  var f = try openmem();
+  defer {
+    try {
+      f.close();
+    } catch { /* ignore deferred close error */ }
+  }
+
+  var offset:int = 0;
+  {
+    var w = try f.writer(locking=false);
+    defer {
+      try {
+        w.close();
+      } catch { /* ignore deferred close error */ }
+    }
+    try w.writef(fmt, (...args));
+    offset = w.offset();
+
+    // close error is thrown instead of ignored
+    try w.close();
+  }
+
+  var buf = c_malloc(uint(8), offset+1);
+  var r = try f.reader(locking=false);
+  defer {
+    try {
+      r.close();
+    } catch { /* ignore deferred close error */ }
+  }
+
+  try r.readBytes(buf, offset:ssize_t);
+
+  // close errors are thrown instead of ignored
+  try r.close();
+  try f.close();
+
+  // Add the terminating NULL byte to make C string conversion easy.
+  buf[offset] = 0;
+
+  return createStringWithOwnedBuffer(buf, offset, offset+1);
 }
 
 
@@ -6843,7 +6746,7 @@ proc channel._extractMatch(m:reMatch, ref arg:reMatch, ref error:syserr) {
 pragma "no doc"
 proc channel._extractMatch(m:reMatch, ref arg:string, ref error:syserr) {
   var cur:int(64);
-  var target = m.offset;
+  var target = m.offset:int;
   var len = m.length;
 
   // If there was no match, return the default value of the type
@@ -6869,9 +6772,9 @@ proc channel._extractMatch(m:reMatch, ref arg:string, ref error:syserr) {
     var gotlen:int(64);
     var ts: c_string;
     error =
-        qio_channel_read_string(false, iokind.native, stringStyleExactLen(len),
+        qio_channel_read_string(false, iokind.native:c_int, stringStyleExactLen(len),
                                 _channel_internal, ts, gotlen, len: ssize_t);
-    s = new string(ts, length=gotlen, needToCopy=false);
+    s = createStringWithOwnedBuffer(ts, length=gotlen);
   }
 
   if ! error {
@@ -6912,28 +6815,27 @@ proc channel._extractMatch(m:reMatch, ref arg:?t, ref error:syserr) where t != r
     :arg m: a :record:`Regexp.reMatch` storing a location that matched
     :arg arg: an argument to retrieve the match into. If it is not a string,
               the string match will be cast to arg.type.
-    :arg error: optional argument to capture an error code. If this argument
-                is not provided and an error is encountered, this function
-                will halt with an error message.
+
+    :throws SystemError: Thrown if a match could not be extracted.
  */
+proc channel.extractMatch(m:reMatch, ref arg) throws {
+  var err:syserr = ENOERR;
+  on this.home {
+    try this.lock(); defer { this.unlock(); }
+    _extractMatch(m, arg, err);
+  }
+  if err {
+    try this._ch_ioerror(err, "in channel.extractMatch(m:reMatch, ref " +
+                              arg.type:string + ")");
+  }
+}
+
+// documented in throws version
+pragma "no doc"
 proc channel.extractMatch(m:reMatch, ref arg, ref error:syserr) {
   on this.home {
     try! this.lock();
     _extractMatch(m, arg, error);
-    this.unlock();
-  }
-}
-// documented in error= version
-pragma "no doc"
-proc channel.extractMatch(m:reMatch, ref arg) throws {
-  on this.home {
-    try! this.lock();
-    var err:syserr = ENOERR;
-    _extractMatch(m, arg, err);
-    if err {
-      try this._ch_ioerror(err, "in channel.extractMatch(m:reMatch, ref " +
-                                arg.type:string + ")");
-    }
     this.unlock();
   }
 }
@@ -6978,7 +6880,7 @@ proc channel.search(re:regexp, ref error:syserr):reMatch
         // Advance to the match.
         qio_channel_revert_unlocked(_channel_internal);
         var cur = qio_channel_offset_unlocked(_channel_internal);
-        var target = m.offset;
+        var target = m.offset:int;
         error = qio_channel_advance(false, _channel_internal, target - cur);
       } else {
         // If we didn't match... leave the channel position at EOF
@@ -7008,68 +6910,56 @@ proc channel.search(re:regexp):reMatch throws
     match. If there is no match, the channel position will be
     advanced to the end of the channel (or end of the file).
 
+    Throws a SystemError if an error occurs.
+
     :arg re: a :record:`Regexp.regexp` record representing a compiled
              regular expression.
     :arg captures: an optional variable number of arguments in which to
                    store the regions of the file matching the capture groups
                    in the regular expression.
-    :arg error: optional argument to capture an error code. If this argument
-                is not provided and an error is encountered, this function
-                will halt with an error message.
     :returns: the region of the channel that matched
  */
-
-proc channel.search(re:regexp, ref captures ...?k, ref error:syserr):reMatch
+proc channel.search(re:regexp, ref captures ...?k): reMatch throws
 {
   var m:reMatch;
+  var err:syserr = ENOERR;
   on this.home {
-    try! this.lock();
+    try this.lock(); defer { this.unlock(); }
     var nm = captures.size + 1;
     var matches = _ddata_allocate(qio_regexp_string_piece_t, nm);
-    error = qio_channel_mark(false, _channel_internal);
-    if ! error {
-      error = qio_regexp_channel_match(re._regexp,
-                                       false, _channel_internal, max(int(64)),
-                                       QIO_REGEXP_ANCHOR_UNANCHORED,
-                                       /* can_discard */ true,
-                                       /* keep_unmatched */ false,
-                                       /* keep_whole_pattern */ true,
-                                       matches, nm);
+    err = qio_channel_mark(false, _channel_internal);
+    if ! err {
+      err = qio_regexp_channel_match(re._regexp,
+                                     false, _channel_internal, max(int(64)),
+                                     QIO_REGEXP_ANCHOR_UNANCHORED,
+                                     /* can_discard */ true,
+                                     /* keep_unmatched */ false,
+                                     /* keep_whole_pattern */ true,
+                                     matches, nm);
     }
-    // Don't report "didn't match" errors
-    if error == EFORMAT || error == EEOF then error = ENOERR;
-    if !error {
+    if err == EFORMAT || err == EEOF then err = ENOERR;
+    if !err {
       m = _to_reMatch(matches[0]);
       if m.matched {
         // Extract the capture groups.
-        _ch_handle_captures(matches, nm, captures, error);
+        _ch_handle_captures(matches, nm, captures, err);
 
         // Advance to the match.
         qio_channel_revert_unlocked(_channel_internal);
         var cur = qio_channel_offset_unlocked(_channel_internal);
-        var target = m.offset;
-        error = qio_channel_advance(false, _channel_internal, target - cur);
+        var target = m.offset:int;
+        err = qio_channel_advance(false, _channel_internal, target - cur);
       } else {
         // If we didn't match... leave the channel position at EOF
         qio_channel_commit_unlocked(_channel_internal);
       }
     }
     _ddata_free(matches, nm);
-    this.unlock();
   }
+
+  if err then try this._ch_ioerror(err, "in channel.search");
   return m;
 }
-
-// documented in the error= version
-pragma "no doc"
-proc channel.search(re:regexp, ref captures ...?k):reMatch throws
-{
-  var e:syserr = ENOERR;
-  var ret = this.search(re, (...captures), error=e);
-  if e then try this._ch_ioerror(e, "in channel.search");
-  return ret;
-}
-
 
 // documented in the capture group version
 pragma "no doc"
@@ -7098,7 +6988,7 @@ proc channel.match(re:regexp, ref error:syserr):reMatch
         // Advance to the match.
         qio_channel_revert_unlocked(_channel_internal);
         var cur = qio_channel_offset_unlocked(_channel_internal);
-        var target = m.offset;
+        var target = m.offset:int;
         error = qio_channel_advance(false, _channel_internal, target - cur);
       } else {
         // If we didn't match... leave the channel position at start
@@ -7132,11 +7022,7 @@ proc channel.match(re:regexp):reMatch throws
    :arg captures: an optional variable number of arguments in which to
                   store the regions of the file matching the capture groups
                   in the regular expression.
-   :arg error: optional argument to capture an error code. If this argument
-               is not provided and an error is encountered, this function
-               will halt with an error message.
    :returns: the region of the channel that matched
-
  */
 
 proc channel.match(re:regexp, ref captures ...?k, ref error:syserr):reMatch
@@ -7167,7 +7053,7 @@ proc channel.match(re:regexp, ref captures ...?k, ref error:syserr):reMatch
         // Advance to the match.
         qio_channel_revert_unlocked(_channel_internal);
         var cur = qio_channel_offset_unlocked(_channel_internal);
-        var target = m.offset;
+        var target = m.offset:int;
         error = qio_channel_advance(false, _channel_internal, target - cur);
       } else {
         // If we didn't match... leave the channel position at start
@@ -7198,7 +7084,7 @@ proc channel.match(re:regexp, ref captures ...?k):reMatch throws
 
    At the time each match is returned, the channel position is
    at the start of that match. Note though that you would have
-   to use :proc:`channel.advance` to get to the position of a capture group.
+   to use :proc:`IO.channel.advance` to get to the position of a capture group.
 
    After returning each match, advances to just after that
    match and looks for another match. Thus, it will not return
@@ -7217,7 +7103,6 @@ proc channel.match(re:regexp, ref captures ...?k):reMatch throws
    :arg maxmatches: the maximum number of matches to report.
    :yields: tuples of :record:`Regexp.reMatch` objects, where the first element
             is the whole pattern.  The tuples will have 1+captures elements.
-
  */
 iter channel.matches(re:regexp, param captures=0, maxmatches:int = max(int))
 // TODO: should be throws
@@ -7229,10 +7114,9 @@ iter channel.matches(re:regexp, param captures=0, maxmatches:int = max(int))
   param nret = captures+1;
   var ret:nret*reMatch;
 
+  // TODO should be try not try!  ditto try! _mark() below
   try! lock();
-  on this.home do error = _mark();
-  // TODO should be try not try!
-  if error then try! this._ch_ioerror(error, "in channel.matches mark");
+  on this.home do try! _mark();
 
   while go && i < maxmatches {
     on this.home {
@@ -7259,7 +7143,7 @@ iter channel.matches(re:regexp, param captures=0, maxmatches:int = max(int))
           error = qio_channel_mark(false, _channel_internal);
           if !error {
             var cur = qio_channel_offset_unlocked(_channel_internal);
-            var target = m.offset;
+            var target = m.offset:int;
             error = qio_channel_advance(false, _channel_internal, target - cur);
           }
         } else {
@@ -7273,7 +7157,7 @@ iter channel.matches(re:regexp, param captures=0, maxmatches:int = max(int))
     i += 1;
   }
   _commit();
-  try! unlock();
+  unlock();
   // Don't report didn't find or end-of-file errors.
   if error == EFORMAT || error == EEOF then error = ENOERR;
   // TODO should be try not try!

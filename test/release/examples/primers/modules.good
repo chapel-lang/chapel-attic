@@ -1,5 +1,4 @@
 Access from outside a module
-36
 28
 28
 4.0
@@ -24,6 +23,9 @@ Limiting a use
 5
 2
 5
+4
+In Rec.method1()
+In Rec.method2()
 
 Application to enums
 blue

@@ -16,10 +16,10 @@ class GlobalDomain : BaseDom {
 
 class GlobalArray : BaseArr {}
 
-proc GlobalDistribution.GlobalDistribution() {}
+proc GlobalDistribution.init() {}
 
-proc GlobalDistribution.dsiClone(): GlobalDistribution {
-  return new GlobalDistribution();
+proc GlobalDistribution.dsiClone(): unmanaged GlobalDistribution {
+  return new unmanaged GlobalDistribution();
 }
 
 proc GlobalDistribution.dsiNewArithmeticDom(param rank: int,
@@ -30,10 +30,13 @@ proc GlobalDistribution.dsiNewArithmeticDom(param rank: int,
   return new GlobalDomain(rank, idxType, stridable);
 }
 
-proc GlobalDomain.GlobalDomain(param rank: int,
+proc GlobalDomain.init(param rank: int,
                                type idxType,
-                               param stridable: bool)
-{}
+                               param stridable: bool) {
+  this.rank = rank;
+  this.idxType = idxType;
+  this.stridable = stridable;
+}
 
 proc GlobalDomain.dsiSetIndices(arg_ranges: rank * range(idxType)): void {
   ranges = arg_ranges;

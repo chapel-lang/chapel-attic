@@ -10,11 +10,10 @@ class C {
 class D : C {
   proc init(type t) {
     super.init(t);
-    this.initDone();
+    this.complete();
     this.x = int;
   }
 }
 
-var myD = new D(real);
+var myD = new borrowed D(real);
 writeln(myD);
-delete myD;

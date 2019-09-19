@@ -5,42 +5,40 @@ class C
 
 class SubC : C
 {
-  proc writeThis(w) { w.write("SubC"); }
+  override proc writeThis(w) { w.write("SubC"); }
 }
 
 class OverrideMe
 {
   proc getC()
   {
-    return new C();
+    return new unmanaged C();
   }
 
-  iter manyC()
+  iter manyC(): owned C
   {
-    yield new C();
-    yield new C();
+    yield new owned C();
+    yield new owned C();
   }
 }
 
 class OverridesIt : OverrideMe
 {
-  proc getC()
+  override proc getC()
   {
-    return new SubC();
+    return new unmanaged SubC();
   }
 
-  iter manyC()
+  override iter manyC(): owned C
   {
-    yield new SubC();
-    yield new SubC();
+    yield new owned SubC();
+    yield new owned SubC();
   }
 }
 
 proc main()
 {
-  var o : OverrideMe;
-
-  o = new OverridesIt();
+  var o : unmanaged OverrideMe = new unmanaged OverridesIt();
 
   var t1 = o.getC();
 

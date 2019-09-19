@@ -27,7 +27,7 @@ module Structure {
 
 
   class ListerGrandParent {
-    var lst: list(GrandParent);
+    var lst: LinkedList(unmanaged GrandParent);
   }
 
   class ListerParent : ListerGrandParent {
@@ -36,21 +36,21 @@ module Structure {
     param stridable: bool;
 
     proc getListedType() type {
-      return Parent(rank=rank, idxType=idxType, stridable=stridable);
+      return unmanaged Parent(rank=rank, idxType=idxType, stridable=stridable);
     }
   }
 
-  proc test(lhs:?t) where t:ListerParent {
+  proc test(lhs:?t) where isSubtype(t, ListerParent) {
     type subType = lhs.getListedType();
     for e in lhs.lst {
-      var eCast = e:subType;
+      var eCast = e: subType?;
       if eCast == nil then
         halt("X");
 
       writeln("foo");
-      (e:subType).foo( (100..100,) );
+      (e:subType?)!.foo( (100..100,) );
       writeln("bar");
-      eCast.bar();
+      eCast!.bar();
       writeln("baz");
       e.baz();
     }
@@ -65,13 +65,13 @@ module Impl {
   class Child : SubParent {
     var x:eltType;
     
-    proc foo( arg: rank*range(idxType, BoundedRangeType.bounded,stridable) ) {
+    override proc foo( arg: rank*range(idxType, BoundedRangeType.bounded,stridable) ) {
       writeln("in Child(", rank, ") foo ", arg, " " , x);
     }
-    proc bar() {
+    override proc bar() {
       writeln("in Child(", rank, ") bar ", x);
     }
-    proc baz() {
+    override proc baz() {
       writeln("in Child(", rank, ") baz ", x);
     }
 
@@ -79,16 +79,16 @@ module Impl {
 
 
   proc main() {
-    var aa = new Child(rank=1, idxType=int, stridable=false, eltType=real);
+    var aa = new unmanaged Child(rank=1, idxType=int, stridable=false, eltType=real);
     writeln(aa);
 
-    var a = new Child(rank=1, idxType=int, stridable=false, eltType=int);
-    var d = new ListerParent(rank=1, idxType=int, stridable=false);
+    var a = new unmanaged Child(rank=1, idxType=int, stridable=false, eltType=int);
+    var d = new borrowed ListerParent(rank=1, idxType=int, stridable=false);
     d.lst.append(a);
 
     test(d);
 
-    delete d, a, aa;
+    delete a, aa;
   }
 }
 

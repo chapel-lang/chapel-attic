@@ -52,7 +52,7 @@ if (numProducers > 1 || numConsumers > 1) then
 //
 proc main() {
   // a shared bounded buffer with the requested capacity
-  var buffer = new BoundedBuffer(capacity=bufferSize);
+  var buffer = new owned BoundedBuffer(capacity=bufferSize);
 
   // per-producer/consumer counts of the number of items they processed
   var prodCounts: [1..numProducers] int,
@@ -95,8 +95,6 @@ proc main() {
                   consTot, numItems);
   else
     stderr.writef("Producers/consumers processed %i items total.\n", numItems);
-
-  delete buffer;
 }
 
 
@@ -175,19 +173,20 @@ proc consumer(b: BoundedBuffer, cid: int) {
 //
 // (1) atomic variables can't currently be initialized at their
 // declaration point (something we're working on fixing in the
-// language), so to establish their initial values, add a constructor
-// within the boundeded buffer class of the form:
+// language), but since they are integers, their initial values
+// will be zero, so you probably will not need to initialize them.
+// If you do, add an initializer to 'BoundedBuffer' of the form:
 //
-//   proc BoundedBuffer() {
+//   proc init() {
 //     ... put your code to initialize the atomics here ...
 //   }
 //
-// (2) read(), write() and compareExchange() are going to be the most
+// (2) read(), write() and compareAndSwap() are going to be the most
 // useful methods on atomics for this exercise.  If you haven't worked
 // with atomics before, refer to the online documentation or ask one
 // of the helpers for a hint:
 //
-//   https://chapel-lang.org/docs/latest/builtins/internal/Atomics.html
+//   https://chapel-lang.org/docs/builtins/internal/Atomics.html
 //
 // STEP 5 (optional): Compare the performance of your two versions
 // (note: you may want to turn off the --noisy and/or --verbose
@@ -215,7 +214,7 @@ class BoundedBuffer {
       head = 0,                            // the head's cursor position
       tail = 0;                            // the tail's cursor position
 
-  var rng = new RandomStream(real);
+  var rng = new owned RandomStream(real);
 
   //
   // Place an item at the head position of the buffer, assuming
@@ -260,12 +259,5 @@ class BoundedBuffer {
     pos = (pos + 1) % capacity;
 
     return prevPos;
-  }
-
-  //
-  // Clean up after ourselves
-  //
-  proc deinit() {
-    delete rng;
   }
 }

@@ -6,6 +6,9 @@
 
 #include <gasnet_internal.h>
 #include <gasnet_core_internal.h>
+#include <gasnet_am.h>
+
+#include <gasnet_event_internal.h> // access to eop and iop
 #if GASNET_BLCR
 #include <gasnet_blcr.h>
 #endif
@@ -17,8 +20,25 @@
 #include <sys/time.h>
 #include <sys/resource.h>
 
+// ntohs() should be in one of these:
+#include <netinet/in.h>
+#include <arpa/inet.h>
+
 GASNETI_IDENT(gasnetc_IdentString_Version, "$GASNetCoreLibraryVersion: " GASNET_CORE_VERSION_STR " $");
 GASNETI_IDENT(gasnetc_IdentString_Name,    "$GASNetCoreLibraryName: " GASNET_CORE_NAME_STR " $");
+#if GASNETC_IBV_SRQ
+  GASNETI_IDENT(gasnetc_IdentString_SRQ, "$GASNetIbvSRQ: 1 $");
+#endif
+#if GASNETC_IBV_XRC
+  GASNETI_IDENT(gasnetc_IdentString_XRC, "$GASNetIbvXRC: 1 $");
+#endif
+#if GASNETC_IBV_ODP
+  GASNETI_IDENT(gasnetc_IdentString_ODP, "$GASNetIbvODP: 1 $");
+#endif
+
+gex_AM_Entry_t const *gasnetc_get_handlertable(void);
+
+gasnetc_EP_t gasnetc_ep0; // First EP created.  Used by init, sys AMs, and shutdown.
 
 /* ------------------------------------------------------------------------------------ */
 /*
@@ -42,7 +62,7 @@ GASNETI_IDENT(gasnetc_IdentString_Name,    "$GASNetCoreLibraryName: " GASNET_COR
 #define GASNETC_DEFAULT_NETWORKDEPTH_PP		24	/* Max ops (RDMA + AM) outstanding to each peer */
 
 /* Limits on in-flight (queued but not acknowledged) AM Requests */
-#define GASNETC_DEFAULT_AM_CREDITS_TOTAL	MIN(256,gasneti_nodes*gasnetc_am_oust_pp)	/* Max AM requests outstanding at source, 0 = automatic */
+#define GASNETC_DEFAULT_AM_CREDITS_TOTAL	MIN(256,(gasneti_nodes-1)*gasnetc_am_oust_pp)	/* Max AM requests outstanding at source, 0 = automatic */
 #define GASNETC_DEFAULT_AM_CREDITS_PP		12	/* Max AM requests outstanding to each peer */
 #define GASNETC_DEFAULT_AM_CREDITS_SLACK	1	/* Max AM credits delayed by coalescing */
 
@@ -113,17 +133,16 @@ int                      gasnetc_num_ports = 0;
   int			gasnetc_max_regs;
   uintptr_t		gasnetc_seg_start;
   uintptr_t		gasnetc_seg_len;
-  uint64_t 		gasnetc_pin_maxsz;
+  static uintptr_t      gasnetc_seg_maxsz;
   uint64_t 		gasnetc_pin_maxsz_mask;
   unsigned int		gasnetc_pin_maxsz_shift;
   static int            gasnetc_seg_regs = 0;
 #endif
+uint64_t 		gasnetc_pin_maxsz;
 firehose_info_t	gasnetc_firehose_info;
 static uintptr_t gasnetc_firehose_mem;
 static int       gasnetc_firehose_reg;
 static uint32_t  gasnetc_firehose_flags;
-
-gasnet_handlerentry_t const *gasnetc_get_handlertable(void);
 
 int		gasnetc_op_oust_limit;
 int		gasnetc_op_oust_pp;
@@ -144,8 +163,6 @@ typedef struct gasnetc_pin_info_t_ {
 } gasnetc_pin_info_t;
 static gasnetc_pin_info_t gasnetc_pin_info;
 
-gasneti_handler_fn_t gasnetc_handler[GASNETC_MAX_NUMHANDLERS]; /* handler table */
-
 static char *gasnetc_ibv_ports;
 
 #if GASNET_TRACE
@@ -154,6 +171,13 @@ static char *gasnetc_ibv_ports;
 #endif
 
 static int gasnetc_did_firehose_init = 0;
+
+static const enum ibv_access_flags
+    gasneti_seg_access_flags =
+        (enum ibv_access_flags) (IBV_ACCESS_LOCAL_WRITE  |
+                                 IBV_ACCESS_REMOTE_WRITE |
+                                 IBV_ACCESS_REMOTE_READ  |
+                                 IBV_ACCESS_REMOTE_ATOMIC);
 
 /* ------------------------------------------------------------------------------------ */
 /*
@@ -165,12 +189,12 @@ gasneti_spawnerfn_t const *gasneti_spawner = NULL;
 static int gasneti_bootstrap_native_coll = 0;
 static int gasnetc_bootstrapBarrier_phase = 0;
 static int gasnetc_bootstrapExchange_phase = 0;
-static gasnet_node_t gasnetc_dissem_peers = 0;
-static gasnet_node_t *gasnetc_dissem_peer = NULL;
-static gasnet_node_t *gasnetc_exchange_rcvd = NULL;
-static gasnet_node_t *gasnetc_exchange_send = NULL;
+static gex_Rank_t gasnetc_dissem_peers = 0;
+static gex_Rank_t *gasnetc_dissem_peer = NULL;
+static gex_Rank_t *gasnetc_exchange_rcvd = NULL;
+static gex_Rank_t *gasnetc_exchange_send = NULL;
 #if GASNET_PSHM
-static gasnet_node_t *gasnetc_exchange_permute = NULL;
+static gex_Rank_t *gasnetc_exchange_permute = NULL;
 #endif
 
 static void gasnetc_sys_coll_init(void)
@@ -178,16 +202,16 @@ static void gasnetc_sys_coll_init(void)
   int i;
 
 #if GASNET_PSHM
-  const gasnet_node_t size = gasneti_nodemap_global_count;
-  const gasnet_node_t rank = gasneti_nodemap_global_rank;
+  const gex_Rank_t size = gasneti_nodemap_global_count;
+  const gex_Rank_t rank = gasneti_nodemap_global_rank;
 
   if (gasneti_nodemap_local_rank) {
     /* No network comms */
     goto done;
   }
 #else
-  const gasnet_node_t size = gasneti_nodes;
-  const gasnet_node_t rank = gasneti_mynode;
+  const gex_Rank_t size = gasneti_nodes;
+  const gex_Rank_t rank = gasneti_mynode;
 #endif
 
   if (size == 1) {
@@ -204,12 +228,12 @@ static void gasnetc_sys_coll_init(void)
     ++gasnetc_dissem_peers;
   }
   if (NULL == gasnetc_dissem_peer) {
-    gasnetc_dissem_peer = gasneti_malloc(gasnetc_dissem_peers * sizeof(gasnet_node_t));
+    gasnetc_dissem_peer = gasneti_malloc(gasnetc_dissem_peers * sizeof(gex_Rank_t));
     gasneti_leak(gasnetc_dissem_peer);
   }
   for (i = 0; i < gasnetc_dissem_peers; ++i) {
-    const gasnet_node_t distance = 1 << i;
-    const gasnet_node_t peer = (distance <= rank) ? (rank - distance) : (rank + (size - distance));
+    const gex_Rank_t distance = 1 << i;
+    const gex_Rank_t peer = (distance <= rank) ? (rank - distance) : (rank + (size - distance));
   #if GASNET_PSHM
     /* Convert supernode numbers to node numbers */
     gasnetc_dissem_peer[i] = gasneti_pshm_firsts[peer];
@@ -219,20 +243,20 @@ static void gasnetc_sys_coll_init(void)
   }
 
   /* Compute the recv offset and send count for each step of exchange */
-  gasnetc_exchange_rcvd = gasneti_malloc((gasnetc_dissem_peers+1) * sizeof(gasnet_node_t));
-  gasnetc_exchange_send = gasneti_malloc(gasnetc_dissem_peers * sizeof(gasnet_node_t));
+  gasnetc_exchange_rcvd = gasneti_malloc((gasnetc_dissem_peers+1) * sizeof(gex_Rank_t));
+  gasnetc_exchange_send = gasneti_malloc(gasnetc_dissem_peers * sizeof(gex_Rank_t));
   { int step;
   #if GASNET_PSHM
-    gasnet_node_t *width;
-    gasnet_node_t sum1 = 0;
-    gasnet_node_t sum2 = 0;
-    gasnet_node_t distance, last;
+    gex_Rank_t *width;
+    gex_Rank_t sum1 = 0;
+    gex_Rank_t sum2 = 0;
+    gex_Rank_t distance, last;
 
     distance = 1 << (gasnetc_dissem_peers-1);
     last = (distance <= rank) ? (rank - distance) : (rank + (size - distance));
 
     /* Step 1: determine the "width" of each supernode */
-    width = gasneti_calloc(size, sizeof(gasnet_node_t));
+    width = gasneti_calloc(size, sizeof(gex_Rank_t));
     for (i = 0; i < gasneti_nodes; ++i) {
       width[gasneti_nodeinfo[i].supernode] += 1;
     }
@@ -249,7 +273,7 @@ static void gasnetc_sys_coll_init(void)
     gasnetc_exchange_rcvd[step] = gasneti_nodes;
     /* Step 3: construct the permutation vector, if necessary */
     {
-      gasnet_node_t n;
+      gex_Rank_t n;
     
       /* Step 3a. determine if we even need a permutation vector */
       int sorted = 1;
@@ -265,7 +289,7 @@ static void gasnetc_sys_coll_init(void)
 
       /* Step 3b. contstruct the vector if needed */
       if (!sorted) {
-        gasnet_node_t *offset = gasneti_malloc(size * sizeof(gasnet_node_t));
+        gex_Rank_t *offset = gasneti_malloc(size * sizeof(gex_Rank_t));
         
         /* Form a sort of shifted prefix-reduction on width */
         sum1 = 0;
@@ -278,7 +302,7 @@ static void gasnetc_sys_coll_init(void)
         gasneti_assert(sum1 == gasneti_nodes);
 
         /* Scan nodeinfo to collect all the nodes in each supernode (in their order) */
-        gasnetc_exchange_permute = gasneti_malloc(gasneti_nodes * sizeof(gasnet_node_t));
+        gasnetc_exchange_permute = gasneti_malloc(gasneti_nodes * sizeof(gex_Rank_t));
         for (i = 0; i < gasneti_nodes; ++i) {
           int index = offset[ gasneti_nodeinfo[i].supernode ]++;
           gasnetc_exchange_permute[index] = i;
@@ -337,7 +361,7 @@ static void gasnetc_sys_coll_fini(void)
     ((void)(gasnetc_sys_barrier_rcvd[_phase] = 0))
 #endif
 
-static void gasnetc_sys_barrier_reqh(gasnet_token_t token, uint32_t arg)
+static void gasnetc_sys_barrier_reqh(gex_Token_t token, uint32_t arg)
 {
     const int phase = arg & 1;
 #if GASNETC_USE_RCV_THREAD
@@ -446,25 +470,36 @@ extern void gasneti_bootstrapBarrier(void)
 #endif
 
 static uint8_t *gasnetc_sys_exchange_buf[2] = { NULL, NULL };
+#if GASNET_DEBUG
+static size_t gasnetc_sys_exchange_elemsz[2];
+#endif
 
 static uint8_t *gasnetc_sys_exchange_addr(int phase, size_t elemsz)
 {
+#if GASNETC_USE_RCV_THREAD
+  static gasneti_mutex_t lock = GASNETI_MUTEX_INITIALIZER;
+  gasneti_mutex_lock(&lock);
+#endif
+
   if (gasnetc_sys_exchange_buf[phase] == NULL) {
-  #if GASNETC_USE_RCV_THREAD
-    static gasneti_mutex_t lock = GASNETI_MUTEX_INITIALIZER;
-    gasneti_mutex_lock(&lock);
-  #endif
     gasnetc_sys_exchange_buf[phase] = gasneti_malloc(elemsz * gasneti_nodes);
-  #if GASNETC_USE_RCV_THREAD
-    gasneti_mutex_unlock(&lock);
+  #if GASNET_DEBUG
+    gasnetc_sys_exchange_elemsz[phase] = elemsz;
+  } else {
+    gasneti_assert(gasnetc_sys_exchange_elemsz[phase] == elemsz);
   #endif
   }
+
+#if GASNETC_USE_RCV_THREAD
+  gasneti_mutex_unlock(&lock);
+#endif
+
   return gasnetc_sys_exchange_buf[phase];
 }
 
 #define GASNETC_SYS_EXCHANGE_MAX GASNETC_MAX_MEDIUM
 
-static void gasnetc_sys_exchange_reqh(gasnet_token_t token, void *buf,
+static void gasnetc_sys_exchange_reqh(gex_Token_t token, void *buf,
                                  size_t nbytes, uint32_t arg0,
                                  uint32_t elemsz)
 {
@@ -530,9 +565,9 @@ static void gasnetc_bootstrapExchange_ib(void *src, size_t len, void *dest)
     /* Copy to destination while performing the rotation or permutation */
 #if GASNET_PSHM
     if (gasnetc_exchange_permute) {
-      gasnet_node_t n;
+      gex_Rank_t n;
       for (n = 0; n < gasneti_nodes; ++n) {
-        const gasnet_node_t peer = gasnetc_exchange_permute[n];
+        const gex_Rank_t peer = gasnetc_exchange_permute[n];
         memcpy((uint8_t*) dest + len * peer, temp + len * n, len);
       }
     } else
@@ -708,7 +743,7 @@ static void gasnetc_physmem_report(double elapsed, gasnetc_pin_info_t *all_info)
   sum_pin = min_pin = max_pin = all_info[0].memory;
   sum_mem = min_mem = max_mem = all_info[0].physmemsz;
   sum_frac = min_frac = max_frac = sum_pin / (double)sum_mem;
-  for (gasnet_node_t i = 1; i < gasneti_nodes; ++i) {
+  for (gex_Rank_t i = 1; i < gasneti_nodes; ++i) {
     uintptr_t pin = all_info[i].memory;
     if (pin == ~((uintptr_t)0)) continue;  // Not probed
     sum_pin += pin;
@@ -765,7 +800,7 @@ static void gasnetc_physmem_report(double elapsed, gasnetc_pin_info_t *all_info)
     uintptr_t lost = all_info[0].memory - try_abs;
     sum_mem = max_mem = lost;
     sum_frac = max_frac = lost / (double)all_info[0].memory;
-    for (gasnet_node_t i = 1; i < gasneti_nodes; ++i) {
+    for (gex_Rank_t i = 1; i < gasneti_nodes; ++i) {
       uintptr_t pin = all_info[i].memory;
       if (pin == ~((uintptr_t)0)) continue;  // Not probed
       lost = pin - try_abs;
@@ -788,7 +823,7 @@ static void gasnetc_physmem_report(double elapsed, gasnetc_pin_info_t *all_info)
     lost = all_info[0].memory - (try_rel * all_info[0].physmemsz);
     sum_mem = max_mem = lost;
     sum_frac = max_frac = lost / (double)all_info[0].memory;
-    for (gasnet_node_t i = 1; i < gasneti_nodes; ++i) {
+    for (gex_Rank_t i = 1; i < gasneti_nodes; ++i) {
       uintptr_t pin = all_info[i].memory;
       if (pin == ~((uintptr_t)0)) continue;  // Not probed
       lost = pin - (try_rel * all_info[i].physmemsz);
@@ -839,14 +874,56 @@ static void gasnetc_init_pin_info(int first_local, int num_local) {
     // Will probe on request or if neither configure nor environment has provided a value
   #endif
   const int do_probe = gasneti_getenv_yesno_withdefault("GASNET_PHYSMEM_PROBE", do_probe_default);
+  const int quiet = do_probe ? !gasneti_getenv_yesno_withdefault("GASNET_PHYSMEM_WARN", 1): 0;
+
+  // We document that the behavior is undefined unless
+  // GASNET_PHYSMEM_{PROBE,WARN} are single-valued.  However, as noted in bug
+  // 3769, the case of non-equal values can lead to non-collective calls to
+  // gasnetc_bootstrapExchange_ib() (not a clean failure mode).
+  // So, we do some extra work here to ensure single-valued behavior.
+  // However, we do are not documenting this specific behavior to reserve
+  // the right to silently change it in the future.
+  struct {  // TODO? pack into a single byte?
+    int8_t do_probe;
+    int8_t quiet;
+  } *all_knobs, my_knobs = { do_probe, quiet };
+  all_knobs = gasneti_malloc(gasneti_nodes * sizeof(my_knobs));
+  gasnetc_bootstrapExchange_ib(&my_knobs, sizeof(my_knobs), all_knobs);
+#if 1
+  // Option 1: fatal error on mismatch
+  if (!gasneti_mynode) {
+    for (gex_Rank_t n = 0; n < gasneti_nodes; ++n) {
+      if (do_probe != all_knobs[n].do_probe) {
+      #ifdef GASNETC_IBV_PHYSMEM_MAX_CONFIGURE
+        gasneti_fatalerror("GASNET_PHYSMEM_PROBE is not single-valued");
+      #else
+        gasneti_fatalerror("GASNET_PHYSMEM_PROBE is not single-valued (might be defaulted from GASNET_PHYSMEM_MAX)");
+      #endif
+      }
+      if (quiet != all_knobs[n].quiet) {
+        gasneti_fatalerror("GASNET_PHYSMEM_WARN is not single-valued");
+      }
+    }
+  }
+#else
+  // Option 2: logical OR do_probe and AND of quiet
+  // NOTE: if one pisks this option, one must also remove 'const' from decls
+  for (gasnet_gex_Rank_t n = 0; n < gasneti_nodes; ++n) {
+    do_probe |= all_knobs[n].do_probe;
+    quiet    &= all_knobs[n].quiet;
+  }
+#endif
+  gasneti_free(all_knobs);
 
   uint64_t physmemsz = gasneti_getPhysMemSz(1);
+#if PLATFORM_ARCH_32
+  uint64_t hardmax = 0xFFFFFFFF;
+#else
+  uint64_t hardmax = 0; // unlimited
+#endif
   uint64_t limit = gasneti_getenv_memsize_withdefault(
                            "GASNET_PHYSMEM_MAX", GASNETC_DEFAULT_PHYSMEM_MAX,
-                           GASNETC_PHYSMEM_MIN, physmemsz);
-#if PLATFORM_ARCH_32
-   limit = MIN(limit, 0xFFFFFFFF);
-#endif
+                           GASNETC_PHYSMEM_MIN, hardmax, physmemsz, 0, 0);
 
   #if defined(RLIMIT_MEMLOCK) && GASNETC_HONOR_RLIMIT_MEMLOCK
   { /* Honor soft mlock limit (build-time option) */
@@ -879,11 +956,14 @@ static void gasnetc_init_pin_info(int first_local, int num_local) {
   gasnetc_pin_info.num_local = num_local;
   gasnetc_pin_info.regions = gasnetc_fh_maxregions;
   GASNETC_FOR_ALL_HCA_INDEX(i) {
+    if (! gasnetc_hca[i].hca_cap.max_mr) { // Treat zero as unbounded (e.g. Omni-Path)
+      GASNETI_TRACE_PRINTF(I, ("HCA %d advertises hca_cap.max_mr == 0, treating as unbounded", i));
+      continue;
+    }
     gasnetc_pin_info.regions = MIN(gasnetc_pin_info.regions, gasnetc_hca[i].hca_cap.max_mr);
   }
 
   if (do_probe) {
-    int quiet = !gasneti_getenv_yesno_withdefault("GASNET_PHYSMEM_WARN", 1);
     int did_warn = 0;
     gasneti_tick_t start_time = gasneti_ticks_now();
     // Warn if any node has more than 2G (unless QUIET)
@@ -892,7 +972,7 @@ static void gasnetc_init_pin_info(int first_local, int num_local) {
       gasnetc_bootstrapExchange_ib(&limit, sizeof(uint64_t), all_limits);
       if (!gasneti_mynode) {
         uint64_t max_limit = all_limits[0];
-        for (gasnet_node_t i = 1; i < gasneti_nodes; ++i) {
+        for (gex_Rank_t i = 1; i < gasneti_nodes; ++i) {
           max_limit = MAX(max_limit, all_limits[i]);
         }
         if (max_limit > ((uint64_t)2 << 30)) {
@@ -927,7 +1007,7 @@ static void gasnetc_init_pin_info(int first_local, int num_local) {
       // We define "too slow" as 10s + log2(nodes) * 5s.
       double elapsed = 1.e-9 * gasneti_ticks_to_ns(gasneti_ticks_now() - start_time);
       double too_slow = 10.;
-      for (gasnet_node_t i = gasneti_nodes/2; i; i >>= 1) too_slow += 5.;
+      for (gex_Rank_t i = gasneti_nodes/2; i; i >>= 1) too_slow += 5.;
       if (did_warn || (elapsed > too_slow)) {
         gasnetc_physmem_report(elapsed, all_info);
       }
@@ -959,6 +1039,37 @@ static void gasnetc_init_pin_info(int first_local, int num_local) {
   gasneti_free(all_info);
 
   gasnetc_physmem_check("Probing O/S limits and HCA capabilities", limit);
+}
+
+GASNETI_NORETURN
+static void gasneti_segreg_failed(size_t size, const char *which, int why) {
+  const char *hint1 = "";
+  const char *hint2 = "";
+#if !GASNETI_PSHM_POSIX
+  // N/A
+#elif PLATFORM_OS_LINUX || PLATFORM_OS_CNL || PLATFORM_OS_WSL
+  #define GASNETC_PSHM_FS "/dev/shm"
+#elif PLATFORM_OS_NETBSD
+  #define GASNETC_PSHM_FS "/var/shm"
+#elif PLATFORM_OS_FREEBSD || PLATFORM_OS_OPENBSD
+  #define GASNETC_PSHM_FS "/tmp"
+#else
+  // Cygwin, macOS and Solaris are not believed to back with a filesystem
+  // Others are unknown
+#endif
+#ifdef GASNETC_PSHM_FS
+  if (why == EFAULT) {
+    hint1 = "\n        This could be caused by insufficient space in " GASNETC_PSHM_FS " (or similar).";
+  }
+#endif
+  if (! *which) { // empty string == NOT " aux"
+    hint2 = "\n        Reducing the value of environment variable GASNET_MAX_SEGSIZE may help.";
+  }
+  char sizestr[16];
+  gasneti_fatalerror("Unexpected error %s (errno=%d) when registering a %s%s segment%s%s",
+                     strerror(why), why,
+                     gasnett_format_number(size, sizestr, sizeof(sizestr), 1),
+                     which, hint1, hint2);
 }
 
 #if GASNET_TRACE
@@ -1002,10 +1113,9 @@ static int gasnetc_load_settings(void) {
     default: fprintf(stderr,
                      "WARNING: ignoring invalid GASNET_MAX_MTU value %d.\n",
                      i);
-             /* fall through to "auto" case: */
-  case    0: /* TODO: "automatic" might be more sophisticated */
-             /* Our historic default is 1k, which is a good latency-vs-bandwidth compromise */
-             gasnetc_max_mtu = IBV_MTU_1024;
+             /* fall through to "auto" case: */ GASNETI_FALLTHROUGH
+  case    0: /* TODO: "automatic" might be more sophisticated than using the maximum */
+  case   -1: gasnetc_max_mtu = 0; /* Use port's active_mtu */
              break;
   case  256: gasnetc_max_mtu = IBV_MTU_256;
              break;
@@ -1016,8 +1126,6 @@ static int gasnetc_load_settings(void) {
   case 2048: gasnetc_max_mtu = IBV_MTU_2048;
              break;
   case 4096: gasnetc_max_mtu = IBV_MTU_4096;
-             break;
-  case   -1: gasnetc_max_mtu = 0; /* Use port's active_mtu */
              break;
   }
 
@@ -1048,6 +1156,7 @@ static int gasnetc_load_settings(void) {
   GASNETC_ENVINT(gasnetc_inline_limit, GASNET_INLINESEND_LIMIT, GASNETC_DEFAULT_INLINESEND_LIMIT, -1, 0);
   GASNETC_ENVINT(gasnetc_bounce_limit, GASNET_NONBULKPUT_BOUNCE_LIMIT, GASNETC_DEFAULT_NONBULKPUT_BOUNCE_LIMIT, 0, 1);
   GASNETC_ENVINT(gasnetc_packedlong_limit, GASNET_PACKEDLONG_LIMIT, GASNETC_DEFAULT_PACKEDLONG_LIMIT, 0, 1);
+#if GASNETC_IBV_AMRDMA
   GASNETC_ENVINT(gasnetc_amrdma_max_peers, GASNET_AMRDMA_MAX_PEERS, GASNETC_DEFAULT_AMRDMA_MAX_PEERS, 0, 0);
   GASNETC_ENVINT(gasnetc_amrdma_limit, GASNET_AMRDMA_LIMIT, GASNETC_DEFAULT_AMRDMA_LIMIT, 0, 1);
   if_pf (gasnetc_amrdma_limit > GASNETC_AMRDMA_LIMIT_MAX) {
@@ -1083,6 +1192,7 @@ static int gasnetc_load_settings(void) {
   if (!gasnetc_amrdma_limit || !gasnetc_amrdma_cycle) {
     gasnetc_amrdma_max_peers = 0;
   }
+#endif // GASNETC_IBV_AMRDMA
 
   #if GASNETC_PIN_SEGMENT
     GASNETC_ENVINT(gasnetc_pin_maxsz, GASNET_PIN_MAXSZ, 0, 0, 1);
@@ -1128,7 +1238,7 @@ static int gasnetc_load_settings(void) {
      GASNET_USE_SRQ > 0: Use SRQ for nodes >= GASNET_USE_SRQ (so 1 == Always)
      GASNET_USE_SRQ < 0: Use SRQ is memory savings would result (done in gasnetc_sndrcv_init()).
    */
-  if (gasnetc_use_srq > gasneti_nodes) {
+  if (gasnetc_use_srq > (int)gasneti_nodes) {
     /* Positive value of GASNET_USE_SRQ denotes a minumum node count */
     GASNETI_TRACE_PRINTF(I, ("SRQ disabled because GASNET_USE_SRQ = %d is greater than nodes = %d",
                              gasnetc_use_srq, gasneti_nodes));
@@ -1207,10 +1317,12 @@ static int gasnetc_load_settings(void) {
 #if !GASNETC_PIN_SEGMENT
   GASNETI_TRACE_PRINTF(I,  ("  GASNET_PUTINMOVE_LIMIT          = %u", (unsigned int)gasnetc_putinmove_limit));
 #endif
+#if GASNETC_IBV_AMRDMA
   GASNETI_TRACE_PRINTF(I,  ("  GASNET_AMRDMA_MAX_PEERS         = %u", (unsigned int)gasnetc_amrdma_max_peers));
   GASNETI_TRACE_PRINTF(I,  ("  GASNET_AMRDMA_DEPTH             = %u", (unsigned int)gasnetc_amrdma_depth));
   GASNETI_TRACE_PRINTF(I,  ("  GASNET_AMRDMA_LIMIT             = %u", (unsigned int)gasnetc_amrdma_limit));
   GASNETI_TRACE_PRINTF(I,  ("  GASNET_AMRDMA_CYCLE             = %"PRIu64"", (uint64_t)gasnetc_amrdma_cycle));
+#endif
 #if GASNETC_USE_RCV_THREAD
   GASNETI_TRACE_PRINTF(I,  ("  GASNET_RCV_THREAD               = %d (%sabled)", gasnetc_use_rcv_thread,
 				gasnetc_use_rcv_thread ? "en" : "dis"));
@@ -1379,11 +1491,29 @@ static void gasnetc_probe_ports(int max_ports) {
 #endif
 
   if ((ib_hcas > GASNETC_IB_MAX_HCAS) && (gasnetc_port_list == NULL)) {
-    fprintf(stderr, "WARNING: Found %d IB HCAs, but GASNet was configured with '--with-ibv-max-hcas="
-		    _STRINGIFY(GASNETC_IB_MAX_HCAS) "'.  To utilize all your HCAs, you should "
-		    "reconfigure GASNet with '--with-ibv-max-hcas=%d'.  You can silence this warning "
+#if GASNETC_IBV_MAX_HCAS
+    const char *current = "with '--with-ibv-max-hcas=" _STRINGIFY(GASNETC_IB_MAX_HCAS) "'";
+    const char *enable = "";
+#else
+    const char *current = "without multi-rail support";
+    const char *enable = "--enable-ibv-multirail ";
+#endif
+    fprintf(stderr, "WARNING: Found %d IB HCAs, but GASNet was configured %s.  "
+		    "To utilize all your HCAs, you should "
+		    "reconfigure GASNet with '%s--with-ibv-max-hcas=%d'.  You can silence this warning "
 		    "by setting the environment variable GASNET_IBV_PORTS as described in the file "
-		    "'gasnet/ibv-conduit/README'.\n", num_hcas, num_hcas);
+		    "'gasnet/ibv-conduit/README'.\n", num_hcas, current, enable, num_hcas);
+  }
+
+  int64_t pkey = gasnett_getenv_int_withdefault("GASNET_IBV_PKEY", -1, 0);
+  uint64_t pkey_mask = ~(uint64_t)0x8000;  // to strip membership bit
+  if (pkey == -1) {
+    // Nothing to do
+  } else {
+    pkey &= pkey_mask;
+    if ((pkey > 0x7fff) || (pkey < 2)) {
+      gasneti_fatalerror("Invalid GASNET_IBV_PKEY '%s'", gasnett_getenv("GASNET_IBV_PKEY"));
+    }
   }
 
   /* Loop over list of HCAs */
@@ -1442,6 +1572,30 @@ static void gasnetc_probe_ports(int max_ports) {
         ++found;
         this_port->port_num = curr_port;
         this_port->hca_index = hca_count;
+        if (pkey < 0) {
+          GASNETI_TRACE_PRINTF(C,("Using default pkey_index=0 for HCA '%s', port %d",
+                                  hca_name, curr_port));
+          this_port->pkey_index = 0;
+        } else {
+          int i;
+          for (i = 0; i < hca_cap.max_pkeys; ++i) {
+            uint16_t pkey_val;
+            if (ibv_query_pkey(hca_handle, curr_port, i, &pkey_val)) {
+              gasneti_fatalerror("Failed to query pkeys for HCA '%s', port %d", hca_name, curr_port);
+            }
+            pkey_val = ntohs(pkey_val) & pkey_mask;
+            if (pkey_val == pkey) {
+              GASNETI_TRACE_PRINTF(C,("Using pkey_index %d for HCA '%s', port %d",
+                                      i, hca_name, curr_port));
+              this_port->pkey_index = i;
+              break;
+            }
+          }
+          if (i == hca_cap.max_pkeys) {
+            gasneti_fatalerror("Failed to locate index of requested pkey 0x%04x for HCA '%s', port %d",
+                               (unsigned int)pkey, hca_name, curr_port);
+          }
+        }
         if (gasnetc_qp_rd_atom) { /* Zero means use HCA/port limit */
           int limit = MIN(hca_cap.max_qp_init_rd_atom, hca_cap.max_qp_rd_atom);
           if (gasnetc_qp_rd_atom > limit) {
@@ -1486,6 +1640,17 @@ static void gasnetc_probe_ports(int max_ports) {
     /* Install or release the HCA */
     if (found) {
       gasnetc_hca_t *hca = &gasnetc_hca[hca_count];
+
+      if (gasneti_getenv_yesno_withdefault("GASNET_IBV_MODEL_WARN", 1)) {
+        if (!strncmp(hca_name, "hfi1_", 5)) {
+          fprintf(stderr,
+                  "WARNING: Use of ibv-conduit with Omni-Path NIC %s is not recommended.\n"
+                  "         See GASNet's ibv-conduit README for more information.\n"
+                  "         Alternatively, you may set environment variable\n"
+                  "         GASNET_IBV_MODEL_WARN=0 to silence this message.\n",
+                  hca_name);
+        }
+      }
 
       memset(hca, 0, sizeof(gasnetc_hca_t));
       hca->handle	= hca_handle;
@@ -1566,14 +1731,190 @@ static int gasnetc_hca_report(void) {
   return GASNET_OK;
 }
 
-static int gasnetc_init(int *argc, char ***argv) {
+#if GASNETC_IBV_ODP
+static void gasneti_odp_init(void) {
+  struct gasneti_odp_support {
+    uint8_t missing;
+    char    hca_id[15];
+  } my_odp_support[GASNETC_IB_MAX_HCAS];
+  enum gasneti_odp_missing {
+    missing_none = 0, // not missing anything == OK
+    missing_general,
+    missing_implicit,
+    missing_rc_read,
+    missing_rc_write
+  };
+  const char *message[] = {
+      "",
+      "general ODP",
+      "Implicit ODP",
+      "RC READ",
+      "RC WRITE"
+  };
+  // TODO: support heterogenous multi-rail with some HCAs having ODP and others not.
+  // This is not trivial because the RDMA logic picks ODP vs FH before picking an HCA.
+  gasnetc_hca_t	*hca;
+  GASNETC_FOR_ALL_HCA(hca) {
+    enum gasneti_odp_missing missing = missing_none;
+    struct ibv_exp_device_attr attr;
+    memset(&attr, 0, sizeof(attr));
+    attr.comp_mask = IBV_EXP_DEVICE_ATTR_ODP | IBV_EXP_DEVICE_ATTR_EXP_CAP_FLAGS;
+    int ret = ibv_exp_query_device(hca->handle, &attr);
+    if (! (attr.exp_device_cap_flags & IBV_EXP_DEVICE_ODP)) {
+      missing = missing_general;
+    } else if (! (attr.odp_caps.general_odp_caps & IBV_EXP_ODP_SUPPORT_IMPLICIT)) {
+      missing = missing_implicit;
+      // TODO-EX: maybe support older systems lacking this bit?
+      // Prior to ConnectX-4, implicit ODP was done in s/w and
+      //  + This can be identified because this caps bit was not set
+      //  + Implicit ODP emulation had 128MB limit
+      //  + Implicit ODP was valid for local only (invalid rkey)
+    } else if (! (attr.odp_caps.per_transport_caps.rc_odp_caps & IBV_EXP_ODP_SUPPORT_READ)) {
+      missing = missing_rc_read;
+    } else if (! (attr.odp_caps.per_transport_caps.rc_odp_caps & IBV_EXP_ODP_SUPPORT_WRITE)) {
+      missing = missing_rc_write;
+    }
+    if (missing != missing_none) {
+      GASNETI_TRACE_PRINTF(C,("Disabled ODP - %s: %s support is missing.",
+                              hca->hca_id, message[(int)missing]));
+      gasnetc_use_odp = 0;
+      size_t max_len = sizeof(my_odp_support[0].hca_id) - 1;
+      strncpy(my_odp_support[hca->hca_index].hca_id, hca->hca_id, max_len);
+      my_odp_support[hca->hca_index].hca_id[max_len] = '\0';
+    }
+    my_odp_support[hca->hca_index].missing = missing;
+  }
+  if (gasnetc_use_odp) {
+    // Create implict ODP registrations (currently only used locally)
+    GASNETC_FOR_ALL_HCA(hca) {
+      struct ibv_exp_reg_mr_in in;
+      memset(&in, 0, sizeof(in));
+      in.pd = hca->pd;
+      in.exp_access = (enum ibv_exp_access_flags)( IBV_EXP_ACCESS_ON_DEMAND |
+                                                   IBV_EXP_ACCESS_LOCAL_WRITE );
+      in.length = IBV_EXP_IMPLICIT_MR_SIZE;
+      hca->implicit_odp.handle = ibv_exp_reg_mr(&in);
+      GASNETC_IBV_CHECK_PTR(hca->implicit_odp.handle, "from ibv_exp_reg_mr(implicit)");
+      hca->implicit_odp.lkey = hca->implicit_odp.handle->lkey; // flatten for quick access
+    }
+  }
+  // Results by value of GASNET_ODP_VERBOSE:
+  //  0: No output (and no comms either)
+  //  1: Reports count of proceses missing support
+  //  2: Reports detail, w/ HCA ids IFF multi-hca
+  //  3: Reports detail w/ HCA ids unconditionally
+  int verbose = gasneti_getenv_int_withdefault("GASNET_ODP_VERBOSE", 1, 0);
+  if (verbose) {
+    // Will exchange just a single byte when not reporting HCA ids
+    // TODO: Only one process reports, so gather to 0 would be sufficient
+    int show_ids = (verbose > 2) || (gasnetc_num_hcas > 1);
+    size_t exchg_len = show_ids ? gasnetc_num_hcas * sizeof(struct gasneti_odp_support) : 1;
+    size_t stride = show_ids ? sizeof(struct gasneti_odp_support) : 1;
+    struct gasneti_odp_support *all_odp_support = gasneti_malloc(gasneti_nodes * exchg_len);
+    gasneti_bootstrapExchange(my_odp_support, exchg_len, all_odp_support);
+    if (! gasneti_mynode) {
+      struct gasneti_odp_support *p = all_odp_support;
+      // First just count the number of procs w/o OPD
+      int non_odp_procs = 0;
+      for (gex_Rank_t i = 0; i < gasneti_nodes; ++i) {
+        int non_odp = 0;
+        GASNETC_FOR_ALL_HCA(hca) {
+          non_odp |= (p->missing != missing_none);
+          p = (struct gasneti_odp_support *)((uintptr_t)p + stride);
+        }
+        non_odp_procs += non_odp;
+      }
+      if (non_odp_procs) {
+        const char *less_msg =
+                "         To suppress this message set environment variable\n"
+                "         GASNET_ODP_VERBOSE=0 or reconfigure with --disable-ibv-odp\n"
+                "         (see ibv-conduit's README for more information).\n";
+        const char *more_msg = (verbose > 1) ? "" :
+                "         To see additional details set environment variable\n"
+                "         GASNET_ODP_VERBOSE=2 (or higher).\n";
+        // report the summary information (verbose > 0)
+        fprintf(stderr,
+                "WARNING: ODP disabled on %d of %d processes which are missing support.\n%s%s",
+                (int)non_odp_procs, (int)gasneti_nodes, less_msg, more_msg);
+        // report detailed information (verbose > 1)
+        if (verbose > 1) {
+          p = all_odp_support;
+          for (gex_Rank_t i = 0; i < gasneti_nodes; ++i) {
+            GASNETC_FOR_ALL_HCA(hca) {
+              if (p->missing != missing_none) {
+                const char *msg = message[(int)p->missing];
+                if (show_ids) {
+                   fprintf(stderr, "    Process %d (hca '%s'): %s support is missing.\n",
+                           i, p->hca_id, msg);
+                } else {
+                   fprintf(stderr, "    Process %d: %s support is missing.\n",
+                           i, msg);
+                }
+              }
+              p = (struct gasneti_odp_support *)((uintptr_t)p + stride);
+            }
+          }
+        }
+      }
+    }
+    gasneti_free(all_odp_support);
+  }
+}
+
+static void gasnetc_odp_dereg(gasnetc_hca_t *hca) {
+  struct ibv_mr *handle;
+#if PLATFORM_ARCH_32
+  handle = (struct ibv_mr *) gasneti_atomic32_swap((gasneti_atomic32_t *) &hca->implicit_odp.handle, 0, 0);
+#else
+  handle = (struct ibv_mr *) gasneti_atomic64_swap((gasneti_atomic64_t *) &hca->implicit_odp.handle, 0, 0);
+#endif
+  if (handle) {
+    ibv_dereg_mr(handle);
+  }
+}
+
+// Testing shows that exiting without releasing the implicit ODP registration
+// leads to an (eventually fatal!) irreversible system memory leak.
+// So, we *must* do this for both normal and abnormal exits.
+static void gasnetc_odp_shutdown(void) {
+  if (gasnetc_use_odp) {
+    gasnetc_hca_t *hca;
+    GASNETC_FOR_ALL_HCA(hca) {
+      gasnetc_odp_dereg(hca);
+    }
+  }
+}
+extern void gasnetc_fatalsignal_cleanup_callback(int sig) {
+  // Note: caller has set SIGALRM handler
+  alarm(30);
+  gasnetc_odp_shutdown();
+  alarm(0);
+}
+#if HAVE_ON_EXIT
+  static void gasnetc_odp_on_exit(int exitcode, void *arg) {
+    gasnetc_odp_shutdown();
+  }
+#else
+  static void gasnetc_odp_atexit(void) {
+    gasnetc_odp_shutdown();
+  }
+#endif
+#endif // GASNETC_IBV_ODP
+
+static int gasnetc_init( gex_Client_t            *client_p,
+                         gex_EP_t                *ep_p,
+                         const char              *clientName,
+                         int                     *argc,
+                         char                    ***argv,
+                         gex_Flags_t             flags)
+{
 #if GASNET_PSHM
   void                  *shared_mem;
 #endif
   gasnetc_hca_t		*hca;
   uint16_t		*local_lid;
   uint16_t		*remote_lid;
-  gasnet_node_t		node;
+  gex_Rank_t	node;
   int 			i;
 
   /*  check system sanity */
@@ -1601,9 +1942,9 @@ static int gasnetc_init(int *argc, char ***argv) {
   /* Now enable tracing of all the following steps */
   gasneti_trace_init(argc, argv);
 
-  /* bootstrapInit may set gasneti_nodes==0 if would overflow gasnet_node_t */
-  if (!gasneti_nodes /* || (gasneti_nodes > GASNET_MAXNODES) */) {
-    GASNETI_RETURN_ERRR(RESOURCE, "gasnet_nodes exceeds ibv-conduit capabilities");
+  /* bootstrapInit may set gasneti_nodes==0 if would overflow 16-bit field */
+  if (!gasneti_nodes || (gasneti_nodes > GASNET_MAXNODES)) {
+    GASNETI_RETURN_ERRR(RESOURCE, "job size exceeds ibv-conduit capabilities");
   }
 
   /* Process the environment for configuration/settings */
@@ -1625,6 +1966,29 @@ static int gasnetc_init(int *argc, char ***argv) {
       GASNETI_RETURN_ERRR(RESOURCE, "unable to open any HCA ports");
     }
   }
+
+#if GASNETC_IB_MAX_HCAS > 1
+  gasnetc_use_fenced_puts = gasneti_getenv_yesno_withdefault("GASNET_USE_FENCED_PUTS", 0);
+  if (gasnetc_use_fenced_puts && (gasnetc_num_hcas == 1)) {
+    if (!gasneti_mynode) {
+      fprintf(stderr,
+              "WARNING: GASNET_USE_FENCED_PUTS requested, but ignored because only a single\n"
+              "         HCA was detected and/or enabled.  To suppress this message, you may\n"
+              "         either unset this environment variable or set it to '0'.\n"
+              "         Alternatively, you may configure using '--disable-ibv-multirail'\n"
+              "         if all nodes have only a single InfiniBand HCA.\n");
+    }
+    gasnetc_use_fenced_puts = 0;
+  }
+#else
+  if (!gasneti_mynode && gasneti_getenv_yesno_withdefault("GASNET_USE_FENCED_PUTS", 0)) {
+    fprintf(stderr,
+            "WARNING: GASNET_USE_FENCED_PUTS requested, but ignored because GASNet was\n"
+            "         configured without multi-rail support.  To suppress this message,\n"
+            "         you may either unset this environment variable or set it to '0'.\n"
+            "         Alternatively, you may configure using '--enable-ibv-multirail'.\n");
+  }
+#endif
 
   /* report hca/port properties */
   gasnetc_hca_report();
@@ -1692,6 +2056,116 @@ static int gasnetc_init(int *argc, char ***argv) {
   }
 #endif /* GASNETC_IBV_XRC */
 
+  // Detect configuration differences (likely to be) due to heterogeneous clusters
+  {
+    const uint32_t srq_flag = 0x80000000;
+    const uint32_t xrc_flag = 0x40000000;
+    uint32_t config_word =
+        (gasnetc_use_srq ? srq_flag : 0) |
+        (gasnetc_use_xrc ? xrc_flag : 0) |
+        ((gasnetc_num_hcas & 0xff) << 8) |
+        (gasnetc_num_ports & 0xff);
+    int srq_squashed = 0;
+    uint32_t *all_configs = gasneti_malloc(gasneti_nodes * sizeof(config_word));
+    gasneti_bootstrapExchange(&config_word, sizeof(config_word), all_configs);
+#if GASNETC_IBV_SRQ
+    // Auto-disable (with warning) SRQ if inhomogeneous
+    for (gex_Rank_t i = 0; i < gasneti_nodes; ++i) {
+      if (srq_flag & (config_word ^ all_configs[i])) {
+        gasnetc_use_srq = 0;
+      #if GASNETC_IBV_XRC
+        gasnetc_use_xrc = 0;
+        srq_squashed = 1;
+      #endif
+        GASNETI_TRACE_PRINTF(I, ("SRQ disabled because availability differs across nodes"));
+        if (!gasneti_mynode) {
+          fprintf(stderr,
+                  "WARNING: SRQ disabled because availability differs across nodes.\n"
+                  "         To suppress this message set environment variable\n"
+                  "         GASNET_USE_SRQ=0 or reconfigure with --disable-ibv-srq.\n");
+        }
+      }
+    }
+#endif // GASNETC_IBV_SRQ
+#if GASNETC_IBV_XRC
+    // Auto-disable (with warning) XRC if inhomogeneous
+    // Note that if SRQ was "squashed" above, then we won't complain about both
+    for (gex_Rank_t i = 0; i < gasneti_nodes; ++i) {
+      if (xrc_flag & (config_word ^ all_configs[i])) {
+        gasnetc_use_xrc = 0;
+        if (!srq_squashed) {
+          GASNETI_TRACE_PRINTF(I, ("XRC disabled because availability differs across nodes"));
+          if (!gasneti_mynode) {
+            fprintf(stderr,
+                    "WARNING: XRC disabled because availability differs across nodes.\n"
+                    "         To suppress this message set environment variable\n"
+                    "         GASNET_USE_XRC=0 or reconfigure with --disable-ibv-xrc.\n");
+          }
+        }
+      }
+    }
+#endif // GASNETC_IBV_XRC
+    // Fail gracefully if HCA or port counts are inhomogeneous
+    if (!gasneti_mynode) {
+      for (gex_Rank_t i = 1; i < gasneti_nodes; ++i) {
+        if (0xff00 & (config_word ^ all_configs[i])) {
+          gasneti_fatalerror("Inhomogeneous IB HCA count - cannot continue.\n"
+                             "See README for GASNet's ibv-conduit for more information, especially\n"
+                             "on multi-rail support and the GASNET_IBV_PORTS environment variable.\n"
+                             "First detected mismatch: proc 0: %d vs. proc %d: %d\n",
+                             gasnetc_num_hcas, (int)i, (int)(0xff & (all_configs[i] >> 8)));
+        }
+        if (0xff & (config_word ^ all_configs[i])) {
+          gasneti_fatalerror("Inhomogeneous IB PORT count - cannot continue.\n"
+                             "See README for GASNet's ibv-conduit for more information, especially\n"
+                             "on multi-rail support and the GASNET_IBV_PORTS environment variable.\n"
+                             "First detected mismatch: proc 0: %d vs. proc %d: %d\n",
+                             gasnetc_num_ports, (int)i, (int)(0xff & all_configs[i]));
+        }
+      }
+    }
+    gasneti_free(all_configs);
+  }
+
+#if GASNETC_IBV_ODP
+  gasnetc_use_odp = gasneti_getenv_int_withdefault("GASNET_USE_ODP", 1, 0);
+  if (gasnetc_use_odp) {
+    gasneti_odp_init();
+  }
+#elif !GASNETC_IBV_ODP_DISABLED
+  if (gasneti_getenv_int_withdefault("GASNET_ODP_VERBOSE", 1, 0)) {
+    uint8_t found_odp_hca = 0;
+    GASNETC_FOR_ALL_HCA(hca) {
+      // Assume hca_id starting with "mlx5" (or higher) has ODP support
+      if (!strncmp(hca->hca_id, "mlx", 3) && (atoi(hca->hca_id+3) >= 5)) {
+        found_odp_hca = 1;
+        break;
+      }
+    }
+    // TODO: Only one process reports, so gather to 0 would be sufficient and
+    //       a SUM reduction even would be even better.
+    uint8_t *all = gasneti_malloc(gasneti_nodes);
+    gasneti_bootstrapExchange(&found_odp_hca, 1, all);
+    if (!gasneti_mynode) {
+      gex_Rank_t count = 0;
+      for (gex_Rank_t i = 0; i < gasneti_nodes; ++i) {
+        count += all[i];
+      }
+      if (count) {
+        fprintf(stderr,
+                "WARNING: %d of %d processes have HCAs believed to support ODP.  However, the\n"
+                "         corresponding software support was not found at configure time.\n"
+                "         Please see the README for GASNet's ibv-conduit for more info on ODP.\n"
+                "         To suppress this message set environment variable\n"
+                "         GASNET_ODP_VERBOSE=0 or reconfigure with --disable-ibv-odp\n"
+                "         (see ibv-conduit's README for more information).\n",
+                (int)count, (int)gasneti_nodes);
+      }
+    }
+    gasneti_free(all);
+  }
+#endif // GASNETC_IBV_ODP
+
   /* Determine gasnetc_max_msg_sz and dependent variables */
   gasnetc_max_msg_sz = gasnetc_port_tbl[0].port.max_msg_sz;
   for (i = 1; i < gasnetc_num_ports; ++i) {
@@ -1752,32 +2226,6 @@ static int gasnetc_init(int *argc, char ***argv) {
   }
   #endif
 
-  /* early registration of core API handlers */
-  for (i = 0; i < GASNETC_MAX_NUMHANDLERS; i++) {
-      gasnetc_handler[i] = (gasneti_handler_fn_t)&gasneti_defaultAMHandler;
-  }
-  {
-  #if !GASNETC_PIN_SEGMENT
-    gasnet_handlerentry_t *ftable = (gasnet_handlerentry_t *)firehose_get_handlertable();
-    int flen = 0;
-  #endif
-    gasnet_handlerentry_t *ctable = (gasnet_handlerentry_t *)gasnetc_get_handlertable();
-    int len = 0;
-    int numreg = 0;
-    gasneti_assert(ctable);
-    while (ctable[len].fnptr) len++; /* calc len */
-    if (gasneti_amregister(ctable, len, 1, 63, 0, &numreg) != GASNET_OK)
-      GASNETI_RETURN_ERRR(RESOURCE,"Error registering core API handlers");
-    gasneti_assert(numreg == len);
-  #if !GASNETC_PIN_SEGMENT
-    gasneti_assert(ftable);
-    while (ftable[flen].fnptr) flen++; /* calc len */
-    if (gasneti_amregister(ftable, flen, len+1, 63, 1, &numreg) != GASNET_OK)
-      GASNETI_RETURN_ERRR(RESOURCE, "Error registering firehose handlers");
-    gasneti_assert(numreg == flen);
-  #endif
-  }
-
   /* transpose remote lids into port_tbl */
 #if GASNET_PSHM
   {
@@ -1805,6 +2253,21 @@ static int gasnetc_init(int *argc, char ***argv) {
 #endif
   gasneti_free(remote_lid);
 
+  //  Create first Client and EP *here*, for use in subsequent bootstrap collectives
+  gasneti_Client_t client;
+  gasneti_EP_t ep;
+  {
+    //  allocate the client object
+    client = gasneti_alloc_client(clientName, flags, 0);
+    *client_p = gasneti_export_client(client);
+
+    //  create the initial endpoint with internal handlers
+    if (gasnetc_EP_Create(ep_p, *client_p, flags))
+      GASNETI_RETURN_ERRR(RESOURCE,"Error creating initial endpoint");
+    ep = gasneti_import_ep(*ep_p);
+    gasnetc_ep0 = (gasnetc_EP_t)ep; // TODO-EX: this global variable to be removed
+  }
+
 #if GASNETC_IBV_XRC
   /* allocate/initialize XRC resources, if any */
   if (gasnetc_use_xrc) {
@@ -1816,7 +2279,7 @@ static int gasnetc_init(int *argc, char ***argv) {
 #endif
 
   /* allocate/initialize transport resources */
-  i = gasnetc_sndrcv_init();
+  i = gasnetc_sndrcv_init(gasnetc_ep0);
   if (i != GASNET_OK) {
     return i;
   }
@@ -1846,16 +2309,19 @@ static int gasnetc_init(int *argc, char ***argv) {
    */
   {
     GASNETI_TRACE_PRINTF(C,("I am node %d of %d on-node peers",
-                            gasneti_nodemap_local_rank, gasneti_nodemap_local_count));
+                            gasneti_myhost.node_rank, gasneti_myhost.node_count));
 
     /* Query the pinning limits of the HCA */
-    gasnetc_init_pin_info(gasneti_nodemap_local[0], gasneti_nodemap_local_count);
+    gasnetc_init_pin_info(gasneti_myhost.nodes[0], gasneti_myhost.node_count);
 
     gasneti_assert(gasnetc_pin_info.memory != 0);
     gasneti_assert(gasnetc_pin_info.memory != (uintptr_t)(-1));
     gasneti_assert(gasnetc_pin_info.regions != 0);
   }
  
+  uintptr_t mmap_limit;
+  {
+    uintptr_t local_limit;
   #if GASNET_SEGMENT_FAST
     /* Reserved memory needed by firehose on each node */
     /* NOTE: We reserve this memory even when firehose is disabled, since the disable
@@ -1866,27 +2332,74 @@ static int gasnetc_init(int *argc, char ***argv) {
       gasneti_fatalerror("Pinnable memory (%"PRIuPTR") is less than reserved minimum %"PRIuPTR, 
                          (uintptr_t)gasnetc_pin_info.memory, (uintptr_t)reserved_mem);
     }
-    uintptr_t local_limit = (gasnetc_pin_info.memory - reserved_mem);
-  #elif GASNET_SEGMENT_LARGE
-    uintptr_t local_limit = (uintptr_t)-1;
+    local_limit = (gasnetc_pin_info.memory - reserved_mem);
+  #else
+    local_limit = (uintptr_t)-1;
   #endif
 
-  #if GASNET_SEGMENT_FAST || GASNET_SEGMENT_LARGE
-  {
-    #ifdef GASNETI_MMAP_OR_PSHM
-      uintptr_t limit = gasneti_mmapLimit(
-                                  local_limit, (uint64_t)-1,
+  #ifdef GASNETI_MMAP_OR_PSHM
+    // Bound per-host (sharedLimit) argument to gasneti_segmentLimit()
+    // while properly reserving space for aux segments.
+    uint64_t sharedLimit = gasneti_sharedLimit();
+    uint64_t hostAuxSegs = gasneti_myhost.node_count * gasneti_auxseg_preinit();
+    if (sharedLimit <= hostAuxSegs) {
+      gasneti_fatalerror("per-host segment limit %"PRIu64" is too small to accommodate %i aux segments, "
+                         "total size %"PRIu64". You may need to adjust OS shared memory limits.",
+                         sharedLimit, gasneti_myhost.node_count, hostAuxSegs);
+    }
+    sharedLimit -= hostAuxSegs;
+
+    mmap_limit = gasneti_segmentLimit(
+                                  local_limit, sharedLimit,
                                   &gasnetc_bootstrapExchange_ib,
                                   &gasnetc_bootstrapBarrier_ib);
-    #else
-      uintptr_t limit = local_limit; // No better info available
-    #endif
-
-    gasneti_segmentInit(limit, &gasnetc_bootstrapExchange_ib);
-  }
-  #elif GASNET_SEGMENT_EVERYTHING
-    /* segment is everything - nothing to do */
+  #else
+    mmap_limit = local_limit; // No better info available
   #endif
+  }
+
+  /* Determine largest allowable single memory registration */
+  if (!gasnetc_pin_maxsz) {
+    /* Default to largest registration supported by the HCA(s) */
+    gasnetc_pin_maxsz = ~(uint64_t)0;
+    GASNETC_FOR_ALL_HCA(hca) {
+      gasnetc_pin_maxsz = MIN(gasnetc_pin_maxsz, hca->hca_cap.max_mr_size);
+    }
+  } else if (gasnetc_pin_maxsz > gasnetc_max_msg_sz) {
+    char oldval[16], newval[16];
+    gasneti_format_number(gasnetc_pin_maxsz, oldval, sizeof(oldval), 1);
+    gasneti_format_number(gasnetc_max_msg_sz, newval, sizeof(newval), 1);
+    fprintf(stderr,
+            "WARNING: Requested GASNET_PIN_MAXSZ %s reduced to HCA's max_msg_sz of %s\n",
+            oldval, newval);
+    gasnetc_pin_maxsz = gasnetc_max_msg_sz;
+  }
+
+
+  /* allocate and attach an aux segment */
+
+  gasneti_auxsegAttach(gasnetc_pin_maxsz, &gasnetc_bootstrapExchange_ib);
+
+  void *auxbase = gasneti_seginfo_aux[gasneti_mynode].addr;
+  uintptr_t auxsize = gasneti_seginfo_aux[gasneti_mynode].size;
+
+  /* The auxseg will be statically pinned even if the segment is not */
+  
+  GASNETC_FOR_ALL_HCA(hca) {
+    if (0 != gasnetc_pin(hca, auxbase, auxsize, gasneti_seg_access_flags, &hca->aux_reg)) {
+      gasneti_segreg_failed(auxsize, " aux", errno);
+    }
+    // TODO_EX: need scalable and/or lazy storage of aux segments and their rkeys
+    hca->aux_rkeys = gasneti_malloc(gasneti_nodes*sizeof(uint32_t));
+    gasnetc_bootstrapExchange_ib(&hca->aux_reg.handle->rkey, sizeof(uint32_t), hca->aux_rkeys);
+  }
+  gasneti_assert(gasnetc_pin_info.memory > auxsize);
+  gasneti_assert(gasnetc_pin_info.regions > 1);
+  gasnetc_pin_info.memory -= auxsize;
+  gasnetc_pin_info.regions -= 1;
+
+  /* determine Max{Local,GLobal}SegmentSize */
+  gasneti_segmentInit(mmap_limit, &gasnetc_bootstrapExchange_ib, flags);
 
 #if GASNET_BLCR
   gasneti_checkpoint_init(gasneti_bootstrapBroadcast);
@@ -1900,118 +2413,61 @@ static int gasnetc_init(int *argc, char ***argv) {
   #endif
   gasnetc_bootstrapBarrier_ib();
 
-  gasneti_auxseg_init(); /* adjust max seg values based on auxseg */
+#if GASNETC_PIN_SEGMENT
+  // TODO-EX: this is a temporary measure to provide (upper bound) values of 
+  //          gasnetc_seg_maxsz and gasnetc_max_regs for use by firehose_init().
+  gasnetc_seg_maxsz = gasneti_MaxLocalSegmentSize;
+  if (gasnetc_pin_maxsz >= gasnetc_seg_maxsz) {
+    gasnetc_max_regs = 1;
+  } else {
+    size_t size = MIN(gasnetc_pin_maxsz, gasnetc_max_msg_sz);
+    int shift;
+    gasneti_assert(size != 0);
+    size >>= 1;
+    for (shift=0; size != 0; ++shift) { size >>= 1; }
+    gasnetc_max_regs = (gasnetc_seg_maxsz + gasnetc_pin_maxsz - 1) >> shift;
+  }
+#endif
 
   return GASNET_OK;
 }
 
-/* ------------------------------------------------------------------------------------ */
-extern int gasnet_init(int *argc, char ***argv) {
-  int retval = gasnetc_init(argc, argv);
-  if (retval != GASNET_OK) GASNETI_RETURN(retval);
-  #if 0
-    /* Already done in gasnetc_init() to allow tracing of init steps */
-    gasneti_trace_init(argc, argv);
-  #endif
-  return GASNET_OK;
-}
 /* ------------------------------------------------------------------------------------ */
 /* Helper for firehose init
  * Returns address (in static storage) of an array of preregistered regions
  */
 static firehose_region_t *
 gasnetc_prereg_list(int *count_p) {
-  static firehose_region_t prereg[1];
+  static firehose_region_t prereg[2];
+  int c = 0;
   int h;
 
-  /* Currently only the "snd_reg" is added to the firehose tables */
-  prereg[0].addr             = gasnetc_hca[0].snd_reg.addr;
-  prereg[0].len              = gasnetc_hca[0].snd_reg.len;
-  GASNETC_FOR_ALL_HCA_INDEX(h) {
-    prereg[0].client.handle[h] = NULL;        /* unreg must fail */
-    prereg[0].client.lkey[h]   = gasnetc_hca[h].snd_reg.handle->lkey;
-    prereg[0].client.rkey[h]   = gasnetc_hca[h].snd_reg.handle->rkey;
-  }
+  /* Currently "snd_reg" and "aux_reg" are added to the firehose tables */
 
-  *count_p = (int)(sizeof(prereg) / sizeof(prereg[0]));
+  prereg[c].addr             = gasnetc_hca[0].snd_reg.addr;
+  prereg[c].len              = gasnetc_hca[0].snd_reg.len;
+  GASNETC_FOR_ALL_HCA_INDEX(h) {
+    prereg[c].client.handle[h] = NULL;        /* unreg must fail */
+    prereg[c].client.lkey[h]   = gasnetc_hca[h].snd_reg.handle->lkey;
+    prereg[c].client.rkey[h]   = gasnetc_hca[h].snd_reg.handle->rkey;
+  }
+  ++c;
+
+  prereg[c].addr             = gasnetc_hca[0].aux_reg.addr;
+  prereg[c].len              = gasnetc_hca[0].aux_reg.len;
+  GASNETC_FOR_ALL_HCA_INDEX(h) {
+    prereg[c].client.handle[h] = NULL;        /* unreg must fail */
+    prereg[c].client.lkey[h]   = gasnetc_hca[h].aux_reg.handle->lkey;
+    prereg[c].client.rkey[h]   = gasnetc_hca[h].aux_reg.handle->rkey;
+  }
+  ++c;
+
+  *count_p = c;
   return prereg;
 }
 
 /* ------------------------------------------------------------------------------------ */
-extern int gasnetc_attach(gasnet_handlerentry_t *table, int numentries,
-                          uintptr_t segsize, uintptr_t minheapoffset) {
-  gasnetc_hca_t *hca;
-  void *segbase = NULL;
-  size_t maxsize = 0;
-  int numreg = 0;
-  gasnet_node_t i;
-  
-  GASNETI_TRACE_PRINTF(C,("gasnetc_attach(table (%i entries), segsize=%"PRIuPTR", minheapoffset=%"PRIuPTR")",
-                          numentries, segsize, minheapoffset));
-
-  if (!gasneti_init_done) 
-    GASNETI_RETURN_ERRR(NOT_INIT, "GASNet attach called before init");
-  if (gasneti_attach_done) 
-    GASNETI_RETURN_ERRR(NOT_INIT, "GASNet already attached");
-
-  /*  check argument sanity */
-  #if GASNET_SEGMENT_FAST || GASNET_SEGMENT_LARGE
-    if ((segsize % GASNET_PAGESIZE) != 0) 
-      GASNETI_RETURN_ERRR(BAD_ARG, "segsize not page-aligned");
-    if (segsize > gasneti_MaxLocalSegmentSize) 
-      GASNETI_RETURN_ERRR(BAD_ARG, "segsize too large");
-    if ((minheapoffset % GASNET_PAGESIZE) != 0) /* round up the minheapoffset to page sz */
-      minheapoffset = ((minheapoffset / GASNET_PAGESIZE) + 1) * GASNET_PAGESIZE;
-  #elif GASNET_SEGMENT_EVERYTHING
-    segsize = 0;
-    minheapoffset = 0;
-  #endif
-
-  segsize = gasneti_auxseg_preattach(segsize); /* adjust segsize for auxseg reqts */
-
-  /* ------------------------------------------------------------------------------------ */
-  /*  register handlers */
-#if 0 /* Was done early in gasnetc_init() */
-  { int i;
-    for (i = 0; i < GASNETC_MAX_NUMHANDLERS; i++) 
-      gasnetc_handler[i] = (gasneti_handler_fn_t)&gasneti_defaultAMHandler;
-  }
-  { /*  core API handlers */
-    gasnet_handlerentry_t *ctable = (gasnet_handlerentry_t *)gasnetc_get_handlertable();
-    int len = 0;
-    gasneti_assert(ctable);
-    while (ctable[len].fnptr) len++; /* calc len */
-    if (gasneti_amregister(ctable, len, 1, GASNETE_HANDLER_BASE-1, 0, &numreg) != GASNET_OK)
-      GASNETI_RETURN_ERRR(RESOURCE,"Error registering core API handlers");
-    gasneti_assert(numreg == len);
-  }
-#endif
-
-  { /*  extended API handlers */
-    gasnet_handlerentry_t *etable = (gasnet_handlerentry_t *)gasnete_get_handlertable();
-    int len = 0;
-    gasneti_assert(etable);
-    while (etable[len].fnptr) len++; /* calc len */
-    if (gasneti_amregister(etable, len, GASNETE_HANDLER_BASE, 127, 0, &numreg) != GASNET_OK)
-      GASNETI_RETURN_ERRR(RESOURCE,"Error registering extended API handlers");
-    gasneti_assert(numreg == len);
-  }
-
-  if (table) { /*  client handlers */
-    int numreg1 = 0;
-    int numreg2 = 0;
-
-    /*  first pass - assign all fixed-index handlers */
-    if (gasneti_amregister(table, numentries, 128, 255, 0, &numreg1) != GASNET_OK)
-      GASNETI_RETURN_ERRR(RESOURCE,"Error registering fixed-index client handlers");
-
-    /*  second pass - fill in dontcare-index handlers */
-    if (gasneti_amregister(table, numentries, 128, 255, 1, &numreg2) != GASNET_OK)
-      GASNETI_RETURN_ERRR(RESOURCE,"Error registering variable-index client handlers");
-
-    gasneti_assert(numreg1 + numreg2 == numentries);
-  }
-
+static int gasnetc_attach_primary(void) {
   /* ------------------------------------------------------------------------------------ */
   /*  register fatal signal handlers */
 
@@ -2023,69 +2479,155 @@ extern int gasnetc_attach(gasnet_handlerentry_t *table, int numentries,
    */
 
   /* ------------------------------------------------------------------------------------ */
+  /* Initialize firehose */
+  int using_firehose = GASNETC_USE_FIREHOSE && (gasneti_nodes > 1);
+#if GASNETC_IBV_ODP && GASNETC_PIN_SEGMENT
+  // If using Impicit ODP for local addrs, then local firehose is unused
+  using_firehose &= ! gasnetc_use_odp;
+#endif
+  if (using_firehose) {
+    int reg_count;
+    firehose_region_t *prereg = gasnetc_prereg_list(&reg_count);
+    size_t maxsz;
+
+    uint64_t temp_fh_mem = gasnetc_pin_info.memory; // Math can exceed 4G and later fall below
+    gasnetc_firehose_reg = gasnetc_pin_info.regions;
+
+    /* Adjust for prepinned regions (they were pinned before init_pin_info probe) */
+    for (int i = 0; i < reg_count; ++i) {
+      temp_fh_mem += prereg[i].len;
+    }
+
+    /* Now initialize firehose */
+    {
+      gasnetc_firehose_flags = 0;
+
+      #if GASNETC_PIN_SEGMENT
+        /* Adjust for the pinned segment (which is not advertised to firehose as prepinned) */
+        // TODO-EX: Need a replacement for use of gasnetc_seg_maxsz and gasnetc_max_regs
+        //          which lack accurate values until the client segment has been registered.
+        // TODO: shouldn't we use *local* values rather than max ones?
+        gasneti_assert_always(temp_fh_mem > gasnetc_seg_maxsz);
+        temp_fh_mem -= gasnetc_seg_maxsz;
+        gasneti_assert_always(gasnetc_firehose_reg > gasnetc_max_regs);
+        gasnetc_firehose_reg -= gasnetc_max_regs;
+
+        gasnetc_firehose_flags |= FIREHOSE_INIT_FLAG_LOCAL_ONLY;
+      #endif
+      #if PLATFORM_OS_DARWIN
+        gasnetc_firehose_flags |= FIREHOSE_INIT_FLAG_UNPIN_ON_FINI;
+      #endif
+      #if GASNETC_IBV_SHUTDOWN
+        gasnetc_firehose_flags |= FIREHOSE_INIT_FLAG_UNPIN_ON_FINI
+                               |  FIREHOSE_INIT_FLAG_MAY_REINIT;
+      #endif
+
+      #if PLATFORM_ARCH_32
+        gasnetc_firehose_mem = GASNETI_PAGE_ALIGNDOWN(MIN(temp_fh_mem, 0xFFFFFFFF));
+      #else
+        gasnetc_firehose_mem = temp_fh_mem;
+      #endif
+      firehose_init(gasnetc_firehose_mem, gasnetc_firehose_reg, gasnetc_fh_maxsize,
+                    prereg, reg_count, gasnetc_firehose_flags, &gasnetc_firehose_info);
+      gasnetc_did_firehose_init = 1;
+    }
+
+    /* Determine alignment (and max size) for fh requests - a power-of-two <= max_region/2 */
+    maxsz = MIN(gasnetc_max_msg_sz, gasnetc_firehose_info.max_LocalPinSize);
+    #if !GASNETC_PIN_SEGMENT
+      maxsz = MIN(maxsz, gasnetc_firehose_info.max_RemotePinSize);
+    #endif
+    gasneti_assert_always(maxsz >= (GASNET_PAGESIZE + gasnetc_inline_limit));
+    gasnetc_fh_align = GASNET_PAGESIZE;
+    while ((gasnetc_fh_align * 2) <= (maxsz / 2)) {
+      gasnetc_fh_align *= 2;
+    }
+    gasnetc_fh_align_mask = gasnetc_fh_align - 1;
+  }
+
+  /* ------------------------------------------------------------------------------------ */
+  /*  primary attach complete */
+  gasneti_attach_done = 1;
+  gasnetc_bootstrapBarrier_ib();
+
+  GASNETI_TRACE_PRINTF(C,("gasnetc_attach_primary(): primary attach complete"));
+
+  gasnete_init(); /* init the extended API */
+
+  gasneti_nodemapFini();
+
+  /* ensure extended API is initialized across nodes */
+  gasnetc_bootstrapBarrier_ib();
+
+#if GASNETC_USE_RCV_THREAD
+  /* Start AM receive thread, if applicable */
+  gasnetc_sndrcv_start_thread();
+#endif
+
+  // tear down conduit-specific bootstrap collectives (not used after attach)
+  gasnetc_sys_coll_fini();
+#if GASNET_DEBUG
+  /* Ensure fini-init-fini works (required for checkpoint/restart) */
+  gasnetc_sys_coll_init();
+  gasneti_spawner->Barrier();
+  gasnetc_bootstrapBarrier_ib();
+  gasnetc_sys_coll_fini();
+#endif
+
+  return GASNET_OK;
+}
+/* ------------------------------------------------------------------------------------ */
+static int gasnetc_attach_segment(gex_Segment_t                 *segment_p,
+                                  gex_TM_t                      tm,
+                                  uintptr_t                     segsize,
+                                  gasneti_bootstrapExchangefn_t exchangefn,
+                                  gex_Flags_t                   flags) {
+  // TODO-EX: crude detection of multiple calls until we support them
+  gasneti_assert(NULL == gasneti_seginfo[0].addr);
+
+  /* ------------------------------------------------------------------------------------ */
   /*  register segment  */
 
-  gasneti_seginfo = (gasnet_seginfo_t *)gasneti_malloc(gasneti_nodes*sizeof(gasnet_seginfo_t));
-  gasneti_leak(gasneti_seginfo);
+  gasnetc_hca_t *hca;
+  gex_Rank_t i;
 
-  #if GASNET_SEGMENT_EVERYTHING
-  {
-    for (i=0;i<gasneti_nodes;i++) {
-      gasneti_seginfo[i].addr = (void *)0;
-      gasneti_seginfo[i].size = (uintptr_t)-1;
-    }
-    segbase = (void *)0;
-    segsize = (uintptr_t)-1;
-    /* After local segment is attached, call optional client-provided hook
-       (###) should call BEFORE any conduit-specific pinning/registration of the segment
-     */
-    if (gasnet_client_attach_hook) {
-      gasnet_client_attach_hook(segbase, segsize);
-    }
+  gasneti_segmentAttach(segsize, gasneti_seginfo, exchangefn, flags);
+
+  void *segbase = gasneti_seginfo[gasneti_mynode].addr;
+  segsize = gasneti_seginfo[gasneti_mynode].size;
+
+  gasneti_assert(((uintptr_t)segbase) % GASNET_PAGESIZE == 0);
+  gasneti_assert(segsize % GASNET_PAGESIZE == 0);
+
+  gasneti_EP_t ep = gasneti_import_tm(tm)->_ep;
+  ep->_segment = gasneti_alloc_segment(ep->_client, segbase, segsize, flags, 0);
+  gasneti_legacy_segment_attach_hook(ep);
+  *segment_p = gasneti_export_segment(ep->_segment);
+
+  /* After local segment is attached, call optional client-provided hook
+     (###) should call BEFORE any conduit-specific pinning/registration of the segment
+   */
+  if (gasnet_client_attach_hook) {
+    gasnet_client_attach_hook(segbase, segsize);
   }
-  #elif GASNETC_PIN_SEGMENT
+
+  #if GASNETC_PIN_SEGMENT
   {
-    /* allocate the segment and exchange seginfo */
-    gasneti_segmentAttach(segsize, minheapoffset, gasneti_seginfo, &gasnetc_bootstrapExchange_ib);
-    segbase = gasneti_seginfo[gasneti_mynode].addr;
-    segsize = gasneti_seginfo[gasneti_mynode].size;
-
-    /* After local segment is attached, call optional client-provided hook
-       (###) should call BEFORE any conduit-specific pinning/registration of the segment
-     */
-    if (gasnet_client_attach_hook) {
-      gasnet_client_attach_hook(segbase, segsize);
-    }
-
     gasnetc_seg_start = (uintptr_t)segbase;
     gasnetc_seg_len   = segsize;
 
     /* Find largest the segment requested */
+    gasnetc_seg_maxsz = 0;
     for (i=0; i<gasneti_nodes; ++i) {
-      maxsize = MAX(maxsize, gasneti_seginfo[i].size);
+      gasnetc_seg_maxsz = MAX(gasnetc_seg_maxsz, gasneti_seginfo[i].size);
     }
 
-    /* Setup gasnetc_pin_maxsz{,_shift,_mask} and gasnetc_max_regs.
+    /* Setup gasnetc_pin_maxsz{_shift,_mask} and gasnetc_max_regs.
      * If possible, a single registration will be used and these variables will
      * enforce the max message size instead of max region length.
      * Otherwise they enforce gasnetc_pin_maxsz (rounded down to a power of two).
      */
-    if (!gasnetc_pin_maxsz) {
-      /* Default to largest registration supported by the HCA(a) */
-      gasnetc_pin_maxsz = ~(uint64_t)0;
-      GASNETC_FOR_ALL_HCA(hca) {
-        gasnetc_pin_maxsz = MIN(gasnetc_pin_maxsz, hca->hca_cap.max_mr_size);
-      }
-    } else if (gasnetc_pin_maxsz > gasnetc_max_msg_sz) {
-      char oldval[16], newval[16];
-      gasneti_format_number(gasnetc_pin_maxsz, oldval, sizeof(oldval), 1);
-      gasneti_format_number(gasnetc_max_msg_sz, newval, sizeof(newval), 1);
-      fprintf(stderr,
-              "WARNING: Requested GASNET_PIN_MAXSZ %s reduced to HCA's max_msg_sz of %s\n",
-              oldval, newval);
-      gasnetc_pin_maxsz = gasnetc_max_msg_sz;
-    }
-    if (gasnetc_pin_maxsz >= maxsize) {
+    if (gasnetc_pin_maxsz >= gasnetc_seg_maxsz) {
       /* Single registration */
       gasnetc_pin_maxsz_shift = (8 * SIZEOF_VOID_P) - 1;
       gasnetc_pin_maxsz_mask = 0;
@@ -2100,10 +2642,10 @@ extern int gasnetc_attach(gasnet_handlerentry_t *table, int numentries,
       for (gasnetc_pin_maxsz_shift=0; size != 0; ++gasnetc_pin_maxsz_shift) { size >>= 1; }
       gasnetc_pin_maxsz = ((uint64_t)1) << gasnetc_pin_maxsz_shift;
       gasnetc_pin_maxsz_mask = (gasnetc_pin_maxsz - 1);
-      gasnetc_max_regs = (maxsize + gasnetc_pin_maxsz - 1) >> gasnetc_pin_maxsz_shift;
+      gasnetc_max_regs = (gasnetc_seg_maxsz + gasnetc_pin_maxsz - 1) >> gasnetc_pin_maxsz_shift;
       gasnetc_seg_regs = (segsize + gasnetc_pin_maxsz - 1) >> gasnetc_pin_maxsz_shift;
     }
-    { uint64_t value = gasnetc_pin_maxsz_mask ? gasnetc_pin_maxsz : maxsize;
+    { uint64_t value = gasnetc_pin_maxsz_mask ? gasnetc_pin_maxsz : gasnetc_seg_maxsz;
       char valstr[16];
       gasneti_format_number(value, valstr, sizeof(valstr), 1);
       GASNETI_TRACE_PRINTF(I, ("Final/effective GASNET_PIN_MAXSZ = %s", valstr));
@@ -2131,11 +2673,8 @@ extern int gasnetc_attach(gasnet_handlerentry_t *table, int numentries,
 
         for (j = 0, addr = gasnetc_seg_start, remain = segsize; remain != 0; ++j) {
 	  size_t len = (gasnetc_max_regs == 1) ? remain : MIN(remain, gasnetc_pin_maxsz);
-          if (0 != gasnetc_pin(hca, (void *)addr, len,
-			      (enum ibv_access_flags)(IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE | IBV_ACCESS_REMOTE_READ),
-			      &memreg)) {
-             gasneti_fatalerror("Unexpected error %s (errno=%d) when registering the segment",
-                                strerror(errno), errno);
+          if (0 != gasnetc_pin(hca, (void *)addr, len, gasneti_seg_access_flags, &memreg)) {
+             gasneti_segreg_failed(len, "", errno);
           }
 	  my_rkeys[j] = memreg.handle->rkey;
 	  hca->seg_lkeys[j] = memreg.handle->lkey;
@@ -2154,17 +2693,10 @@ extern int gasnetc_attach(gasnet_handlerentry_t *table, int numentries,
          * + When using PSHM we could store rkeys just once per supernode
          * + When not fully connected, we could utilize sparse storage
          */
-        gasnetc_bootstrapExchange_ib(my_rkeys, gasnetc_max_regs*sizeof(uint32_t), hca->rkeys);
+        (*exchangefn)(my_rkeys, gasnetc_max_regs*sizeof(uint32_t), hca->rkeys);
       }
       gasneti_free(my_rkeys);
     }
-  }
-  #else	/* just allocate the segment but don't pin it */
-  {
-    /* allocate the segment and exchange seginfo */
-    gasneti_segmentAttach(segsize, minheapoffset, gasneti_seginfo, gasnetc_bootstrapExchange_ib);
-    segbase = gasneti_seginfo[gasneti_mynode].addr;
-    segsize = gasneti_seginfo[gasneti_mynode].size;
   }
   #endif
 
@@ -2176,97 +2708,211 @@ extern int gasnetc_attach(gasnet_handlerentry_t *table, int numentries,
     }
   }
 
-  /* Initialize firehose */
-  if (GASNETC_USE_FIREHOSE && (gasneti_nodes > 1)) {
-    int reg_count;
-    firehose_region_t *prereg = gasnetc_prereg_list(&reg_count);
-    size_t maxsz;
-
-    gasnetc_firehose_mem = gasnetc_pin_info.memory;
-    gasnetc_firehose_reg = gasnetc_pin_info.regions;
-
-    /* Adjust for prepinned regions (they were pinned before init_pin_info probe) */
-    for (i = 0; i < reg_count; ++i) {
-      gasnetc_firehose_mem += prereg[i].len;
-    }
-
-    /* Now initialize firehose */
-    {
-      gasnetc_firehose_flags = 0;
-
-      #if GASNETC_PIN_SEGMENT
-        /* Adjust for the pinned segment (which is not advertised to firehose as prepinned) */
-        gasneti_assert_always(gasnetc_firehose_mem > maxsize);
-        gasnetc_firehose_mem -= maxsize;
-        gasneti_assert_always(gasnetc_firehose_reg > gasnetc_max_regs);
-        gasnetc_firehose_reg -= gasnetc_max_regs;
-
-        gasnetc_firehose_flags |= FIREHOSE_INIT_FLAG_LOCAL_ONLY;
-      #endif
-      #if PLATFORM_OS_DARWIN
-        gasnetc_firehose_flags |= FIREHOSE_INIT_FLAG_UNPIN_ON_FINI;
-      #endif
-      #if GASNETC_IBV_SHUTDOWN
-        gasnetc_firehose_flags |= FIREHOSE_INIT_FLAG_UNPIN_ON_FINI
-                               |  FIREHOSE_INIT_FLAG_MAY_REINIT;
-      #endif
-
-
-      firehose_init(gasnetc_firehose_mem, gasnetc_firehose_reg, gasnetc_fh_maxsize,
-                    prereg, reg_count, gasnetc_firehose_flags, &gasnetc_firehose_info);
-      gasnetc_did_firehose_init = 1;
-    }
-
-    /* Determine alignment (and max size) for fh requests - a power-of-two <= max_region/2 */
-    maxsz = MIN(gasnetc_max_msg_sz, gasnetc_firehose_info.max_LocalPinSize);
-    #if !GASNETC_PIN_SEGMENT
-      maxsz = MIN(maxsz, gasnetc_firehose_info.max_RemotePinSize);
-    #endif
-    gasneti_assert_always(maxsz >= (GASNET_PAGESIZE + gasnetc_inline_limit));
-    gasnetc_fh_align = GASNET_PAGESIZE;
-    while ((gasnetc_fh_align * 2) <= (maxsz / 2)) {
-      gasnetc_fh_align *= 2;
-    }
-    gasnetc_fh_align_mask = gasnetc_fh_align - 1;
-  }
-
   /* ------------------------------------------------------------------------------------ */
-  /*  primary attach complete */
-  gasneti_attach_done = 1;
-  gasnetc_bootstrapBarrier_ib();
+  /*  gather segment information */
 
-  GASNETI_TRACE_PRINTF(C,("gasnetc_attach(): primary attach complete"));
+  /* (###) add code here to gather the segment assignment info into
+           gasneti_seginfo on each node (may be possible to use AMShortRequest here)
+           If gasneti_segmentAttach() was used above, this is already done.
+     Done in gasneti_segmentAttach(), above.
+   */
 
   gasneti_assert(gasneti_seginfo[gasneti_mynode].addr == segbase &&
-         gasneti_seginfo[gasneti_mynode].size == segsize);
-
-  /* (###) exchange_fn is optional (may be NULL) and is only used with GASNET_SEGMENT_EVERYTHING
-           if your conduit has an optimized bootstrapExchange pass it in place of NULL
-   */
-  gasneti_auxseg_attach(gasnetc_bootstrapExchange_ib); /* provide auxseg */
-
-  gasnete_init(); /* init the extended API */
-
-  gasneti_nodemapFini();
-
-#if GASNETC_USE_RCV_THREAD
-  /* Start AM receive thread, if applicable */
-  gasnetc_sndrcv_start_thread();
-#endif
-
-  /* ensure extended API is initialized across nodes */
-  gasnetc_bootstrapBarrier_ib();
-  gasnetc_sys_coll_fini();
-
-#if GASNET_DEBUG
-  /* Ensure fini-init-fini works (required for checkpoint/restart) */
-  gasnetc_sys_coll_init();
-  gasneti_spawner->Barrier();
-  gasnetc_bootstrapBarrier_ib();
-  gasnetc_sys_coll_fini();
-#endif
+                 gasneti_seginfo[gasneti_mynode].size == segsize);
 
   return GASNET_OK;
+}
+/* ------------------------------------------------------------------------------------ */
+// TODO-EX: this is a candidate for factorization (once we understand the per-conduit variations)
+extern int gasnetc_attach( gex_TM_t               _tm,
+                           gasnet_handlerentry_t  *table,
+                           int                    numentries,
+                           uintptr_t              segsize)
+{
+  GASNETI_TRACE_PRINTF(C,("gasnetc_attach(table (%i entries), segsize=%"PRIuPTR")",
+                          numentries, segsize));
+  gasneti_TM_t tm = gasneti_import_tm(_tm);
+  gasneti_EP_t ep = tm->_ep;
+
+  if (!gasneti_init_done) 
+    GASNETI_RETURN_ERRR(NOT_INIT, "GASNet attach called before init");
+  if (gasneti_attach_done) 
+    GASNETI_RETURN_ERRR(NOT_INIT, "GASNet already attached");
+
+  /*  check argument sanity */
+  #if GASNET_SEGMENT_FAST || GASNET_SEGMENT_LARGE
+    if ((segsize % GASNET_PAGESIZE) != 0) 
+      GASNETI_RETURN_ERRR(BAD_ARG, "segsize not page-aligned");
+    if (segsize > gasneti_MaxLocalSegmentSize) 
+      GASNETI_RETURN_ERRR(BAD_ARG, "segsize too large");
+  #else
+    segsize = 0;
+  #endif
+
+  /*  primary attach  */
+  if (GASNET_OK != gasnetc_attach_primary())
+    GASNETI_RETURN_ERRR(RESOURCE,"Error in primary attach");
+
+  #if GASNET_SEGMENT_FAST || GASNET_SEGMENT_LARGE
+    /*  register client segment  */
+    gex_Segment_t seg; // g2ex segment is automatically saved by a hook
+    if (GASNET_OK != gasnetc_attach_segment(&seg, _tm, segsize, gasneti_defaultExchange, GASNETI_FLAG_INIT_LEGACY))
+      GASNETI_RETURN_ERRR(RESOURCE,"Error attaching segment");
+  #endif
+
+  /*  register client handlers */
+  if (table && gasneti_amregister_legacy(ep->_amtbl, table, numentries) != GASNET_OK)
+    GASNETI_RETURN_ERRR(RESOURCE,"Error registering handlers");
+
+  /* ensure everything is initialized across all nodes */
+  gasnet_barrier(0, GASNET_BARRIERFLAG_UNNAMED);
+
+  return GASNET_OK;
+}
+/* ------------------------------------------------------------------------------------ */
+// TODO-EX: this is a candidate for factorization (once we understand the per-conduit variations)
+extern int gasnetc_Client_Init(
+                               gex_Client_t            *client_p,
+                               gex_EP_t                *ep_p,
+                               gex_TM_t                *tm_p,
+                               const char              *clientName,
+                               int                     *argc,
+                               char                    ***argv,
+                               gex_Flags_t             flags)
+{
+  gasneti_assert(client_p);
+  gasneti_assert(ep_p);
+  gasneti_assert(tm_p);
+  gasneti_assert(clientName);
+#if !GASNET_NULL_ARGV_OK
+  gasneti_assert(argc);
+  gasneti_assert(argv);
+#endif
+
+  //  main init
+  // TODO-EX: must split off per-client and per-endpoint portions
+  if (!gasneti_init_done) { // First client
+    // NOTE: gasnetc_init() creates the first Client and EP for use in bootstrap comms
+    int retval = gasnetc_init(client_p, ep_p, clientName, argc, argv, flags);
+    if (retval != GASNET_OK) GASNETI_RETURN(retval);
+  #if 0
+    /* called within gasnetc_init to allow init tracing */
+    gasneti_trace_init(argc, argv);
+  #endif
+  } else { // NOT first client
+    //  allocate the client object
+    gasneti_Client_t client = gasneti_alloc_client(clientName, flags, 0);
+    *client_p = gasneti_export_client(client);
+
+    //  create the initial endpoint with internal handlers
+    if (gasnetc_EP_Create(ep_p, *client_p, flags))
+      GASNETI_RETURN_ERRR(RESOURCE,"Error creating initial endpoint");
+  }
+  gasneti_EP_t ep = gasneti_import_ep(*ep_p);
+
+  // TODO-EX: create team
+  gasneti_TM_t tm = gasneti_alloc_tm(ep, gasneti_mynode, gasneti_nodes, flags, 0);
+  *tm_p = gasneti_export_tm(tm);
+
+  if (0 == (flags & GASNETI_FLAG_INIT_LEGACY)) {
+    /*  primary attach  */
+    if (GASNET_OK != gasnetc_attach_primary())
+      GASNETI_RETURN_ERRR(RESOURCE,"Error in primary attach");
+
+    /* ensure everything is initialized across all nodes */
+    gasnet_barrier(0, GASNET_BARRIERFLAG_UNNAMED);
+  }
+
+  return GASNET_OK;
+}
+
+extern int gasnetc_Segment_Attach(
+                gex_Segment_t          *segment_p,
+                gex_TM_t               tm,
+                uintptr_t              length)
+{
+  gasneti_assert(segment_p);
+
+  // TODO-EX: remove when this limitation is removed
+  static int once = 1;
+  if (once) once = 0;
+  else gasneti_fatalerror("gex_Segment_Attach: current implementation can be called at most once");
+
+  #if GASNET_SEGMENT_EVERYTHING
+    *segment_p = GEX_SEGMENT_INVALID;
+    gex_Event_Wait(gex_Coll_BarrierNB(tm, 0));
+    return GASNET_OK; 
+  #endif
+
+  /* create a segment collectively */
+  // TODO-EX: this implementation only works *once*
+  // TODO-EX: should be using the team's exchange function if possible
+  // TODO-EX: need to pass proper flags (e.g. pshm and bind) instead of 0
+  if (GASNET_OK != gasnetc_attach_segment(segment_p, tm, length, gasneti_defaultExchange, 0))
+    GASNETI_RETURN_ERRR(RESOURCE,"Error attaching segment");
+
+  return GASNET_OK;
+}
+
+extern int gasnetc_EP_Create(gex_EP_t           *ep_p,
+                             gex_Client_t       client,
+                             gex_Flags_t        flags) {
+  /* (###) add code here to create an endpoint belonging to the given client */
+#if 1 // TODO-EX: This is a stub, which assumes 1 implicit call from ClientCreate
+  static gasneti_mutex_t lock = GASNETI_MUTEX_INITIALIZER;
+  gasneti_mutex_lock(&lock);
+    static int once = 0;
+    int prev = once;
+    once = 1;
+  gasneti_mutex_unlock(&lock);
+  if (prev) gasneti_fatalerror("Multiple endpoints are not yet implemented");
+#endif
+
+  gasneti_EP_t ep = gasneti_alloc_ep(gasneti_import_client(client), flags, 0);
+  *ep_p = gasneti_export_ep(ep);
+
+  { /*  core API handlers */
+    gex_AM_Entry_t *ctable = (gex_AM_Entry_t *)gasnetc_get_handlertable();
+    int len = 0;
+    int numreg = 0;
+    gasneti_assert(ctable);
+    while (ctable[len].gex_fnptr) len++; /* calc len */
+    if (gasneti_amregister(ep->_amtbl, ctable, len, GASNETC_HANDLER_BASE, GASNETE_HANDLER_BASE, 0, &numreg) != GASNET_OK)
+      GASNETI_RETURN_ERRR(RESOURCE,"Error registering core API handlers");
+    gasneti_assert(numreg == len);
+  }
+
+  #if !GASNETC_PIN_SEGMENT
+  { /*  firehose handlers */
+    gex_AM_Entry_t *ftable = firehose_get_handlertable();
+    int len = 0;
+    int numreg = 0;
+    gasneti_assert(ftable);
+    while (ftable[len].gex_fnptr) len++; /* calc len */
+    if (gasneti_amregister(ep->_amtbl, ftable, len, GASNETC_HANDLER_BASE, GASNETE_HANDLER_BASE, 1, &numreg) != GASNET_OK)
+      GASNETI_RETURN_ERRR(RESOURCE, "Error registering firehose handlers");
+    gasneti_assert(numreg == len);
+  }
+  #endif
+
+  { /*  extended API handlers */
+    gex_AM_Entry_t *etable = (gex_AM_Entry_t *)gasnete_get_handlertable();
+    int len = 0;
+    int numreg = 0;
+    gasneti_assert(etable);
+    while (etable[len].gex_fnptr) len++; /* calc len */
+    if (gasneti_amregister(ep->_amtbl, etable, len, GASNETE_HANDLER_BASE, GASNETI_CLIENT_HANDLER_BASE, 0, &numreg) != GASNET_OK)
+      GASNETI_RETURN_ERRR(RESOURCE,"Error registering extended API handlers");
+    gasneti_assert(numreg == len);
+  }
+
+  return GASNET_OK;
+}
+
+extern int gasnetc_EP_RegisterHandlers(gex_EP_t                ep,
+                                       gex_AM_Entry_t          *table,
+                                       size_t                  numentries) {
+  return gasneti_amregister_client(gasneti_import_ep(ep)->_amtbl, table, numentries);
 }
 /* ------------------------------------------------------------------------------------ */
 /* Shutdown code - not always used */
@@ -2292,6 +2938,15 @@ gasnetc_shutdown(void) {
       }
     }
   #endif
+  #if GASNETC_IBV_ODP
+    if (gasnetc_use_odp) {
+      gasnetc_odp_dereg(hca);
+    }
+  #endif
+
+    if (hca->aux_reg.len) {
+      gasnetc_unpin(hca, &hca->aux_reg);
+    }
 
     rc = ibv_dealloc_pd(hca->pd);
     GASNETC_IBV_CHECK(rc, "from ibv_dealloc_pd()");
@@ -2403,7 +3058,7 @@ void gasnetc_post_checkpoint(int is_restart) {
     // BLCR-TODO: NOT implemented
   #else
     for (i = 0; i < gasnetc_num_ports; ++i) {
-      gasnet_node_t node;
+      gex_Rank_t node;
       for (node = 0; node < gasneti_nodes; ++node) {
         gasnetc_port_tbl[i].remote_lids[node] = remote_lid[node * gasnetc_num_ports + i];
       }
@@ -2423,7 +3078,7 @@ void gasnetc_post_checkpoint(int is_restart) {
 #endif
 
   /* allocate/initialize transport resources */
-  rc = gasnetc_sndrcv_init();
+  rc = gasnetc_sndrcv_init(gasnetc_ep0);
   if (rc != GASNET_OK) {
     gasneti_fatalerror("Failed post-checkpoint call to gasnetc_sndrcv_init");
   }
@@ -2445,13 +3100,11 @@ void gasnetc_post_checkpoint(int is_restart) {
   /* REregister the segment and exchange the new rkeys */
 #if GASNETC_PIN_SEGMENT
   if (gasnetc_hca[0].seg_regs) {
-    const enum ibv_access_flags flags = (enum ibv_access_flags)
-                  (IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE | IBV_ACCESS_REMOTE_READ);
     uint32_t *my_rkeys = gasneti_calloc(gasnetc_max_regs, sizeof(uint32_t));
     GASNETC_FOR_ALL_HCA(hca) {
       for (i=0; i<gasnetc_seg_regs; ++i) {
         gasnetc_memreg_t *reg = &hca->seg_regs[i];
-        if (0 != gasnetc_pin(hca, (void *)reg->addr, reg->len, flags, reg)) {
+        if (0 != gasnetc_pin(hca, (void *)reg->addr, reg->len, gasneti_seg_access_flags, reg)) {
           gasneti_fatalerror("Unexpected error %s (errno=%d) when (re)registering the segment",
                              strerror(errno), errno);
         }
@@ -2501,7 +3154,7 @@ void gasnetc_post_checkpoint(int is_restart) {
     void *loc_addr, *rem_addr;
     #undef THE_TEST_LEN
 
-    gasnet_node_t peer = gasneti_mynode ^ 1;
+    gex_Rank_t peer = gasneti_mynode ^ 1;
     if (peer == gasneti_nodes) peer = gasneti_mynode;
 
   #if GASNET_SEGMENT_EVERYTHING
@@ -2519,11 +3172,13 @@ void gasnetc_post_checkpoint(int is_restart) {
   #endif
 
     memcpy(buffer1, loc_addr, nbytes);
-    gasnet_get(buffer2, peer, rem_addr, nbytes);
+    // TODO-EX: replace or remove:
+    //gasnet_ get(buffer2, peer, rem_addr, nbytes);
 
     GASNETI_SAFE(gasnet_barrier(0, GASNET_BARRIERFLAG_ANONYMOUS));
 
-    gasnet_put(peer, rem_addr, buffer2, nbytes);
+    // TODO-EX: replace or remove:
+    //gasnet_ put(peer, rem_addr, buffer2, nbytes);
 
     GASNETI_SAFE(gasnet_barrier(0, GASNET_BARRIERFLAG_UNNAMED));
 
@@ -2670,14 +3325,14 @@ static void gasnetc_disable_AMs(void) {
   int i;
 
   for (i = GASNETE_HANDLER_BASE; i < GASNETC_MAX_NUMHANDLERS; ++i) {
-    gasnetc_handler[i] = (gasneti_handler_fn_t)&gasnetc_noop;
+    gasnetc_ep0->_amtbl[i].gex_fnptr = (gex_AM_Fn_t)&gasnetc_noop;
   }
 }
 
 #if GASNET_PSHM
-static gasnet_node_t *gasnetc_exit_child = NULL;
-static gasnet_node_t gasnetc_exit_children = 0;
-static gasnet_node_t gasnetc_exit_parent = 0;
+static gex_Rank_t *gasnetc_exit_child = NULL;
+static gex_Rank_t gasnetc_exit_children = 0;
+static gex_Rank_t gasnetc_exit_parent = 0;
 #endif
 
 static int gasnetc_exit_reduce(int exitcode, int64_t timeout_us)
@@ -2751,9 +3406,9 @@ static int gasnetc_exit_reduce(int exitcode, int64_t timeout_us)
 }
 
 /* gasnetc_exit_reduce_reqh: reduction on exitcode */
-static void gasnetc_exit_reduce_reqh(gasnet_token_t token,
-                                     gasnet_handlerarg_t arg0,
-                                     gasnet_handlerarg_t arg1) {
+static void gasnetc_exit_reduce_reqh(gex_Token_t token,
+                                     gex_AM_Arg_t arg0,
+                                     gex_AM_Arg_t arg1) {
   gasneti_atomic_val_t exitcode = arg0;
   gasneti_atomic_val_t distance = arg1;
   gasneti_atomic_val_t prevcode;
@@ -2788,15 +3443,15 @@ static void gasnetc_exit_reduce_reqh(gasnet_token_t token,
  * This request handler (invoked only on the "root" node) handles the election
  * of a single exit "master", who will coordinate an orderly shutdown.
  */
-static void gasnetc_exit_role_reqh(gasnet_token_t token) {
-  gasnet_node_t src;
+static void gasnetc_exit_role_reqh(gex_Token_t token) {
+  gex_Rank_t src = gasnetc_msgsource(token);
   int local_role, result;
 
   gasneti_assert(gasneti_mynode == GASNETC_ROOT_NODE);	/* May only send this request to the root node */
 
   
   /* What role would the local node get if the requester is made the master? */
-  GASNETI_SAFE(gasnet_AMGetMsgSource(token, &src));
+  
   local_role = (src == GASNETC_ROOT_NODE) ? GASNETC_EXIT_ROLE_MASTER : GASNETC_EXIT_ROLE_SLAVE;
 
   /* Try atomically to assume the proper role.  Result determines role of requester */
@@ -2805,7 +3460,7 @@ static void gasnetc_exit_role_reqh(gasnet_token_t token) {
 
   /* Inform the requester of the outcome. */
   GASNETI_SAFE(gasnetc_ReplySysShort(token, NULL, gasneti_handleridx(gasnetc_exit_role_reph),
-				   1, (gasnet_handlerarg_t)result));
+				   1, (gex_AM_Arg_t)result));
 }
 
 /*
@@ -2814,16 +3469,11 @@ static void gasnetc_exit_role_reqh(gasnet_token_t token) {
  * This reply handler receives the result of the election of an exit "master".
  * The reply contains the exit "role" this node should assume.
  */
-static void gasnetc_exit_role_reph(gasnet_token_t token, gasnet_handlerarg_t arg0) {
+static void gasnetc_exit_role_reph(gex_Token_t token, gex_AM_Arg_t arg0) {
   int role;
 
-  #if GASNET_DEBUG
-  {
-    gasnet_node_t src;
-    GASNETI_SAFE(gasnet_AMGetMsgSource(token, &src));
-    gasneti_assert(src == GASNETC_ROOT_NODE);	/* May only receive this reply from the root node */
-  }
-  #endif
+  /* May only receive this reply from the root node */
+  gasneti_assert(gasnetc_msgsource(token) == GASNETC_ROOT_NODE);
 
   /* What role has this node been assigned? */
   role = (int)arg0;
@@ -2951,6 +3601,18 @@ static void gasnetc_exit_sighandler(int sig) {
   int exitcode = (int)gasneti_atomic_read(&gasnetc_exit_code, GASNETI_ATOMIC_RMB_PRE);
   static gasneti_atomic_t once = gasneti_atomic_init(1);
 
+#if GASNET_DEBUG || GASNETC_IBV_ODP
+  // protect until we reach reentrance check
+  GASNETC_EXIT_STATE("in exit sighandler");
+  gasneti_reghandler(SIGALRM, _exit);
+  gasneti_unblocksig(SIGALRM);
+  alarm(30);
+#endif
+
+#if GASNETC_IBV_ODP
+  gasnetc_odp_shutdown(); // Avoid possible system memory leak
+#endif
+
   #if GASNET_DEBUG
   /* note - can't call trace macros here, or even sprintf */
   if (sig == SIGALRM) {
@@ -2983,8 +3645,9 @@ static void gasnetc_exit_sighandler(int sig) {
 
   if (gasneti_atomic_decrement_and_test(&once, 0)) {
     /* We ask the bootstrap support to kill us, but only once */
-    gasneti_reghandler(SIGALRM, gasnetc_exit_sighandler);
     GASNETC_EXIT_STATE("in suicide timer");
+    gasneti_reghandler(SIGALRM, gasnetc_exit_sighandler);
+    gasneti_unblocksig(SIGALRM);
     alarm(5);
     gasneti_bootstrapAbort(exitcode);
   } else {
@@ -3025,7 +3688,7 @@ static int gasnetc_exit_master(int exitcode, int64_t timeout_us) {
 
     rc = gasnetc_RequestSysShort(i, NULL,
 		    	       gasneti_handleridx(gasnetc_exit_reqh),
-			       1, (gasnet_handlerarg_t)exitcode);
+			       1, (gex_AM_Arg_t)exitcode);
     if (rc != GASNET_OK) return -1;
   }
 
@@ -3063,7 +3726,8 @@ static int gasnetc_exit_slave(int64_t timeout_us) {
 
   /* wait until our reply has been placed on the wire */
   gasneti_sync_reads(); /* For non-atomic portion of gasnetc_exit_repl_oust */
-  gasnetc_counter_wait(&gasnetc_exit_repl_oust, 1);
+  GASNET_BEGIN_FUNCTION(); // OK - not a critical-path
+  gasnetc_counter_wait(&gasnetc_exit_repl_oust, 1 GASNETI_THREAD_PASS);
 
   return 0;
 }
@@ -3238,6 +3902,13 @@ static void gasnetc_exit_body(void) {
     alarm(0);
   }
 
+#if GASNETC_IBV_ODP
+  // Always need to shutdown ODP (safe no-op if we did full shutdown above)
+  GASNETC_EXIT_STATE("odp shutdown");
+  alarm(30);
+  gasnetc_odp_shutdown(); // Avoid possible system memory leak
+#endif
+
   /* Try again to flush out any recent output, allowing upto 30s */
   GASNETC_EXIT_STATE("closing output");
   alarm(30);
@@ -3281,7 +3952,7 @@ static void gasnetc_exit_body(void) {
  * exit procedure, via gasnetc_exit_{body,tail}().  Additionally, we are responsible for
  * firing off a SIGQUIT to let the user's handler, if any, run before we begin to exit.
  */
-static void gasnetc_exit_reqh(gasnet_token_t token, gasnet_handlerarg_t arg0) {
+static void gasnetc_exit_reqh(gex_Token_t token, gex_AM_Arg_t arg0) {
   /* The master will send this AM, but should _never_ receive it */
   gasneti_assert(gasneti_atomic_read(&gasnetc_exit_role, 0) != GASNETC_EXIT_ROLE_MASTER);
 
@@ -3293,7 +3964,7 @@ static void gasnetc_exit_reqh(gasnet_token_t token, gasnet_handlerarg_t arg0) {
 
   /* Send a reply so the master knows we are reachable */
   gasnetc_counter_inc(&gasnetc_exit_repl_oust);
-  GASNETI_SAFE(gasnetc_ReplySysShort(token, &gasnetc_exit_repl_oust.completed,
+  GASNETI_SAFE(gasnetc_ReplySysShort(token, &gasnetc_exit_repl_oust,
 				   gasneti_handleridx(gasnetc_exit_reph), /* no args */ 0));
   gasneti_sync_writes(); /* For non-atomic portion of gasnetc_exit_repl_oust */
 
@@ -3353,11 +4024,11 @@ static void gasnetc_exit_reqh(gasnet_token_t token, gasnet_handlerarg_t arg0) {
  *
  * Simply count replies
  */
-static void gasnetc_exit_reph(gasnet_token_t token) {
+static void gasnetc_exit_reph(gex_Token_t token) {
   gasneti_atomic_increment(&gasnetc_exit_reps, 0);
 }
   
-/* gasnetc_atexit OR gasnetc_on_exit
+/* gasnetc_atexit
  *
  * This is a simple (at,on_}exit() handler to achieve a hopefully graceful exit.
  * We use the functions gasnetc_exit_{head,body}() to coordinate the shutdown.
@@ -3373,31 +4044,29 @@ static void gasnetc_exit_reph(gasnet_token_t token) {
  * expect to preserve a non-zero exit code for the GASNet job as a whole.  Of course
  * there is no _guarantee_ this will work with all bootstraps.
  */
-#if HAVE_ON_EXIT
-static void gasnetc_on_exit(int exitcode, void *arg) {
+static void gasnetc_atexit(int exitcode) {
   /* Check return from _head to avoid reentrance */
   if (gasnetc_exit_head(exitcode)) {
     gasnetc_exit_body();
   }
   return;
 }
-#else
-static void gasnetc_atexit(void) {
-  /* Check return from _head to avoid reentrance */
-  if (gasnetc_exit_head(0)) { /* real exit code is outside our control */
-    gasnetc_exit_body();
-  }
-  return;
-}
-#endif
 
 static void gasnetc_exit_init(void) {
-  /* Handler for non-collective returns from main() */
+  // register an exit-time callback for ODP (needed for GASNET_CATCH_EXIT=0 case)
+#if GASNETC_IBV_ODP
+  if (gasnetc_use_odp) {
   #if HAVE_ON_EXIT
-    on_exit(gasnetc_on_exit, NULL);
+    on_exit(gasnetc_odp_on_exit, NULL);
   #else
-    atexit(gasnetc_atexit);
+    atexit(gasnetc_odp_atexit);
   #endif
+  }
+#endif
+
+  /* Handler for non-collective returns from main() */
+  // register process exit-time hook
+  gasneti_registerExitHandler(gasnetc_atexit);
 
 #if GASNET_PSHM
   /* Extract info from nodemap that we'll need at exit */
@@ -3405,10 +4074,10 @@ static void gasnetc_exit_init(void) {
     gasnetc_exit_parent = gasneti_nodemap[gasneti_mynode];
     gasnetc_exit_children = gasneti_nodes;
   } else {
-    const gasnet_node_t children = gasneti_nodemap_local_count - 1;
+    const gex_Rank_t children = gasneti_nodemap_local_count - 1;
 
     if (children) {
-      const size_t len = children * sizeof(gasnet_node_t);
+      const size_t len = children * sizeof(gex_Rank_t);
       gasnetc_exit_children = children;
       gasnetc_exit_child = gasneti_malloc(len);
       gasneti_leak(gasnetc_exit_child);
@@ -3433,12 +4102,11 @@ extern void gasnetc_exit(int exitcode) {
 
 /* ------------------------------------------------------------------------------------ */
 
+#if GASNETC_IBV_AMRDMA
 GASNETI_INLINE(gasnetc_amrdma_grant_reqh_inner)
-void gasnetc_amrdma_grant_reqh_inner(gasnet_token_t token, int qpi, uint32_t rkey, void *addr) {
+void gasnetc_amrdma_grant_reqh_inner(gex_Token_t token, int qpi, uint32_t rkey, void *addr) {
   gasnetc_cep_t *cep;
-  gasnet_node_t node;
-
-  GASNETI_SAFE(gasnet_AMGetMsgSource(token, &node));
+  gex_Rank_t node = gasnetc_msgsource(token);
 
   cep = GASNETC_NODE2CEP(node) + (qpi - 1);
   gasneti_assert(cep->amrdma_send == NULL);
@@ -3449,164 +4117,14 @@ void gasnetc_amrdma_grant_reqh_inner(gasnet_token_t token, int qpi, uint32_t rke
 SHORT_HANDLER(gasnetc_amrdma_grant_reqh,3,4,
               (token, a0, a1, UNPACK(a2)    ),
               (token, a0, a1, UNPACK2(a2, a3)));
+#endif // GASNETC_IBV_AMRDMA
 
 /* ------------------------------------------------------------------------------------ */
 /*
   Active Message Request Functions
   ================================
+  In gasnet_core_sndrcv.c
 */
-
-extern int gasnetc_AMRequestShortM( 
-                            gasnet_node_t dest,       /* destination node */
-                            gasnet_handler_t handler, /* index into destination endpoint's handler table */ 
-                            int numargs, ...) {
-  int retval;
-  va_list argptr;
-  GASNETI_COMMON_AMREQUESTSHORT(dest,handler,numargs);
-  va_start(argptr, numargs); /*  pass in last argument */
-  retval = gasnetc_RequestGeneric(gasnetc_Short, dest, handler,
-		  		  NULL, 0, NULL,
-				  numargs, NULL, NULL, argptr);
-  va_end(argptr);
-  GASNETI_RETURN(retval);
-}
-
-extern int gasnetc_AMRequestMediumM( 
-                            gasnet_node_t dest,      /* destination node */
-                            gasnet_handler_t handler, /* index into destination endpoint's handler table */ 
-                            void *source_addr, size_t nbytes,   /* data payload */
-                            int numargs, ...) {
-  int retval;
-  va_list argptr;
-  GASNETI_COMMON_AMREQUESTMEDIUM(dest,handler,source_addr,nbytes,numargs);
-  va_start(argptr, numargs); /*  pass in last argument */
-  retval = gasnetc_RequestGeneric(gasnetc_Medium, dest, handler,
-		  		  source_addr, nbytes, NULL,
-				  numargs, NULL, NULL, argptr);
-  va_end(argptr);
-  GASNETI_RETURN(retval);
-}
-
-extern int gasnetc_AMRequestLongM( gasnet_node_t dest,        /* destination node */
-                            gasnet_handler_t handler, /* index into destination endpoint's handler table */ 
-                            void *source_addr, size_t nbytes,   /* data payload */
-                            void *dest_addr,                    /* data destination on destination node */
-                            int numargs, ...) {
-  gasnetc_counter_t mem_oust = GASNETC_COUNTER_INITIALIZER;
-  int retval;
-  va_list argptr;
-  GASNETI_COMMON_AMREQUESTLONG(dest,handler,source_addr,nbytes,dest_addr,numargs);
-  va_start(argptr, numargs); /*  pass in last argument */
-    retval = gasnetc_RequestGeneric(gasnetc_Long, dest, handler,
-		  		  source_addr, nbytes, dest_addr,
-				  numargs, &mem_oust, NULL, argptr);
-
-    /* block for completion of RDMA transfer */
-    gasnetc_counter_wait(&mem_oust, 0);
-  va_end(argptr);
-  GASNETI_RETURN(retval);
-}
-
-extern int gasnetc_AMRequestLongAsyncM( gasnet_node_t dest,        /* destination node */
-                            gasnet_handler_t handler, /* index into destination endpoint's handler table */ 
-                            void *source_addr, size_t nbytes,   /* data payload */
-                            void *dest_addr,                    /* data destination on destination node */
-                            int numargs, ...) {
-  int retval;
-  va_list argptr;
-  GASNETI_COMMON_AMREQUESTLONGASYNC(dest,handler,source_addr,nbytes,dest_addr,numargs);
-  va_start(argptr, numargs); /*  pass in last argument */
-  retval = gasnetc_RequestGeneric(gasnetc_Long, dest, handler,
-		  		  source_addr, nbytes, dest_addr,
-				  numargs, NULL, NULL, argptr);
-  va_end(argptr);
-  GASNETI_RETURN(retval);
-}
-
-extern int gasnetc_AMReplyShortM( 
-                            gasnet_token_t token,       /* token provided on handler entry */
-                            gasnet_handler_t handler, /* index into destination endpoint's handler table */ 
-                            int numargs, ...) {
-  int retval;
-  va_list argptr;
-  GASNETI_COMMON_AMREPLYSHORT(token,handler,numargs);
-  va_start(argptr, numargs); /*  pass in last argument */
-  retval = gasnetc_ReplyGeneric(gasnetc_Short, token, handler,
-		  		NULL, 0, NULL,
-				numargs, NULL, NULL, argptr);
-  va_end(argptr);
-  GASNETI_RETURN(retval);
-}
-
-extern int gasnetc_AMReplyMediumM( 
-                            gasnet_token_t token,       /* token provided on handler entry */
-                            gasnet_handler_t handler, /* index into destination endpoint's handler table */ 
-                            void *source_addr, size_t nbytes,   /* data payload */
-                            int numargs, ...) {
-  int retval;
-  va_list argptr;
-  GASNETI_COMMON_AMREPLYMEDIUM(token,handler,source_addr,nbytes,numargs);
-  va_start(argptr, numargs); /*  pass in last argument */
-  retval = gasnetc_ReplyGeneric(gasnetc_Medium, token, handler,
-		  		source_addr, nbytes, NULL,
-				numargs, NULL, NULL, argptr);
-  va_end(argptr);
-  GASNETI_RETURN(retval);
-}
-
-extern int gasnetc_AMReplyLongM( 
-                            gasnet_token_t token,       /* token provided on handler entry */
-                            gasnet_handler_t handler, /* index into destination endpoint's handler table */ 
-                            void *source_addr, size_t nbytes,   /* data payload */
-                            void *dest_addr,                    /* data destination on destination node */
-                            int numargs, ...) {
-  int retval;
-  va_list argptr;
-  GASNETI_COMMON_AMREPLYLONG(token,handler,source_addr,nbytes,dest_addr,numargs); 
-  va_start(argptr, numargs); /*  pass in last argument */
-  #if GASNETC_PIN_SEGMENT
-  {
-    gasnetc_counter_t mem_oust = GASNETC_COUNTER_INITIALIZER;
-
-    retval = gasnetc_ReplyGeneric(gasnetc_Long, token, handler,
-		  		  source_addr, nbytes, dest_addr,
-				  numargs, &mem_oust, NULL, argptr);
-
-    /* block for completion of RDMA transfer */
-    gasnetc_counter_wait(&mem_oust, 1 /* calling from a request handler */);
-  }
-  #else
-  retval = gasnetc_ReplyGeneric(gasnetc_Long, token, handler,
-		  		source_addr, nbytes, dest_addr,
-				numargs, NULL, NULL, argptr);
-
-  #endif
-  va_end(argptr);
-  GASNETI_RETURN(retval);
-}
-
-/* ------------------------------------------------------------------------------------ */
-/*
-  No-interrupt sections
-  =====================
-  This section is only required for conduits that may use interrupt-based handler dispatch
-  See the GASNet spec and http://gasnet.lbl.gov/dist/docs/gasnet.html for
-    philosophy and hints on efficiently implementing no-interrupt sections
-  Note: the extended-ref implementation provides a thread-specific void* within the 
-    gasnete_threaddata_t data structure which is reserved for use by the core 
-    (and this is one place you'll probably want to use it)
-*/
-#if GASNETC_USE_INTERRUPTS
-  #error interrupts not implemented
-  extern void gasnetc_hold_interrupts(void) {
-    GASNETI_CHECKATTACH();
-    /* add code here to disable handler interrupts for _this_ thread */
-  }
-  extern void gasnetc_resume_interrupts(void) {
-    GASNETI_CHECKATTACH();
-    /* add code here to re-enable handler interrupts for _this_ thread */
-  }
-#endif
 
 /* ------------------------------------------------------------------------------------ */
 /*
@@ -3614,27 +4132,17 @@ extern int gasnetc_AMReplyLongM(
   ==================
 */
 #if !GASNETC_NULL_HSL
-extern void gasnetc_hsl_init   (gasnet_hsl_t *hsl) {
+extern void gasnetc_hsl_init   (gex_HSL_t *hsl) {
   GASNETI_CHECKATTACH();
   gasneti_mutex_init(&(hsl->lock));
-
-  #if GASNETC_USE_INTERRUPTS
-    /* add code here to init conduit-specific HSL state */
-    #error interrupts not implemented
-  #endif
 }
 
-extern void gasnetc_hsl_destroy(gasnet_hsl_t *hsl) {
+extern void gasnetc_hsl_destroy(gex_HSL_t *hsl) {
   GASNETI_CHECKATTACH();
   gasneti_mutex_destroy(&(hsl->lock));
-
-  #if GASNETC_USE_INTERRUPTS
-    /* add code here to cleanup conduit-specific HSL state */
-    #error interrupts not implemented
-#endif
 }
 
-extern void gasnetc_hsl_lock   (gasnet_hsl_t *hsl) {
+extern void gasnetc_hsl_lock   (gex_HSL_t *hsl) {
   GASNETI_CHECKATTACH();
 
   {
@@ -3660,33 +4168,17 @@ extern void gasnetc_hsl_lock   (gasnet_hsl_t *hsl) {
       GASNETI_TRACE_EVENT_TIME(L, HSL_LOCK, hsl->acquiretime-startlock);
     #endif
   }
-
-  #if GASNETC_USE_INTERRUPTS
-    /* conduits with interrupt-based handler dispatch need to add code here to 
-       disable handler interrupts on _this_ thread, (if this is the outermost
-       HSL lock acquire and we're not inside an enclosing no-interrupt section)
-     */
-    #error interrupts not implemented
-  #endif
 }
 
-extern void gasnetc_hsl_unlock (gasnet_hsl_t *hsl) {
+extern void gasnetc_hsl_unlock (gex_HSL_t *hsl) {
   GASNETI_CHECKATTACH();
-
-  #if GASNETC_USE_INTERRUPTS
-    /* conduits with interrupt-based handler dispatch need to add code here to 
-       re-enable handler interrupts on _this_ thread, (if this is the outermost
-       HSL lock release and we're not inside an enclosing no-interrupt section)
-     */
-    #error interrupts not implemented
-  #endif
 
   GASNETI_TRACE_EVENT_TIME(L, HSL_UNLOCK, GASNETI_TICKS_NOW_IFENABLED(L)-hsl->acquiretime);
 
   gasneti_mutex_unlock(&(hsl->lock));
 }
 
-extern int  gasnetc_hsl_trylock(gasnet_hsl_t *hsl) {
+extern int  gasnetc_hsl_trylock(gex_HSL_t *hsl) {
   GASNETI_CHECKATTACH();
 
   {
@@ -3696,13 +4188,6 @@ extern int  gasnetc_hsl_trylock(gasnet_hsl_t *hsl) {
     if (locked) {
       #if GASNETI_STATS_OR_TRACE
         hsl->acquiretime = GASNETI_TICKS_NOW_IFENABLED(L);
-      #endif
-      #if GASNETC_USE_INTERRUPTS
-        /* conduits with interrupt-based handler dispatch need to add code here to 
-           disable handler interrupts on _this_ thread, (if this is the outermost
-           HSL lock acquire and we're not inside an enclosing no-interrupt section)
-         */
-        #error interrupts not implemented
       #endif
     }
 
@@ -3718,31 +4203,33 @@ extern int  gasnetc_hsl_trylock(gasnet_hsl_t *hsl) {
   see mpi-conduit and extended-ref for examples on how to declare AM handlers here
   (for internal conduit use in bootstrapping, job management, etc.)
 */
-static gasnet_handlerentry_t const gasnetc_handlers[] = {
-  #ifdef GASNETC_AUXSEG_HANDLERS
-    GASNETC_AUXSEG_HANDLERS(),
+static gex_AM_Entry_t const gasnetc_handlers[] = {
+  #ifdef GASNETC_COMMON_HANDLERS
+    GASNETC_COMMON_HANDLERS(),
   #endif
 
   /* ptr-width independent handlers */
-  gasneti_handler_tableentry_no_bits(gasnetc_exit_reduce_reqh),
-  gasneti_handler_tableentry_no_bits(gasnetc_exit_role_reqh),
-  gasneti_handler_tableentry_no_bits(gasnetc_exit_role_reph),
-  gasneti_handler_tableentry_no_bits(gasnetc_exit_reqh),
-  gasneti_handler_tableentry_no_bits(gasnetc_exit_reph),
-  gasneti_handler_tableentry_no_bits(gasnetc_sys_barrier_reqh),
-  gasneti_handler_tableentry_no_bits(gasnetc_sys_exchange_reqh),
+  gasneti_handler_tableentry_no_bits(gasnetc_exit_reduce_reqh,2,REQUEST,SHORT,0),
+  gasneti_handler_tableentry_no_bits(gasnetc_exit_role_reqh,0,REQUEST,SHORT,0),
+  gasneti_handler_tableentry_no_bits(gasnetc_exit_role_reph,1,REPLY,SHORT,0),
+  gasneti_handler_tableentry_no_bits(gasnetc_exit_reqh,1,REQUEST,SHORT,0),
+  gasneti_handler_tableentry_no_bits(gasnetc_exit_reph,0,REPLY,SHORT,0),
+  gasneti_handler_tableentry_no_bits(gasnetc_sys_barrier_reqh,1,REQUEST,SHORT,0),
+  gasneti_handler_tableentry_no_bits(gasnetc_sys_exchange_reqh,2,REQUEST,MEDIUM,0),
   #if GASNETC_IBV_SHUTDOWN
-    gasneti_handler_tableentry_no_bits(gasnetc_sys_flush_reph),
-    gasneti_handler_tableentry_no_bits(gasnetc_sys_close_reqh),
+    gasneti_handler_tableentry_no_bits(gasnetc_sys_flush_reph,1,REPLY,SHORT,0),
+    gasneti_handler_tableentry_no_bits(gasnetc_sys_close_reqh,0,REQUEST,SHORT,0),
   #endif
 
   /* ptr-width dependent handlers */
-  gasneti_handler_tableentry_with_bits(gasnetc_amrdma_grant_reqh),
+  #if GASNETC_IBV_AMRDMA
+    gasneti_handler_tableentry_with_bits(gasnetc_amrdma_grant_reqh,3,4,REQUEST,SHORT,0),
+  #endif
 
-  { 0, NULL }
+  GASNETI_HANDLER_EOT
 };
 
-gasnet_handlerentry_t const *gasnetc_get_handlertable(void) {
+gex_AM_Entry_t const *gasnetc_get_handlertable(void) {
   return gasnetc_handlers;
 }
 

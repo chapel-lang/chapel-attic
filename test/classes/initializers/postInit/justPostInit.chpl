@@ -6,12 +6,11 @@ class C {
   var A : [1..4] int = 5;
   var s = "hello world";
 
-  proc postInit() {
-    writeln("C.postInit");
+  proc postinit() {
+    writeln("C.postinit");
   }
 }
 
-var c = new C();
+var c = new borrowed C();
 writeln("has initializer: ", canResolveMethod(c, "init"));
 writeln("c = ", c);
-delete c;

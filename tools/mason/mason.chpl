@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2018 Cray Inc.
+ * Copyright 2004-2019 Cray Inc.
  * Other additional copyright holders may be indicated within.
  *
  * The entirety of this work is licensed under the Apache License,
@@ -20,15 +20,21 @@
  * Github: @Spartee
  */
 
-
+use MasonModify;
 use MasonUtils;
 use MasonHelp;
+use MasonDoc;
 use MasonEnv;
 use MasonNew;
 use MasonBuild;
 use MasonUpdate;
 use MasonSearch;
+use MasonTest;
+use MasonRun;
 use FileSystem;
+use MasonSystem;
+use MasonExternal;
+use MasonPublish;
 
 /*
 
@@ -63,107 +69,65 @@ Full documentation is located in the chapel release in $CHPL_HOME/doc/rst/tools/
 
 
 
-proc main(args: [] string) {
-  if args.size < 2 {
-    masonHelp();
-    exit();
-  }
 
-  select (args[1]) {
-    when 'new' do masonNew(args);
-    when 'build' do masonBuild(args);
-    when 'update' do UpdateLock(args);
-    when 'run' do masonRun(args);
-    when 'search' do masonSearch(args);
-    when 'env' do masonEnv(args);
-    when 'doc' do masonDoc(args);
-    when 'clean' do masonClean();
-    when 'help' do masonHelp();
-    when 'version' do printVersion();
-    when '--list' do masonList();
-    when '-h' do masonHelp();
-    when '--help' do masonHelp();
-    when '-V' do printVersion();
-    when '--version' do printVersion();
-    otherwise {
-      writeln('error: no such subcommand');
-      writeln('try mason --help');
-      exit();
+proc main(args: [] string) throws {
+  try! {
+    if args.size < 2 {
+      masonHelp();
+      exit(0);
     }
+    select (args[1]) {
+      when 'new' do masonNew(args);
+      when 'add' do masonModify(args);
+      when 'rm' do masonModify(args);
+      when 'build' do masonBuild(args);
+      when 'update' do UpdateLock(args);
+      when 'run' do masonRun(args);
+      when 'search' do masonSearch(args);
+      when 'system' do masonSystem(args);
+      when 'external' do masonExternal(args);
+      when 'test' do masonTest(args);
+      when 'env' do masonEnv(args);
+      when 'doc' do masonDoc(args);
+      when 'publish' do masonPublish(args);
+      when 'clean' do masonClean(args);
+      when 'help' do masonHelp();
+      when 'version' do printVersion();
+      when '--list' do masonList();
+      when '-h' do masonHelp();
+      when '--help' do masonHelp();
+      when '-V' do printVersion();
+      when '--version' do printVersion();
+      otherwise {
+        throw new owned MasonError('No such subcommand \ntry mason --help');
+        exit(1);
+      }
+    }
+  }
+  catch e: MasonError {
+    stderr.writeln(e.message());
+    exit(1);
   }
 }
 
 
-
-
-proc masonRun(args) {
-  var toRun = basename(getEnv('PWD'));
-  var show = false;
-  var execopts: [1..0] string;
-  if args.size > 2 {
-    for arg in args[2..] {
-      if arg == '-h' || arg == '--help' {
-        masonRunHelp();
-        exit();
-      }
-      else if arg == '--build' {
-        masonBuild(['mason', 'build']);
-      }
-      else if arg == '--show' {
-        show = true;
-      }
-      else {
-        execopts.push_back(arg);
-      }
+proc masonClean(args) {
+  try! {
+    if args.size == 3 {
+      masonCleanHelp();
+      exit(0);
     }
-  }
-  // Find the Binary and execute
-  if isDir('target') {
-    var execs = ' '.join(execopts);
-    var command = "target/debug/" + toRun + ' ' + execs;
-    if isDir('target/release') then
-      command = "target/release/" + toRun + ' ' + execs;
+    const cwd = getEnv("PWD");
 
-    if show then
-      writeln("Executing binary: " + command);
-
-    if isFile("Mason.lock") then  // If built
-      runCommand(command);
-    else if isFile("Mason.toml") { // If not built
-      masonBuild(args);
-      runCommand(command);
-    }
-    else writeln("call mason run from the top level of your projects directory");
+    const projectHome = getProjectHome(cwd);
+    runCommand('rm -rf ' + projectHome + '/target');
   }
-  else {
-    writeln("Mason cannot find the compiled program");
-    exit();
+  catch e: MasonError {
+    stderr.writeln(e.message());
   }
 }
 
-
-proc masonClean() {
-  runCommand('rm -rf target');
-}
-
-
-proc masonDoc(args) {
-  var toDoc = basename(getEnv('PWD'));
-  var project = toDoc + '.chpl';
-  if isDir('src/') {
-    if isFile('src/' + project) {
-      var command = 'chpldoc src/' + project;
-      writeln(command);
-      runCommand(command);
-    }
-  }
-  else {
-    writeln('Mason could not find the project to document!');
-    runCommand('chpldoc');
-  }
-}
 
 proc printVersion() {
-  writeln('mason 0.1.0');
+  writeln('mason 0.1.2');
 }
-

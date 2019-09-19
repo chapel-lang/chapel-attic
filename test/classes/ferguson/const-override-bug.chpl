@@ -3,7 +3,8 @@ class myLocale {
   proc name return chpl_name() : string;
 
   proc chpl_name() : string {
-    _throwPVFCError();
+    use HaltWrappers only ;
+    HaltWrappers.pureVirtualMethodHalt();
     return "";
   }
 
@@ -22,6 +23,6 @@ class myNumaDomain : myAbstractLocaleModel {
 }
 
 
-var c = new myNumaDomain();
+var c = new unmanaged myNumaDomain();
 writeln(c.name);
 delete c;

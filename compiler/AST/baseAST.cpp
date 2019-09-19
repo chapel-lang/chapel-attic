@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2018 Cray Inc.
+ * Copyright 2004-2019 Cray Inc.
  * Other additional copyright holders may be indicated within.
  *
  * The entirety of this work is licensed under the Apache License,
@@ -22,17 +22,21 @@
 #include "astutil.h"
 #include "CForLoop.h"
 #include "CatchStmt.h"
+#include "DecoratedClassType.h"
 #include "DeferStmt.h"
 #include "driver.h"
 #include "expr.h"
 #include "ForallStmt.h"
 #include "ForLoop.h"
+#include "IfExpr.h"
 #include "log.h"
+#include "LoopExpr.h"
 #include "ModuleSymbol.h"
 #include "ParamForLoop.h"
 #include "parser.h"
 #include "passes.h"
 #include "runpasses.h"
+#include "scopeResolve.h"
 #include "stmt.h"
 #include "stringutil.h"
 #include "symbol.h"
@@ -101,13 +105,13 @@ void printStatistics(const char* pass) {
   int nStmt = nBlockStmt + nCondStmt + nDeferStmt + nGotoStmt + nUseStmt + nExternBlockStmt + nForallStmt + nTryStmt + nForwardingStmt + nCatchStmt;
   int kStmt = kBlockStmt + kCondStmt + kDeferStmt + kGotoStmt + kUseStmt + kExternBlockStmt + kForallStmt + kTryStmt + kForwardingStmt + kCatchStmt;
   int nExpr = nUnresolvedSymExpr + nSymExpr + nDefExpr + nCallExpr +
-    nContextCallExpr + nForallExpr + nNamedExpr;
+    nContextCallExpr + nLoopExpr + nNamedExpr + nIfExpr;
   int kExpr = kUnresolvedSymExpr + kSymExpr + kDefExpr + kCallExpr +
-    kContextCallExpr + kForallExpr + kNamedExpr;
+    kContextCallExpr + kLoopExpr + kNamedExpr + kIfExpr;
   int nSymbol = nModuleSymbol+nVarSymbol+nArgSymbol+nShadowVarSymbol+nTypeSymbol+nFnSymbol+nEnumSymbol+nLabelSymbol;
   int kSymbol = kModuleSymbol+kVarSymbol+kArgSymbol+kShadowVarSymbol+kTypeSymbol+kFnSymbol+kEnumSymbol+kLabelSymbol;
-  int nType = nPrimitiveType+nEnumType+nAggregateType;
-  int kType = kPrimitiveType+kEnumType+kAggregateType;
+  int nType = nPrimitiveType+nEnumType+nAggregateType+nDecoratedClassType;
+  int kType = kPrimitiveType+kEnumType+kAggregateType+kDecoratedClassType;
 
   fprintf(stderr, "%7d asts (%6dK) %s\n", nStmt+nExpr+nSymbol+nType, kStmt+kExpr+kSymbol+kType, pass);
 
@@ -128,14 +132,14 @@ void printStatistics(const char* pass) {
             kStmt, kCondStmt, kBlockStmt, kGotoStmt);
 
   if (strstr(fPrintStatistics, "n"))
-    fprintf(stderr, "    Expr %9d  Unre %9d  Sym  %9d  Def   %9d  Call  %9d  Forall %9d  Named %9d\n",
-            nExpr, nUnresolvedSymExpr, nSymExpr, nDefExpr, nCallExpr, nForallExpr, nNamedExpr);
+    fprintf(stderr, "    Expr %9d  Unre %9d  Sym  %9d  Def   %9d  Call  %9d  Forall %9d  Named %9d  If %9d\n",
+            nExpr, nUnresolvedSymExpr, nSymExpr, nDefExpr, nCallExpr, nLoopExpr, nNamedExpr, nIfExpr);
   if (strstr(fPrintStatistics, "k") && strstr(fPrintStatistics, "n"))
-    fprintf(stderr, "    Expr %9dK Unre %9dK Sym  %9dK Def   %9dK Call  %9dK Forall %9dk Named %9dK\n",
-            kExpr, kUnresolvedSymExpr, kSymExpr, kDefExpr, kCallExpr, kForallExpr, kNamedExpr);
+    fprintf(stderr, "    Expr %9dK Unre %9dK Sym  %9dK Def   %9dK Call  %9dK Forall %9dk Named %9dK If %9dK\n",
+            kExpr, kUnresolvedSymExpr, kSymExpr, kDefExpr, kCallExpr, kLoopExpr, kNamedExpr, kIfExpr);
   if (strstr(fPrintStatistics, "k") && !strstr(fPrintStatistics, "n"))
-    fprintf(stderr, "    Expr %6dK Unre %6dK Sym  %6dK Def   %6dK Call  %6dK Forall %6dk Named %6dK\n",
-            kExpr, kUnresolvedSymExpr, kSymExpr, kDefExpr, kCallExpr, kForallExpr, kNamedExpr);
+    fprintf(stderr, "    Expr %6dK Unre %6dK Sym  %6dK Def   %6dK Call  %6dK Forall %6dk Named %6dK If %6dK\n",
+            kExpr, kUnresolvedSymExpr, kSymExpr, kDefExpr, kCallExpr, kLoopExpr, kNamedExpr, kIfExpr);
 
   if (strstr(fPrintStatistics, "n"))
     fprintf(stderr, "    Sym  %9d  Mod  %9d  Var   %9d  Arg   %9d  Shd   %9d  Type %9d  Fn %9d  Enum %9d  Label %9d\n",
@@ -166,7 +170,7 @@ void trace_remove(BaseAST* ast, char flag) {
     fprintf(deletedIdHandle, "%d %c %p %d\n",
             currentPassNo, flag, ast, ast->id);
   }
-  if (ast->id == breakOnDeleteID) {
+  if (ast->id == breakOnRemoveID) {
     if (deletedIdON() == true) fflush(deletedIdHandle);
     gdbShouldBreakHere();
   }
@@ -203,6 +207,13 @@ static void clean_modvec(Vec<ModuleSymbol*>& modvec) {
 }
 
 void cleanAst() {
+  // Important: Sometimes scopeResolve will create dummy UseStmts that are
+  // never inserted into the tree, and will be deleted in between passes.
+  //
+  // If we do not destroy the caches, they may contain pointers back to these
+  // dummy uses.
+  destroyModuleUsesCaches();
+
   //
   // clear back pointers to dead ast instances
   //
@@ -215,10 +226,6 @@ void cleanAst() {
       }
 
       if (AggregateType* ct = toAggregateType(ts->type)) {
-        if (ct->defaultInitializer               != NULL &&
-            isAliveQuick(ct->defaultInitializer) == false) {
-          ct->defaultInitializer = NULL;
-        }
 
         if (ct->hasDestructor()                  == true &&
             isAliveQuick(ct->getDestructor())    == false) {
@@ -283,7 +290,7 @@ verify() {
 
 
 int breakOnID = -1;
-int breakOnDeleteID = -1;
+int breakOnRemoveID = -1;
 
 int lastNodeIDUsed() {
   return uid - 1;
@@ -312,7 +319,12 @@ BaseAST::BaseAST(AstTag type) :
       astloc = currentAstLoc;
     } else {
       // neither yy* nor currentAstLoc are set
-      INT_FATAL("no line number available");
+      if (developer || fVerify) {
+        INT_FATAL("no line number available");
+      } else {
+        astloc.filename = "[file unknown]";
+        astloc.lineno = 0;
+      }
     }
   }
 }
@@ -457,12 +469,16 @@ const char* BaseAST::astTagAsString() const {
       retval = "ContextCallExpr";
       break;
 
-    case E_ForallExpr:
-      retval = "ForallExpr";
+    case E_LoopExpr:
+      retval = "LoopExpr";
       break;
 
     case E_NamedExpr:
       retval = "NamedExpr";
+      break;
+
+    case E_IfExpr:
+      retval = "IfExpr";
       break;
 
     case E_UseStmt:
@@ -558,6 +574,10 @@ const char* BaseAST::astTagAsString() const {
     case E_AggregateType:
       retval = "AggregateType";
       break;
+    
+    case E_DecoratedClassType:
+      retval = "DecoratedClassType";
+      break;
   }
 
   return retval;
@@ -624,9 +644,29 @@ void registerModule(ModuleSymbol* mod) {
 
 void update_symbols(BaseAST* ast, SymbolMap* map) {
   if (SymExpr* sym_expr = toSymExpr(ast)) {
-    if (sym_expr->symbol())
-      if (Symbol* y = map->get(sym_expr->symbol()))
-        sym_expr->setSymbol(y);
+    if (sym_expr->symbol()) {
+      if (Symbol* y = map->get(sym_expr->symbol())) {
+        bool skip = false;
+
+        // Do not replace symbols for type constructor calls
+        //
+        // BENHARSH TODO 2019-06-20: I think we need to do this because in
+        // some cases the SymbolMap contains a mapping from the generic 'T' to
+        // an instantiation of 'T'. Is that mapping necessary?
+        CallExpr* call = toCallExpr(sym_expr->parentExpr);
+        if (call != NULL && call->baseExpr == sym_expr) {
+          if (y->getValType()->symbol->hasFlag(FLAG_TUPLE) == false &&
+              y->getValType() != dtUnknown &&
+              sym_expr->symbol()->hasFlag(FLAG_TYPE_VARIABLE)) {
+            skip = true;
+          }
+        }
+
+        if (!skip) {
+          sym_expr->setSymbol(y);
+        }
+      }
+    }
 
 
   } else if (DefExpr* defExpr = toDefExpr(ast)) {
@@ -649,9 +689,13 @@ void update_symbols(BaseAST* ast, SymbolMap* map) {
     }
 
   } else if (ForallStmt* forall = toForallStmt(ast)) {
-    if (forall->fContinueLabel)
+    if (forall->fContinueLabel) {
       if (LabelSymbol* y = toLabelSymbol(map->get(forall->fContinueLabel)))
           forall->fContinueLabel = y;
+    } else if (forall->fErrorHandlerLabel) {
+      if (LabelSymbol* y = toLabelSymbol(map->get(forall->fErrorHandlerLabel)))
+          forall->fErrorHandlerLabel = y;
+    }
 
   } else if (VarSymbol* ps = toVarSymbol(ast)) {
     SUB_TYPE(ps->type);
@@ -660,7 +704,6 @@ void update_symbols(BaseAST* ast, SymbolMap* map) {
     SUB_TYPE(ps->type);
     SUB_TYPE(ps->retType);
     SUB_SYMBOL(ps->_this);
-    SUB_SYMBOL(ps->_outer);
 
   } else if (ArgSymbol* ps = toArgSymbol(ast)) {
     SUB_TYPE(ps->type);
@@ -750,6 +793,16 @@ bool isCForLoop(const BaseAST* a)
   const BlockStmt* stmt = toConstBlockStmt(a);
 
   return (stmt != 0 && stmt->isCForLoop()) ? true : false;
+}
+
+/* Create a throw-away ast with a given filename and line number.
+   This can be used e.g. to pass a line and filename to USR_FATAL
+   since it only takes those from an AST, not directly. */
+VarSymbol* createASTforLineNumber(const char* filename, int line) {
+  astlocT astloc(line, filename);
+  astlocMarker markAstLoc(astloc);
+  VarSymbol* lineTemp = newTemp();
+  return lineTemp;
 }
 
 /************************************* | **************************************

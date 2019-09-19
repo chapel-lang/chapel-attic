@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2018 Cray Inc.
+ * Copyright 2004-2019 Cray Inc.
  * Other additional copyright holders may be indicated within.
  *
  * The entirety of this work is licensed under the Apache License,
@@ -262,7 +262,7 @@ bool AstDumpToNode::enterModSym(ModuleSymbol* node)
 
 void AstDumpToNode::exitModSym(ModuleSymbol* node)
 {
-  if (node->modUseList.n > 0)
+  if (node->modUseList.size() > 0)
   {
     fputc('\n', mFP);
 
@@ -357,32 +357,6 @@ bool AstDumpToNode::enterBlockStmt(BlockStmt* node)
     mOffset = mOffset - 2;
   }
 
-  if (ForallIntents* fi = node->forallIntents)
-  {
-    newline();
-
-    write(false, "ForallIntents:", false);
-
-    mOffset = mOffset + 2;
-
-    newline();
-
-    for (int i = 0; i < fi->numVars(); i++)
-    {
-      if (i > 0)
-        fprintf(mFP, ", ");
-
-      if (fi->isReduce(i))
-        fi->riSpecs[i]->accept(this);
-
-      write(true, forallIntentTagDescription(fi->fIntents[i]), true);
-
-      fi->fiVars[i]->accept(this);
-    }
-
-    mOffset = mOffset - 2;
-  }
-
   mOffset = mOffset - 2;
 
   newline();
@@ -410,6 +384,12 @@ bool AstDumpToNode::enterForallStmt(ForallStmt* node)
   writeField("shadowVariables:     ", node->shadowVariables());
 
   newline();
+  if (node->fRecIterIRdef) {
+    writeField("fRecIterIRdef:        ", 20, node->fRecIterIRdef);
+    writeField("fRecIterICdef:        ", 20, node->fRecIterICdef);
+    writeField("fRecIterGetIterator:  ", 20, node->fRecIterGetIterator);
+    writeField("fRecIterFreeIterator: ", 20, node->fRecIterFreeIterator);
+  }
   writeField("loopBody: ", 10, node->loopBody());
 
   mOffset = mOffset - 2;
@@ -1054,6 +1034,17 @@ void AstDumpToNode::exitNamedExpr(NamedExpr* node)
 //
 //
 
+bool AstDumpToNode::enterIfExpr(IfExpr* node) {
+  return false;
+}
+
+void AstDumpToNode::exitIfExpr(IfExpr* node) {
+}
+
+//
+//
+//
+
 void AstDumpToNode::visitSymExpr(SymExpr* node)
 {
   Symbol* sym = node->symbol();
@@ -1083,6 +1074,18 @@ void AstDumpToNode::visitUsymExpr(UnresolvedSymExpr* node)
   enterNode(node);
   fprintf(mFP, " \"%s\"", node->unresolved);
   exitNode(node);
+}
+
+
+//
+//
+//
+
+bool AstDumpToNode::enterLoopExpr(LoopExpr* node) {
+  return false;
+}
+
+void AstDumpToNode::exitLoopExpr(LoopExpr* node) {
 }
 
 

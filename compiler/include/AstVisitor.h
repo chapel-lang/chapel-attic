@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2018 Cray Inc.
+ * Copyright 2004-2019 Cray Inc.
  * Other additional copyright holders may be indicated within.
  *
  * The entirety of this work is licensed under the Apache License,
@@ -21,6 +21,7 @@
 #define _AST_VISITOR_H_
 
 class AggregateType;
+class DecoratedClassType;
 class EnumType;
 class PrimitiveType;
 
@@ -36,12 +37,13 @@ class CallExpr;
 class ContextCallExpr;
 class DefExpr;
 class NamedExpr;
+class IfExpr;
 class SymExpr;
 class UnresolvedSymExpr;
+class LoopExpr;
 
 class UseStmt;
 class BlockStmt;
-class ForallIntents;
 class ForallStmt;
 class WhileDoStmt;
 class DoWhileStmt;
@@ -76,6 +78,9 @@ public:
   //
   virtual bool   enterAggrType       (AggregateType*     node) = 0;
   virtual void   exitAggrType        (AggregateType*     node) = 0;
+
+  virtual bool   enterDecoratedClassType(DecoratedClassType*     node) = 0;
+  virtual void   exitDecoratedClassType (DecoratedClassType*     node) = 0;
 
   virtual bool   enterEnumType       (EnumType*          node) = 0;
   virtual void   exitEnumType        (EnumType*          node) = 0;
@@ -118,9 +123,15 @@ public:
   virtual bool   enterNamedExpr      (NamedExpr*         node) = 0;
   virtual void   exitNamedExpr       (NamedExpr*         node) = 0;
 
+  virtual bool   enterIfExpr         (IfExpr*            node) = 0;
+  virtual void   exitIfExpr          (IfExpr*            node) = 0;
+
   virtual void   visitSymExpr        (SymExpr*           node) = 0;
 
   virtual void   visitUsymExpr       (UnresolvedSymExpr* node) = 0;
+
+  virtual bool   enterLoopExpr     (LoopExpr*        node) = 0;
+  virtual void   exitLoopExpr      (LoopExpr*        node) = 0;
 
   //
   // The sub-classes of Stmt
@@ -130,7 +141,6 @@ public:
   virtual bool   enterBlockStmt      (BlockStmt*         node) = 0;
   virtual void   exitBlockStmt       (BlockStmt*         node) = 0;
 
-  virtual void   visitForallIntents  (ForallIntents*   clause) = 0;
   virtual bool   enterForallStmt     (ForallStmt*        node) = 0;
   virtual void   exitForallStmt      (ForallStmt*        node) = 0;
 

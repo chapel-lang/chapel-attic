@@ -58,7 +58,8 @@ MPIRUN_CMD_BATCH='runjob -n %N : %C' ; export MPIRUN_CMD_BATCH  # launch command
 EXTRA_CONFIGURE_ARGS='--with-max-pthreads-per-node=64 --disable-udp --disable-amudp'
 EXTRA_CONFIGURE_ARGS="$EXTRA_CONFIGURE_ARGS --disable-aligned-segments"
 EXTRA_CONFIGURE_ARGS="$EXTRA_CONFIGURE_ARGS --enable-pshm --enable-pshm-gheap"
-EXTRA_CONFIGURE_ARGS="$EXTRA_CONFIGURE_ARGS --with-segment-mmap-max=12G"
+# "host" for BGQ is actually per-process, so .75/h is actually 75% of process physmem
+EXTRA_CONFIGURE_ARGS="$EXTRA_CONFIGURE_ARGS --with-max-segsize=0.75/h"
 EXTRA_CONFIGURE_ARGS="$EXTRA_CONFIGURE_ARGS --with-feature-list=os_bgq"
 if test -z "$USE_GCC$USE_CLANG" ; then
 EXTRA_CONFIGURE_ARGS="$EXTRA_CONFIGURE_ARGS --disable-tls"
@@ -71,7 +72,7 @@ TARGET_ID='powerpc64-bgq-linux'
 
 # 3. Review the automatically-detected settings below and make corrections as necessary.
 
-CROSS_CACHE_LINE_BYTES=128; export CROSS_CACHE_LINE_BYTES
+CACHE_LINE_BYTES=128; export CACHE_LINE_BYTES
 
 # 4. Place this output script in your top-level source directory and run it,
 #   passing it any additional configure arguments as usual (see configure --help).
@@ -115,12 +116,16 @@ CROSS_SIGKILL='9' ; export CROSS_SIGKILL
 CROSS_SIGTERM='15' ; export CROSS_SIGTERM
 CROSS_SIGUSR1='10' ; export CROSS_SIGUSR1
 
+# Find source directory
 
-SRCDIR=`dirname $0`
+if test -z "$SRCDIR" || test ! -f "$SRCDIR/configure" ; then
+  SRCDIR=`dirname $0`
+fi
 if test ! -f "$SRCDIR/configure" ; then
-  echo "ERROR: The $0 script should be placed in the same directory as the configure script before execution"
+  echo "ERROR: Source directory not found. Either set \$SRCDIR=/path/to/src or copy/link the `basename $0` script to the same directory as the configure script"
   exit 1
 fi
+
 # Detect the build+host machine type
 HOST_APPEND=
 for sys in host build; do

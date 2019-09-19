@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2018 Cray Inc.
+ * Copyright 2004-2019 Cray Inc.
  * Other additional copyright holders may be indicated within.
  *
  * The entirety of this work is licensed under the Apache License,
@@ -199,10 +199,10 @@ static bool needsKilling(SymExpr* se, std::set<Symbol*>& liveRefs)
 
     ArgSymbol* arg = actual_to_formal(se);
 
-    if (arg->intent == INTENT_OUT   ||  // TODO: Try removing this
-        arg->intent == INTENT_INOUT ||  // and this
-        arg->intent == INTENT_REF   ||  // and this.
-        arg->hasFlag(FLAG_ARG_THIS))    // We need this case.
+    if (arg->intent == INTENT_OUT   ||
+        arg->intent == INTENT_INOUT ||
+        arg->intent == INTENT_REF   ||
+        arg->hasFlag(FLAG_ARG_THIS)) // Todo: replace with arg intent check?
     {
       liveRefs.insert(se->symbol());
       return true;
@@ -272,8 +272,7 @@ static bool needsKilling(SymExpr* se, std::set<Symbol*>& liveRefs)
     }
 
     if (call->isPrimitive(PRIM_ADDR_OF) ||
-        call->isPrimitive(PRIM_SET_REFERENCE) ||
-        call->isPrimitive(PRIM_ARRAY_ALLOC)) {
+        call->isPrimitive(PRIM_SET_REFERENCE)) {
       liveRefs.insert(se->symbol());
       return true;
     }
@@ -293,24 +292,16 @@ static bool needsKilling(SymExpr* se, std::set<Symbol*>& liveRefs)
 static bool isUse(SymExpr* se)
 {
   if (toGotoStmt(se->parentExpr))
-  {
     return false;
-  }
 
   if (toCondStmt(se->parentExpr))
-  {
     return true;
-  }
 
   if (toBlockStmt(se->parentExpr))
-  {
     return true;
-  }
 
   if (isDefExpr(se->parentExpr))
-  {
     return false;
-  }
 
   CallExpr* call = toCallExpr(se->parentExpr);
 
@@ -318,23 +309,14 @@ static bool isUse(SymExpr* se)
   {
     // Skip the "base" symbol.
     if (se->symbol() == fn)
-    {
       return false;
-    }
 
     // A "normal" call.
     ArgSymbol* arg = actual_to_formal(se);
 
     if (arg->intent == INTENT_OUT ||
-        arg->intent == INTENT_REF)
-    {
+        (arg->intent & INTENT_FLAG_REF))
       return false;
-    } else if (arg->intent == INTENT_CONST_REF &&
-               isRecord(arg->type)) {
-      // We can currently return a const reference to a field in a record
-      // passed by const ref.
-      return false;
-    }
   }
 
   else
@@ -365,7 +347,6 @@ static bool isUse(SymExpr* se)
       }
       return true;
 
-     case PRIM_ARRAY_ALLOC:
      case PRIM_ADDR_OF:
      case PRIM_SET_REFERENCE:
       return false; // See Note #2.
@@ -946,8 +927,11 @@ void copyPropagation(void) {
   if (!fNoCopyPropagation) {
     forv_Vec(FnSymbol, fn, gFnSymbols)
     {
+      // BHARSH INIT TODO: Can this be eliminated now that tuples no longer use
+      // constructors?
+      //
       // This test is necessary because extern function stubs may contain
-      // _construct_tuple calls that are unresolved.
+      // _construct__tuple calls that are unresolved.
       if (fn->hasFlag(FLAG_EXTERN))
         continue;
 

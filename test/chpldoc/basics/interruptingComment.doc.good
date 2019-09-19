@@ -1,0 +1,18 @@
+.. default-domain:: chpl
+
+.. module:: interruptingComment.doc
+
+interruptingComment.doc
+=======================
+**Usage**
+
+.. code-block:: chapel
+
+   use interruptingComment.doc;
+
+.. record:: R
+
+   .. method:: proc write()
+
+   .. method:: proc otherFunc()
+

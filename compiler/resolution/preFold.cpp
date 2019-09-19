@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2018 Cray Inc.
+ * Copyright 2004-2019 Cray Inc.
  * Other additional copyright holders may be indicated within.
  *
  * The entirety of this work is licensed under the Apache License,
@@ -20,8 +20,11 @@
 #include "preFold.h"
 
 #include "astutil.h"
+#include "buildDefaultFunctions.h"
+#include "DecoratedClassType.h"
 #include "driver.h"
 #include "ForallStmt.h"
+#include "iterator.h"
 #include "ParamForLoop.h"
 #include "passes.h"
 #include "resolution.h"
@@ -30,6 +33,7 @@
 #include "scopeResolve.h"
 #include "stlUtil.h"
 #include "stringutil.h"
+#include "symbol.h"
 #include "typeSpecifier.h"
 #include "visibleFunctions.h"
 
@@ -39,6 +43,7 @@
 
 #include <inttypes.h>
 
+#include <algorithm>
 #include <iostream>
 #include <sstream>
 
@@ -49,6 +54,12 @@ static std::map<std::string,
 
 //lookup table/cache for function captures
 static std::map<FnSymbol*, FnSymbol*>                      functionCaptureMap;
+
+// stores the test functions
+static std::vector<Expr* >                                 testCaptureVector;
+
+// lookup table for test function names and their index in testCaptureVector
+static std::map<std::string,int>                           testNameIndex;
 
 static Expr*          preFoldPrimOp(CallExpr* call);
 
@@ -68,13 +79,12 @@ static AggregateType* createOrFindFunTypeFromAnnotation(AList&    argList,
 
 static Expr*          dropUnnecessaryCast(CallExpr* call);
 
-static SymExpr*       symOrParamExpr(Symbol* arg);
-
 static bool           isNormalField(Symbol* field);
 
 static std::string    buildParentName(AList& argList,
                                       bool   isFormal,
-                                      Type*  retType);
+                                      Type*  retType,
+                                      bool   throws);
 
 static AggregateType* createAndInsertFunParentClass(CallExpr*   call,
                                                     const char* name);
@@ -83,7 +93,8 @@ static FnSymbol*      createAndInsertFunParentMethod(CallExpr*      call,
                                                      AggregateType* parent,
                                                      AList&         argList,
                                                      bool           isFormal,
-                                                     Type*          retType);
+                                                     Type*          retType,
+                                                     bool           throws);
 
 /************************************* | **************************************
 *                                                                             *
@@ -113,7 +124,10 @@ Expr* preFold(CallExpr* call) {
       call->replace(retval);
 
     } else {
-      if (isLcnSymbol(symExpr->symbol()) == true) {
+      if (symExpr->symbol()->hasFlag(FLAG_TYPE_VARIABLE) &&
+          symExpr->getValType()->symbol->hasFlag(FLAG_TUPLE) == false) {
+        // Type constructor calls OK
+      } else if (isLcnSymbol(symExpr->symbol()) == true) {
         baseExpr->replace(new UnresolvedSymExpr("this"));
 
         call->insertAtHead(baseExpr);
@@ -170,10 +184,42 @@ Expr* preFold(CallExpr* call) {
 *                                                                             *
 ************************************** | *************************************/
 
+static bool isFollowerITer(FnSymbol* iter) {
+  // Follower iterator is not resolved yet - can't use isFollowerIterator().
+  // Instead, heuristically just look for a "followThis" formal.
+  // This is OK because we are in compiler-generated loopexpr function.
+  for_formals(formal, iter)
+    if (!strcmp(formal->name, iterFollowthisArgname))
+      return true;
+  return false;
+}
+
+static FnSymbol* findForallexprFollower(FnSymbol* serialIter) {
+  if (!isLoopExprFun(serialIter))
+    // Not a forall-expression.
+    return NULL;
+
+  // All iterators are defined in the same block - loopexpr function's body.
+  BlockStmt* parent = toBlockStmt(serialIter->defPoint->parentExpr);
+  for (Expr* curr = parent->body.head; curr != NULL; curr = curr->next) {
+    if (DefExpr* def = toDefExpr(curr))
+      if (FnSymbol* fn = toFnSymbol(def->sym))
+        if (fn->name == serialIter->name)
+          if (isFollowerITer(fn))
+            return fn;
+  }
+
+  // The loopexpr function does not define parallel iterators
+  // when it implements a (serial) for-expression.
+  return NULL;
+}
+
 static Expr* preFoldPrimOp(CallExpr* call) {
   Expr* retval = NULL;
 
-  if (call->isPrimitive(PRIM_ADDR_OF)) {
+  switch (call->primitive->tag) {
+
+  case PRIM_ADDR_OF: {
     // remove set ref if already a reference
     if (call->get(1)->typeInfo()->symbol->hasFlag(FLAG_REF) ||
         isTupleContainingOnlyReferences(call->get(1)->typeInfo())) {
@@ -181,14 +227,109 @@ static Expr* preFoldPrimOp(CallExpr* call) {
 
       call->replace(retval);
     }
+    break;
+  }
 
-  } else if (call->isPrimitive(PRIM_BLOCK_PARAM_LOOP)) {
+  case PRIM_BLOCK_PARAM_LOOP: {
     ParamForLoop* paramLoop = toParamForLoop(call->parentExpr);
 
     retval = paramLoop->foldForResolve();
 
-  } else if (call->isPrimitive(PRIM_CALL_RESOLVES) ||
-             call->isPrimitive(PRIM_METHOD_CALL_RESOLVES)) {
+    break;
+  }
+
+  case PRIM_GATHER_TESTS: {
+    int  totalTest = 0;
+    if (call->numActuals() == 0) {
+      USR_FATAL(call, "illegal call of 'gather tests'. Expected an argument of type 'Test'");
+    }
+
+    if (call->numActuals() > 1) {
+      USR_FATAL(call, "too many arguments to 'gather tests'");
+    }
+    
+    Type* testType = call->get(1)->getValType();
+    forv_Vec(FnSymbol, fn, gFnSymbols) {
+      if (fn->throwsError()) {
+        ModuleSymbol *mod = fn->getModule();
+        if (mod->modTag == MOD_USER) {
+          if (fn->numFormals() == 1) {
+            if (!fn->hasFlag(FLAG_GENERIC) && fn->instantiatedFrom == NULL) {
+              const char* name = astr(fn->name);
+              resolveSignature(fn);
+              if(isSubtypeOrInstantiation(fn->getFormal(1)->type, testType,call)) {
+                totalTest++;
+                CallExpr* newCall = new CallExpr(PRIM_CAPTURE_FN_FOR_CHPL, new UnresolvedSymExpr(name));
+                fn->defPoint->getStmtExpr()->insertAfter(newCall);
+                testCaptureVector.push_back(createFunctionAsValue(newCall));
+                newCall->remove();
+                testNameIndex[name] = totalTest;
+              }
+            }
+          }
+        }
+      }
+    }
+    retval=new SymExpr(new_IntSymbol(totalTest));
+    call->replace(retval);
+    break;
+  }
+
+  case PRIM_GET_TEST_BY_INDEX: {
+    int64_t index    =        0;
+    
+    if (call->numActuals() == 0) {
+      USR_FATAL(call, "illegal call of 'get test by index'. Expected an argument of type 'int'");
+    }
+
+    if (call->numActuals() > 1) {
+      USR_FATAL(call, "too many arguments to 'get test by index'");
+    }
+
+    if (!get_int(call->get(1), &index)) {
+      USR_FATAL(call, "illegal type for index. Expected an 'int' got '%s'",
+                call->get(1)->getValType()->name());
+    }
+
+    int64_t n = testCaptureVector.size();
+    if (index <= 0 || index > n) {
+      USR_FATAL(call, "index '%i' out of bounds, expected to be between '1' and '%i'",
+                index, n);
+    }
+
+    retval = testCaptureVector[index-1]->copy();
+    call->replace(retval);
+    break;
+  }
+
+  case PRIM_GET_TEST_BY_NAME: {
+    const char* name = NULL;
+
+    if (call->numActuals() == 0) {
+      USR_FATAL(call, "illegal call of 'get test by name'. Expected a test function name.");
+    }
+
+    if (call->numActuals() > 1) {
+      USR_FATAL(call, "too many arguments to 'get test by name'");
+    }
+
+    if(!get_string(call->get(1), &name)) {
+      USR_FATAL(call, "illegal type for expected test name. Expected a 'string' got '%s'",
+                call->get(1)->getValType()->name());
+    }
+    if (testNameIndex.find(name) != testNameIndex.end()) {
+      int index = testNameIndex[name];
+      retval = testCaptureVector[index-1]->copy();
+      call->replace(retval);
+      break; 
+    }
+    else {
+      USR_FATAL(call, "No test function with name '%s'",name);
+    }
+  }
+
+  case PRIM_CALL_RESOLVES:
+  case PRIM_METHOD_CALL_RESOLVES: {
     Expr* fnName   = NULL;
     Expr* callThis = NULL;
     int   firstArg = 0;
@@ -260,56 +401,37 @@ static Expr* preFoldPrimOp(CallExpr* call) {
 
     call->replace(retval);
 
+    break;
+  } // PRIM_CALL_RESOLVES, PRIM_METHOD_CALL_RESOLVES
 
-  } else if (call->isPrimitive(PRIM_CAPTURE_FN_FOR_CHPL) ||
-             call->isPrimitive(PRIM_CAPTURE_FN_FOR_C)) {
+  case PRIM_CAPTURE_FN_FOR_CHPL:
+  case PRIM_CAPTURE_FN_FOR_C: {
     retval = createFunctionAsValue(call);
-
     call->replace(retval);
+    break;
+  }
 
-  } else if (call->isPrimitive(PRIM_CREATE_FN_TYPE)) {
+  case PRIM_CREATE_FN_TYPE: {
     AggregateType* parent = createOrFindFunTypeFromAnnotation(call->argList,
                                                               call);
-
     retval = new SymExpr(parent->symbol);
-
     call->replace(retval);
+    break;
+  }
 
-  } else if (call->isPrimitive(PRIM_DEREF)) {
+  case PRIM_DEREF: {
     // remove deref if arg is already a value
     if (!call->get(1)->typeInfo()->symbol->hasFlag(FLAG_REF)) {
       retval = call->get(1)->remove();
-
       call->replace(retval);
     }
+    break;
+  }
 
-  } else if (call->isPrimitive(PRIM_ENUM_IS_SIGNED)) {
-    EnumType* et = toEnumType(toSymExpr(call->get(1))->symbol()->type);
-
-    ensureEnumTypeResolved(et);
-
-    if (is_int_type(et->integerType)) {
-      retval = new SymExpr(gTrue);
-    } else {
-      retval = new SymExpr(gFalse);
-    }
-
-    call->replace(retval);
-
-  } else if (call->isPrimitive(PRIM_ENUM_MIN_BITS)) {
-    EnumType* et = toEnumType(toSymExpr(call->get(1))->symbol()->type);
-
-    ensureEnumTypeResolved(et);
-
-    retval = new SymExpr(new_IntSymbol(get_width(et->integerType)));
-
-    call->replace(retval);
-
-  } else if (call->isPrimitive(PRIM_FIELD_BY_NUM)) {
+  case PRIM_FIELD_BY_NUM: {
     // if call->get(1) is a reference type, dereference it
-    AggregateType* classType  = toAggregateType(call->get(1)->typeInfo());
-
-    classType = toAggregateType(classType->getValType());
+    Type*          t          = canonicalDecoratedClassType(call->get(1)->getValType());
+    AggregateType* classType  = toAggregateType(t);
 
     VarSymbol*     var        = toVarSymbol(toSymExpr(call->get(2))->symbol());
 
@@ -340,11 +462,12 @@ static Expr* preFoldPrimOp(CallExpr* call) {
 
     call->replace(retval);
 
-  } else if (call->isPrimitive(PRIM_FIELD_NAME_TO_NUM)) {
-    SymExpr*       se1        = toSymExpr(call->get(1));
-    AggregateType* classType  = toAggregateType(se1->symbol()->type);
+    break;
+  }
 
-    classType = toAggregateType(classType->getValType());
+  case PRIM_FIELD_NAME_TO_NUM: {
+    Type*          t          = canonicalDecoratedClassType(call->get(1)->getValType());
+    AggregateType* classType  = toAggregateType(t);
 
     VarSymbol*     var        = toVarSymbol(toSymExpr(call->get(2))->symbol());
     Immediate*     imm        = var->immediate;
@@ -369,9 +492,12 @@ static Expr* preFoldPrimOp(CallExpr* call) {
 
     call->replace(retval);
 
-  } else if (call->isPrimitive(PRIM_FIELD_NUM_TO_NAME)) {
-    SymExpr*       se1        = toSymExpr(call->get(1));
-    AggregateType* classType  = toAggregateType(se1->symbol()->type);
+    break;
+  }
+
+  case PRIM_FIELD_NUM_TO_NAME: {
+    Type*          t          = canonicalDecoratedClassType(call->get(1)->getValType());
+    AggregateType* classType  = toAggregateType(t);
 
     classType = toAggregateType(classType->getValType());
 
@@ -406,7 +532,10 @@ static Expr* preFoldPrimOp(CallExpr* call) {
 
     call->replace(retval);
 
-  } else if (call->isPrimitive(PRIM_GET_COMPILER_VAR)) {
+    break;
+  }
+
+  case PRIM_GET_COMPILER_VAR: {
     // Resolving Primitive PRIM_GET_COMPILER_VAR
     SymExpr*    se1     = toSymExpr(call->get(1));
     Immediate*  chplEnv = toVarSymbol(se1->symbol())->immediate;
@@ -431,7 +560,10 @@ static Expr* preFoldPrimOp(CallExpr* call) {
                 "primitive string does not match any environment variable");
     }
 
-  } else if (call->isPrimitive(PRIM_GET_SVEC_MEMBER)) {
+    break;
+  }
+
+  case PRIM_GET_SVEC_MEMBER: {
     // Convert these to PRIM_GET_SVEC_MEMBER_VALUE if the
     // field in question is a reference.
     // An alternative to this transformation here would be
@@ -459,13 +591,10 @@ static Expr* preFoldPrimOp(CallExpr* call) {
       }
     }
 
-  } else if (call->isPrimitive(PRIM_INIT)) {
-    if (Expr* expr = resolvePrimInit(call)) {
-      // call was replaced by expr.
-      retval = expr;
-    }
+    break;
+  }
 
-  } else if (call->isPrimitive(PRIM_IS_ATOMIC_TYPE)) {
+  case PRIM_IS_ATOMIC_TYPE: {
     if (isAtomicType(call->get(1)->typeInfo())) {
       retval = new SymExpr(gTrue);
     } else {
@@ -474,10 +603,33 @@ static Expr* preFoldPrimOp(CallExpr* call) {
 
     call->replace(retval);
 
-  } else if (call->isPrimitive(PRIM_IS_EXTERN_CLASS_TYPE)) {
-    AggregateType* classtype = toAggregateType(call->get(1)->typeInfo());
+    break;
+  }
 
-    if (isClass(classtype) && classtype->symbol->hasFlag(FLAG_EXTERN)) {
+  case PRIM_IS_BOUND: {
+    AggregateType* at = NULL;
+    Type* thisType = call->get(1)->getValType();
+    if (AggregateType* type = toAggregateType(thisType)) {
+      at = type;
+    } else if (DecoratedClassType* dc = toDecoratedClassType(thisType)) {
+      at = dc->getCanonicalClass();
+    }
+
+    Immediate* imm = toVarSymbol(toSymExpr(call->get(2))->symbol())->immediate;
+    Symbol* field = at->getField(imm->v_string);
+    if (at->symbol->hasFlag(FLAG_GENERIC) &&
+        std::find(at->genericFields.begin(), at->genericFields.end(), field) != at->genericFields.end()) {
+      retval = new SymExpr(gFalse);
+    } else {
+      retval = new SymExpr(gTrue);
+    }
+
+    call->replace(retval);
+    break;
+  }
+
+  case PRIM_IS_EXTERN_TYPE: {
+    if (call->get(1)->typeInfo()->symbol->hasFlag(FLAG_EXTERN)) {
       retval = new SymExpr(gTrue);
     } else {
       retval = new SymExpr(gFalse);
@@ -485,7 +637,146 @@ static Expr* preFoldPrimOp(CallExpr* call) {
 
     call->replace(retval);
 
-  } else if (call->isPrimitive(PRIM_IS_POD)) {
+    break;
+  }
+
+  case PRIM_IS_ABS_ENUM_TYPE: {
+    EnumType* et = toEnumType(call->get(1)->typeInfo());
+    if (et && et->isAbstract()) {
+      retval = new SymExpr(gTrue);
+    } else {
+      retval = new SymExpr(gFalse);
+    }
+
+    call->replace(retval);
+
+    break;
+  }
+
+  case PRIM_IS_GENERIC_TYPE: {
+    Type* t = call->get(1)->typeInfo();
+
+    if (t->symbol->hasFlag(FLAG_GENERIC)) {
+      retval = new SymExpr(gTrue);
+    } else {
+      retval = new SymExpr(gFalse);
+    }
+
+    call->replace(retval);
+
+    break;
+  }
+
+
+  case PRIM_IS_CLASS_TYPE: {
+    Type* t = call->get(1)->typeInfo();
+
+    if (isClassLike(t) &&
+        !t->symbol->hasFlag(FLAG_EXTERN)) {
+      retval = new SymExpr(gTrue);
+    } else if (isManagedPtrType(t)) {
+      retval = new SymExpr(gTrue);
+    } else {
+      retval = new SymExpr(gFalse);
+    }
+
+    call->replace(retval);
+
+    break;
+  }
+
+  case PRIM_IS_NILABLE_CLASS_TYPE:
+  case PRIM_IS_NON_NILABLE_CLASS_TYPE: {
+    Type* t = call->get(1)->typeInfo();
+
+    if (isManagedPtrType(t)) {
+      t = getManagedPtrBorrowType(t);
+    }
+
+    bool value = false;
+    if (isClassLike(t) &&
+        !t->symbol->hasFlag(FLAG_EXTERN)) {
+      ClassTypeDecorator d = classTypeDecorator(t);
+      if (call->isPrimitive(PRIM_IS_NILABLE_CLASS_TYPE))
+        value = isDecoratorNilable(d);
+      else if (call->isPrimitive(PRIM_IS_NON_NILABLE_CLASS_TYPE))
+        value = isDecoratorNonNilable(d);
+    }
+
+    if (value)
+      retval = new SymExpr(gTrue);
+    else
+      retval = new SymExpr(gFalse);
+
+    call->replace(retval);
+
+    break;
+  }
+
+
+  case PRIM_TO_UNMANAGED_CLASS:
+  case PRIM_TO_UNMANAGED_CLASS_CHECKED:
+  case PRIM_TO_BORROWED_CLASS:
+  case PRIM_TO_BORROWED_CLASS_CHECKED:
+  case PRIM_TO_UNDECORATED_CLASS:
+  case PRIM_TO_NILABLE_CLASS:
+  case PRIM_TO_NILABLE_CLASS_CHECKED:
+  case PRIM_TO_NON_NILABLE_CLASS: {
+    Type* totype = call->typeInfo();
+    Expr* e = call->get(1);
+
+    if (call->isPrimitive(PRIM_TO_UNMANAGED_CLASS_CHECKED) ||
+        call->isPrimitive(PRIM_TO_BORROWED_CLASS_CHECKED)) {
+      Type* msgType = NULL;
+      if (call->isPrimitive(PRIM_TO_UNMANAGED_CLASS_CHECKED))
+        msgType = dtUnmanaged;
+      else
+        msgType = dtBorrowed;
+
+      Type* t = e->typeInfo();
+      if (!isClassLikeOrManaged(t))
+        USR_FATAL_CONT(call, "cannot make %s into a %s class",
+                             toString(t), toString(msgType));
+      if (!isTypeExpr(e))
+        USR_FATAL_CONT(call, "cannot use decorator %s on a value",
+                             toString(msgType));
+
+      checkDuplicateDecorators(msgType, t, call);
+    }
+
+    if (call->isPrimitive(PRIM_TO_NILABLE_CLASS_CHECKED)) {
+      // error if it's not a type
+      if (isTypeExpr(e) == false)
+        USR_FATAL_CONT(call, "cannot apply postfix ? operator to a value - "
+                             "please use value:class? instead");
+    }
+
+    if (isTypeExpr(e)) {
+      retval = new SymExpr(totype->symbol);
+      call->replace(retval);
+    } else {
+      if (isManagedPtrType(e->typeInfo())) {
+        VarSymbol* tmp = newTemp("borrow_tmp");
+        call->getStmtExpr()->insertBefore(new DefExpr(tmp));
+        CallExpr* c = new CallExpr("borrow", gMethodToken, e->remove());
+        CallExpr* move = new CallExpr(PRIM_MOVE, tmp, c);
+        call->getStmtExpr()->insertBefore(move);
+        // so it is resolved
+        resolveExpr(c);
+        resolveExpr(move);
+        retval = new CallExpr(PRIM_CAST, totype->symbol, tmp);
+        call->replace(retval);
+      } else {
+        retval = new CallExpr(PRIM_CAST, totype->symbol, e->remove());
+        call->replace(retval);
+      }
+    }
+
+
+    break;
+  }
+
+  case PRIM_IS_POD: {
     Type* t = call->get(1)->typeInfo();
 
     // call propagateNotPOD to set FLAG_POD/FLAG_NOT_POD
@@ -499,7 +790,29 @@ static Expr* preFoldPrimOp(CallExpr* call) {
 
     call->replace(retval);
 
-  } else if (call->isPrimitive(PRIM_IS_REF_ITER_TYPE)) {
+    break;
+  }
+
+  case PRIM_NEEDS_AUTO_DESTROY: {
+    Type* t = call->get(1)->typeInfo();
+
+    // call propagateNotPOD to set FLAG_POD/FLAG_NOT_POD
+    propagateNotPOD(t);
+
+    bool needsDestroy = isUserDefinedRecord(t) && !isPOD(t);
+
+    if (needsDestroy) {
+      retval = new SymExpr(gTrue);
+    } else {
+      retval = new SymExpr(gFalse);
+    }
+
+    call->replace(retval);
+
+    break;
+  }
+
+  case PRIM_IS_REF_ITER_TYPE: {
     if (isRefIterType(call->get(1)->typeInfo())) {
       retval = new SymExpr(gTrue);
     } else {
@@ -508,7 +821,10 @@ static Expr* preFoldPrimOp(CallExpr* call) {
 
     call->replace(retval);
 
-  } else if (call->isPrimitive(PRIM_IS_STAR_TUPLE_TYPE)) {
+    break;
+  }
+
+  case PRIM_IS_STAR_TUPLE_TYPE: {
     Type* tupleType = call->get(1)->typeInfo();
 
     // If the type isn't a tuple, it definitely isn't a homogeneous tuple!
@@ -521,7 +837,10 @@ static Expr* preFoldPrimOp(CallExpr* call) {
 
     call->replace(retval);
 
-  } else if (call->isPrimitive(PRIM_IS_TUPLE_TYPE)) {
+    break;
+  }
+
+  case PRIM_IS_TUPLE_TYPE: {
     Type* tupleType = call->get(1)->typeInfo();
 
     if (tupleType->symbol->hasFlag(FLAG_TUPLE)) {
@@ -532,19 +851,23 @@ static Expr* preFoldPrimOp(CallExpr* call) {
 
     call->replace(retval);
 
-  } else if (call->isPrimitive(PRIM_IS_RECORD_TYPE) == true) {
-    AggregateType* at = toAggregateType(call->get(1)->typeInfo());
+    break;
+  }
 
-    if (isRecord(at) == true) {
+  case PRIM_IS_RECORD_TYPE: {
+    Type* t = call->get(1)->typeInfo();
+
+    if (isUserRecord(t))
       retval = new SymExpr(gTrue);
-
-    } else {
+    else
       retval = new SymExpr(gFalse);
-    }
 
     call->replace(retval);
 
-  } else if (call->isPrimitive(PRIM_IS_UNION_TYPE)) {
+    break;
+  }
+
+  case PRIM_IS_UNION_TYPE: {
     AggregateType* classType = toAggregateType(call->get(1)->typeInfo());
 
     if (isUnion(classType) == true) {
@@ -555,7 +878,10 @@ static Expr* preFoldPrimOp(CallExpr* call) {
 
     call->replace(retval);
 
-  } else if (call->isPrimitive(PRIM_LOGICAL_FOLDER)) {
+    break;
+  }
+
+  case PRIM_LOGICAL_FOLDER: {
     SymExpr*   sym1 = toSymExpr(call->get(1));
     VarSymbol* lhs  = NULL;
 
@@ -616,10 +942,13 @@ static Expr* preFoldPrimOp(CallExpr* call) {
 
         } else if (varSym                            != NULL &&
                    (intent & INTENT_FLAG_IN)         !=    0 &&
-                   varSym->isConstValWillNotChange() == true) {
+                   (varSym->isConstValWillNotChange() == true ||
+                    varSym->hasFlag(FLAG_TYPE_VARIABLE))) {
           // don't take address of outer variables declared to be const
           // (otherwise, after flattenFunctions, we will take the
-          //  address of a by-value argument).
+          //  address of a by-value argument). An outer variable might be a
+          //  type if the symbol represents a field, and taking the address of
+          //  a type does not make sense.
 
         } else {
           Expr* stmt = call->getStmtExpr();
@@ -642,89 +971,13 @@ static Expr* preFoldPrimOp(CallExpr* call) {
 
     call->replace(retval);
 
-  } else if (call->isPrimitive(PRIM_NO_INIT)) {
-    // Lydia note: fUseNoinit does not control this section.  This was
-    // necessary because with the definition of type defaults in the module
-    // code, return temporary variables would cause an infinite loop by
-    // trying to default initialize within the default initialization
-    // definition.  (It is safe for these temporaries to skip default
-    // initialization, as they will always be assigned a value before they
-    // are returned.)  Thus noinit must remain attached to these temporaries,
-    // even if --no-use-noinit is thrown.  This is an implementation detail
-    // that the user does not need to care about.
+    break;
+  }
 
-    // fUseNoinit controls the insertion of PRIM_NO_INIT statements in the
-    // normalize pass.
-    SymExpr* se = toSymExpr(call->get(1));
-
-    INT_ASSERT(se);
-
-    if (se->symbol()->hasFlag(FLAG_TYPE_VARIABLE) == false) {
-      USR_FATAL(call, "invalid type specification");
-    }
-
-    Type* type = call->get(1)->getValType();
-
-    if (isAggregateType(type) == true      ||
-        type                  == dtStringC) {
-
-      bool containsNotPOD = propagateNotPOD(type);
-
-      if (containsNotPOD == true) {
-        // These types deal with their uninitialized fields differently than
-        // normal records/classes.  They may require special case
-        // implementations, but were capable of being isolated from the new
-        // cases that do work.
-        bool nowarn = false;
-
-        // In the case of temporary variables that use noinit (at this point
-        // only return variables), it is not useful to warn the user we are
-        // still default initializing the values as they weren't the ones to
-        // tell us to use noinit in the first place.  So squash the warning
-        // in this case.
-        if (call->parentExpr) {
-          CallExpr* parent = toCallExpr(call->parentExpr);
-
-          if (parent && parent->isPrimitive(PRIM_MOVE)) {
-            // Should always be true, but just in case...
-            if (SymExpr* holdsDest = toSymExpr(parent->get(1))) {
-              Symbol* dest   = holdsDest->symbol();
-
-              // TODO: Surely there's a better way to test for this pattern
-              bool    okName = strcmp(dest->name, "ret")          == 0 ||
-                               strcmp(dest->name, arrayUnrefName) == 0;
-
-              if (dest->hasFlag(FLAG_TEMP) && okName) {
-                nowarn = true;
-              }
-            }
-          }
-        }
-
-        if (nowarn == false) {
-          USR_WARN(call,
-                   "type %s does not currently support noinit, "
-                   "using default initialization",
-                   type->symbol->name);
-        }
-
-        retval = new CallExpr(PRIM_INIT, call->get(1)->remove());
-
-        call->replace(retval);
-        inits.add(toCallExpr(retval));
-
-      } else {
-        retval = call;
-        inits.add(call);
-      }
-    }
-
-  } else if (call->isPrimitive(PRIM_NUM_FIELDS)) {
-    SymExpr*       se1        = toSymExpr(call->get(1));
-    AggregateType* classType  = toAggregateType(se1->symbol()->type);
+  case PRIM_NUM_FIELDS: {
+    Type*          t          = canonicalDecoratedClassType(call->get(1)->getValType());
+    AggregateType* classType  = toAggregateType(t);
     int            fieldCount = 0;
-
-    classType = toAggregateType(classType->getValType());
 
     for_fields(field, classType) {
       if (isNormalField(field) == true) {
@@ -736,21 +989,42 @@ static Expr* preFoldPrimOp(CallExpr* call) {
 
     call->replace(retval);
 
-  } else if (call->isPrimitive(PRIM_TO_FOLLOWER)) {
-    FnSymbol* iterator     = getTheIteratorFn(call);
+    break;
+  }
+
+  case PRIM_HAS_LEADER: {
+    FnSymbol* iterator   = getTheIteratorFn(call->get(1)->typeInfo());
+    Symbol* result = gFalse;
+    if (IteratorGroup* igroup = iterator->iteratorGroup)
+      if (igroup->leader != NULL)
+        result = gTrue;
+
+    retval = new SymExpr(result);
+    call->replace(retval);
+
+    break;
+  }
+
+  case PRIM_TO_FOLLOWER: {
+    FnSymbol* iterator     = getTheIteratorFn(call->get(1)->typeInfo());
     CallExpr* followerCall = NULL;
 
-    if (FnSymbol* follower = iteratorFollowerMap.get(iterator)) {
-      followerCall = new CallExpr(follower);
+    if (FnSymbol* f2 = findForallexprFollower(iterator)) {
+      followerCall = new CallExpr(f2);
     } else {
       followerCall = new CallExpr(iterator->name);
     }
 
     for_formals(formal, iterator) {
+      if (formal->name  == astrTag && formal->type == gFollowerTag->type) {
+        INT_FATAL("tag already present in PRIM_TO_FOLLOWER");
+        // Could remove it, but would have to figure out what's
+        // happening with followThis and fast too.
+      }
       // Note: this can add a use formal outside of its function
       // This is cleaned up in cleanupLeaderFollowerIteratorCalls
       followerCall->insertAtTail(new NamedExpr(formal->name,
-                                               symOrParamExpr(formal)));
+                                   createSymExprPropagatingParam(formal)));
     }
 
     // "tag", "followThis" and optionally "fast" should be placed at the end
@@ -771,21 +1045,22 @@ static Expr* preFoldPrimOp(CallExpr* call) {
 
     retval = followerCall;
 
-  } else if (call->isPrimitive(PRIM_TO_LEADER)) {
-    FnSymbol* iterator   = getTheIteratorFn(call);
-    CallExpr* leaderCall = NULL;
+    break;
+  }
 
-    if (FnSymbol* leader = iteratorLeaderMap.get(iterator)) {
-      leaderCall = new CallExpr(leader);
-    } else {
-      leaderCall = new CallExpr(iterator->name);
-    }
+  case PRIM_TO_LEADER: {
+    FnSymbol* iterator   = getTheIteratorFn(call->get(1)->typeInfo());
+    CallExpr* leaderCall = new CallExpr(iterator->name);
 
     for_formals(formal, iterator) {
       // Note: this can add a use formal outside of its function
       // This is cleaned up in cleanupLeaderFollowerIteratorCalls
-      leaderCall->insertAtTail(new NamedExpr(formal->name,
-                                             symOrParamExpr(formal)));
+      if (formal->name  == astrTag && formal->type == gLeaderTag->type) {
+        // Leave out the tag since we add it in again below
+      } else {
+        leaderCall->insertAtTail(new NamedExpr(formal->name,
+                                   createSymExprPropagatingParam(formal)));
+      }
     }
 
     // "tag" should be placed at the end of the formals in the source code as
@@ -796,15 +1071,22 @@ static Expr* preFoldPrimOp(CallExpr* call) {
 
     retval = leaderCall;
 
-  } else if (call->isPrimitive(PRIM_TO_STANDALONE)) {
-    FnSymbol* iterator       = getTheIteratorFn(call);
+    break;
+  }
+
+  case PRIM_TO_STANDALONE: {
+    FnSymbol* iterator       = getTheIteratorFn(call->get(1)->typeInfo());
     CallExpr* standaloneCall = new CallExpr(iterator->name);
 
     for_formals(formal, iterator) {
       // Note: this can add a use formal outside of its function
       // This is cleaned up in cleanupLeaderFollowerIteratorCalls
-      standaloneCall->insertAtTail(new NamedExpr(formal->name,
-                                                 symOrParamExpr(formal)));
+      if (formal->name  == astrTag && formal->type == gStandaloneTag->type) {
+        // Leave out the tag since we add it in again below
+      } else {
+        standaloneCall->insertAtTail(new NamedExpr(formal->name,
+                                       createSymExprPropagatingParam(formal)));
+      }
     }
 
     // "tag" should be placed at the end of the formals in the source code as
@@ -816,19 +1098,57 @@ static Expr* preFoldPrimOp(CallExpr* call) {
 
     retval = standaloneCall;
 
-  } else if (call->isPrimitive(PRIM_TYPE_TO_STRING)) {
+    break;
+  }
+
+  case PRIM_ITERATOR_RECORD_SET_SHAPE: {
+    Symbol* ir = toSymExpr(call->get(1))->symbol();
+    if (ir->hasFlag(FLAG_TYPE_VARIABLE)) {
+      // This is a type. Do not do shape.
+      retval = new CallExpr(PRIM_NOOP);
+      call->replace(retval);
+    } else if (ir->type == dtUnknown) {
+      // Ex. test/arrays/return/returnArbitraryArray and siblings.
+      INT_ASSERT(ir->hasFlag(FLAG_RVV));
+      // Delay the lowering - skip 'call' for now.
+      retval = new CallExpr(PRIM_NOOP);
+      call->insertAfter(retval);
+    } else {
+      // Keep in sync with setIteratorRecordShape(CallExpr* call).
+      INT_ASSERT(ir->type->symbol->hasFlag(FLAG_ITERATOR_RECORD));
+      Symbol* shapeSpec = toSymExpr(call->get(2))->symbol();
+      Symbol* fromForLoop = toSymExpr(call->get(3))->symbol();
+      retval = setIteratorRecordShape(call, ir, shapeSpec,
+                 getSymbolImmediate(fromForLoop)->bool_value());
+      call->replace(retval);
+    }
+
+    break;
+  }
+
+  case PRIM_TYPE_TO_STRING: {
     SymExpr* se = toSymExpr(call->get(1));
 
     INT_ASSERT(se && se->symbol()->hasFlag(FLAG_TYPE_VARIABLE));
 
-    retval = new SymExpr(new_StringSymbol(se->symbol()->type->symbol->name));
+    Type* t = se->symbol()->type;
+    const char* typeName = toString(t);
+
+    retval = new SymExpr(new_StringSymbol(typeName));
 
     call->replace(retval);
 
-  } else if (call->isPrimitive(PRIM_TYPEOF)) {
-    Type* type = call->get(1)->getValType();
+    break;
+  }
 
-    if (type->symbol->hasFlag(FLAG_HAS_RUNTIME_TYPE)) {
+  case PRIM_TYPEOF: {
+    SymExpr* se = toSymExpr(call->get(1));
+    Type* type = se->getValType();
+
+    if (se->symbol()->hasFlag(FLAG_TYPE_VARIABLE)) {
+      USR_FATAL_CONT(call, "can't apply '.type' to a type (%s)",
+                     toString(se->typeInfo()));
+    } else if (type->symbol->hasFlag(FLAG_HAS_RUNTIME_TYPE)) {
       retval = new CallExpr("chpl__convertValueToRuntimeType",
                             call->get(1)->remove());
 
@@ -855,10 +1175,23 @@ static Expr* preFoldPrimOp(CallExpr* call) {
       if (blk) {
         (unsigned&)(blk->blockTag) &= ~(unsigned)BLOCK_TYPE_ONLY;
       }
+    } else if (type->symbol->hasFlag(FLAG_TUPLE)) {
+      Type* newt = computeNonRefTuple(toAggregateType(type));
+      retval = new SymExpr(newt->symbol);
+      call->replace(retval);
+    } else {
+      // Check whether the type's def is within the .type block itself.
+      if (BlockStmt* blk = toBlockStmt(call->getStmtExpr()->parentExpr))
+        if (type->symbol->defPoint->parentExpr == blk)
+          USR_FATAL_CONT(call, ".type is not supported for this kind of expression");
     }
 
-  } else if (call->isPrimitive(PRIM_STATIC_TYPEOF) ||
-             call->isPrimitive(PRIM_SCALAR_PROMOTION_TYPE)) {
+    break;
+  }
+
+  case PRIM_STATIC_TYPEOF:
+  case PRIM_STATIC_FIELD_TYPE:
+  case PRIM_SCALAR_PROMOTION_TYPE: {
 
     // Replace the type query call with a SymExpr of the type symbol
     // call->typeInfo() will request the type from the primitive
@@ -866,7 +1199,10 @@ static Expr* preFoldPrimOp(CallExpr* call) {
     retval = new SymExpr(type->symbol);
     call->replace(retval);
 
-  } else if (call->isPrimitive(PRIM_QUERY)) {
+    break;
+  }
+
+  case PRIM_QUERY: {
     Symbol* field = determineQueriedField(call);
 
     if (field &&
@@ -880,8 +1216,8 @@ static Expr* preFoldPrimOp(CallExpr* call) {
 
       call->getStmtExpr()->insertBefore(new DefExpr(tmp));
 
-      if (call->get(1)->typeInfo()->symbol->hasFlag(FLAG_TUPLE) == true &&
-          field->name[0]                                        == 'x') {
+      if (call->get(1)->getValType()->symbol->hasFlag(FLAG_TUPLE) &&
+          field->name[0] == 'x') {
         retval = new CallExpr(PRIM_GET_MEMBER_VALUE,
                               call->get(1)->remove(),
                               new_CStringSymbol(field->name));
@@ -893,7 +1229,21 @@ static Expr* preFoldPrimOp(CallExpr* call) {
 
       call->getStmtExpr()->insertBefore(new CallExpr(PRIM_MOVE, tmp, retval));
 
-      call->replace(new CallExpr(PRIM_TYPEOF, tmp));
+      // Wrap it in PRIM_TYPEOF unless it's just used in another
+      // PRIM_QUERY.
+      bool wrapInTypeOf = true;
+      if (CallExpr* parentCall = toCallExpr(call->parentExpr))
+        if (parentCall->isPrimitive(PRIM_MOVE))
+          if (SymExpr* lhsSe = toSymExpr(parentCall->get(1)))
+            if (SymExpr* useSe = lhsSe->symbol()->getSingleUse())
+              if (CallExpr* useParent = toCallExpr(useSe->parentExpr))
+                if (useParent->isPrimitive(PRIM_QUERY))
+                  wrapInTypeOf = false;
+
+      if (wrapInTypeOf)
+        call->replace(new CallExpr(PRIM_TYPEOF, tmp));
+      else
+        call->replace(new SymExpr(tmp));
 
     } else {
       // Possibly indicated by 'determineQueriedField' returning NULL
@@ -901,18 +1251,27 @@ static Expr* preFoldPrimOp(CallExpr* call) {
                 "invalid query -- queried field must be a type or parameter");
     }
 
-  } else if (call->isPrimitive(PRIM_REDUCE_ASSIGN)) {
+    break;
+  }
+
+  case PRIM_DEFAULT_INIT_FIELD: {
+    SymExpr* initVal = toSymExpr(call->get(4)->remove());
+    SymExpr* toType = toSymExpr(call->get(3)->remove());
+    checkMoveIntoClass(call, toType->getValType(), initVal->getValType());
+
+    retval = new CallExpr("_createFieldDefault", toType, initVal);
+    call->replace(retval);
+
+    break;
+  }
+
+  case PRIM_REDUCE_ASSIGN: {
     // Convert this 'call' into a call to accumulateOntoState().
-    INT_ASSERT(call->numActuals() == 3);
-    SymExpr*      rOpIdxSE  = toSymExpr(call->get(1));
-    VarSymbol*    rOpIdxSym = toVarSymbol(rOpIdxSE->symbol());
-    int           rOpIdx    = (int) (rOpIdxSym->immediate->int_value());
-    Expr*         rhs       = call->get(3)->remove();
-    Expr*         lhs       = call->get(2)->remove();
-    ForallStmt*   fs        = enclosingForallStmt(call);
-    // rOpIdx was computed by reduceIntentIdx()
-    ShadowVarSymbol*   svar = fs->getShadowVar(rOpIdx);
-    Symbol*       globalOp  = toSymExpr(svar->reduceOpExpr())->symbol();
+    INT_ASSERT(call->numActuals() == 2);
+    Expr*         rhs       = call->get(2)->remove();
+    Expr*         lhs       = call->get(1)->remove();
+    ShadowVarSymbol*   svar = toShadowVarSymbol(toSymExpr(lhs)->symbol());
+    Symbol*       globalOp  = svar->ReduceOpForAccumState();
 
     INT_ASSERT(!strcmp(toSymExpr(lhs)->symbol()->name, svar->name));
     INT_ASSERT(svar->isReduce());
@@ -922,8 +1281,11 @@ static Expr* preFoldPrimOp(CallExpr* call) {
                       gMethodToken, globalOp, lhs, rhs);
     call->replace(retval);
 
-  } else if (call->isPrimitive(PRIM_WIDE_GET_LOCALE) ||
-             call->isPrimitive(PRIM_WIDE_GET_NODE)) {
+    break;
+  }
+
+  case PRIM_WIDE_GET_LOCALE:
+  case PRIM_WIDE_GET_NODE: {
     Type* type = call->get(1)->getValType();
 
     //
@@ -932,8 +1294,8 @@ static Expr* preFoldPrimOp(CallExpr* call) {
     //
     SymExpr* se = toSymExpr(call->get(1));
 
-    if (se->symbol()->hasFlag(FLAG_EXPR_TEMP) == true &&
-        isClass(type)                         == false) {
+    if (se->symbol()->hasFlag(FLAG_EXPR_TEMP) &&
+        !(isClassLikeOrPtr(type) || isReferenceType(type))) {
       USR_WARN(se, "accessing the locale of a local expression");
     }
 
@@ -953,15 +1315,60 @@ static Expr* preFoldPrimOp(CallExpr* call) {
 
       call->insertAtTail(tmp);
     }
-  } else if (call->isPrimitive(PRIM_SIZEOF) == true) {
-    // Fix up arg to sizeof(), as we may not have known the type earlier
+
+    //
+    // if .locale applies to a value x of owned or shared type,
+    // return x.borrow().locale.
+    //
+    if (isManagedPtrType(type)) {
+      VarSymbol* tmp = newTemp("_locale_tmp_");
+
+      call->getStmtExpr()->insertBefore(new DefExpr(tmp));
+
+      retval = new CallExpr("borrow", gMethodToken, call->get(1)->remove());
+
+      call->getStmtExpr()->insertBefore(new CallExpr(PRIM_MOVE, tmp, retval));
+
+      call->insertAtTail(tmp);
+    }
+
+    break;
+  }
+
+  case PRIM_SIZEOF_BUNDLE: {
+    // Fix up arg to sizeof_bundle(), as we may not have known the
+    // type earlier
     SymExpr* sizeSym  = toSymExpr(call->get(1));
     Type*    sizeType = sizeSym->symbol()->typeInfo();
 
-    retval = new CallExpr(PRIM_SIZEOF, sizeType->symbol);
+    retval = new CallExpr(PRIM_SIZEOF_BUNDLE, sizeType->symbol);
     call->replace(retval);
 
+    break;
   }
+
+  case PRIM_SIZEOF_DDATA_ELEMENT: {
+    // Fix up arg to sizeof_ddata_element(), as we may not have known
+    // the type earlier
+    SymExpr* sizeSym  = toSymExpr(call->get(1));
+    Type*    sizeType = sizeSym->symbol()->typeInfo();
+
+    retval = new CallExpr(PRIM_SIZEOF_DDATA_ELEMENT, sizeType->symbol);
+    call->replace(retval);
+
+    break;
+  }
+
+  case PRIM_REDUCE: {
+    // Need to do this ahead of resolveCall().
+    retval = lowerPrimReduce(call);
+    break;
+  }
+
+  default:
+    break;
+
+  } // switch (call->primitive->tag)
 
   return retval;
 }
@@ -1012,8 +1419,6 @@ static Symbol* findMatchingEnumSymbol(Immediate* imm, EnumType* typeEnum) {
 
     if (haveString)
       extendedName = astr(typeEnum->symbol->name, ".", constant->sym->name);
-
-    INT_ASSERT(gotInt || gotUint);
 
     bool match = false;
     // string matches name
@@ -1070,8 +1475,22 @@ static Expr* preFoldNamed(CallExpr* call) {
         USR_FATAL(call, "illegal call of type");
       }
 
+      if (call->numActuals() > 3) {
+        USR_FATAL(call, "too many arguments to type index expression");
+      }
+
       if (!get_int(call->get(3), &index)) {
         USR_FATAL(call, "illegal type index expression");
+      }
+
+      AggregateType* at = toAggregateType(sym->type);
+
+      if (!at) {
+        USR_FATAL(call, "illegal type index expression");
+      }
+
+      if (index <= 0 || index > at->fields.length-1) {
+        USR_FATAL(call, "type index expression '%i' out of bounds", index);
       }
 
       sprintf(field, "x%" PRId64, index);
@@ -1137,7 +1556,7 @@ static Expr* preFoldNamed(CallExpr* call) {
 
         Immediate* imm = getSymbolImmediate(sym);
 
-        if (imm != NULL && toSE != NULL) {
+        if (toSE != NULL) {
           Type* oldType = sym->type;
           Type* newType = toSE->symbol()->type;
 
@@ -1145,26 +1564,24 @@ static Expr* preFoldNamed(CallExpr* call) {
           bool fromString = (oldType == dtString || oldType == dtStringC);
           bool fromIntUint = is_int_type(oldType) ||
                              is_uint_type(oldType);
-          bool fromIntEtc = fromIntUint || is_bool_type(oldType);
+          bool fromRealEtc = is_real_type(oldType) ||
+                             is_imag_type(oldType) ||
+                             is_complex_type(oldType);
+          bool fromIntEtc = fromIntUint || fromRealEtc || is_bool_type(oldType);
 
           bool toEnum = is_enum_type(newType);
           bool toString = (newType == dtString || newType == dtStringC);
           bool toIntUint = is_int_type(newType) ||
                            is_uint_type(newType);
-          bool toIntEtc = toIntUint || is_bool_type(newType);
+          bool toRealEtc = is_real_type(newType) ||
+                           is_imag_type(newType) ||
+                           is_complex_type(newType);
+          bool toIntEtc = toIntUint || toRealEtc || is_bool_type(newType);
 
 
           // Handle casting between numeric types
-          if ((fromEnum || fromIntEtc) && toIntEtc) {
-            VarSymbol* typeVar  = toVarSymbol(newType->defaultValue);
-
-            // handle numeric casts
-            // (or anything handled by coerce_immediate)
-            if (typeVar == NULL || typeVar->immediate == NULL) {
-              INT_FATAL("unexpected case in cast_fold");
-            }
-
-            Immediate coerce = *typeVar->immediate;
+          if (imm != NULL && (fromEnum || fromIntEtc) && toIntEtc) {
+            Immediate coerce = getDefaultImmediate(newType);
 
             coerce_immediate(imm, &coerce);
 
@@ -1173,30 +1590,41 @@ static Expr* preFoldNamed(CallExpr* call) {
             call->replace(retval);
 
           // Handle casting to enum
-          } else if (toEnum && (fromString || fromIntUint)) {
+          } else if (imm != NULL && toEnum && (fromString || fromIntUint)) {
 
             EnumType* typeEnum = toEnumType(newType);
             Symbol* constant = findMatchingEnumSymbol(imm, typeEnum);
 
-            if (constant == NULL)
-              USR_FATAL(call->castFrom(), "enum cast out of bounds");
-
-            retval = new SymExpr(constant);
-            call->replace(retval);
+            if (constant == NULL) {
+              if (typeEnum->isAbstract()) {
+                // skip this case, as functionResolution.cpp will print a
+                // better error message.
+              } else {
+                USR_FATAL_CONT(call->castFrom(), "enum cast out of bounds");
+              }
+              retval = call;
+            } else {
+              retval = new SymExpr(constant);
+              call->replace(retval);
+            }
 
           // Handle enumsym:string casts
           } else if (fromEnum && toString) {
             EnumSymbol* enumSym = toEnumSymbol(sym);
 
-            if (newType == dtStringC)
-              retval = new SymExpr(new_CStringSymbol(enumSym->name));
-            else
-              retval = new SymExpr(new_StringSymbol(enumSym->name));
+            if (enumSym) {
+              if (newType == dtStringC)
+                retval = new SymExpr(new_CStringSymbol(enumSym->name));
+              else
+                retval = new SymExpr(new_StringSymbol(enumSym->name));
 
-            call->replace(retval);
+              call->replace(retval);
+            } else {
+              retval = call;
+            }
 
           // Handle string:c_string and c_string:string casts
-          } else if (fromString && toString) {
+          } else if (imm != NULL && fromString && toString) {
 
             if (newType == dtStringC)
               retval = new SymExpr(new_CStringSymbol(imm->v_string));
@@ -1206,7 +1634,7 @@ static Expr* preFoldNamed(CallExpr* call) {
             call->replace(retval);
 
           // Handle other casts to string
-          } else if (fromIntEtc && toString) {
+          } else if (imm != NULL && fromIntEtc && toString) {
             // special case because newType->defaultValue will
             // be null for dtString
 
@@ -1229,6 +1657,8 @@ static Expr* preFoldNamed(CallExpr* call) {
         }
       }
     }
+
+  // BHARSH TODO: Move the dtUninstantiated stuff over to resolveTypeComparisonCall
   } else if (call->isNamed("==")) {
     if (isTypeExpr(call->get(1)) && isTypeExpr(call->get(2))) {
       Type* lt = call->get(1)->getValType();
@@ -1241,6 +1671,9 @@ static Expr* preFoldNamed(CallExpr* call) {
         retval = (lt == rt) ? new SymExpr(gTrue) : new SymExpr(gFalse);
         call->replace(retval);
       }
+    } else if (call->get(2)->getValType() == dtUninstantiated) {
+      retval = (call->get(1)->getValType() == dtUninstantiated) ? new SymExpr(gTrue) : new SymExpr(gFalse);
+      call->replace(retval);
     }
 
 
@@ -1250,36 +1683,20 @@ static Expr* preFoldNamed(CallExpr* call) {
       Type* rt = call->get(2)->getValType();
 
       if (lt                                != dtUnknown &&
-          rt                                != dtUnknown &&
-          lt->symbol->hasFlag(FLAG_GENERIC) == false     &&
-          rt->symbol->hasFlag(FLAG_GENERIC) == false) {
+          rt                                != dtUnknown) {
         retval = (lt != rt) ? new SymExpr(gTrue) : new SymExpr(gFalse);
         call->replace(retval);
       }
+    } else if (call->get(2)->getValType() == dtUninstantiated) {
+      retval = (call->get(1)->getValType() != dtUninstantiated) ? new SymExpr(gTrue) : new SymExpr(gFalse);
+      call->replace(retval);
     }
 
 
-  } else if (call->isNamed("_type_construct__tuple") ==  true &&
-             call->isResolved()                      == false) {
-    if (SymExpr* sym = toSymExpr(call->get(1))) {
-      if (VarSymbol* var = toVarSymbol(sym->symbol())) {
-        if (var->immediate) {
-          int rank = var->immediate->int_value();
-
-          if (rank != call->numActuals() - 1) {
-            if (call->numActuals() != 2) {
-              INT_FATAL(call, "bad homogeneous tuple");
-            }
-
-            Expr* actual = call->get(2);
-
-            for (int i = 1; i < rank; i++) {
-              call->insertAtTail(actual->copy());
-            }
-          }
-        }
-      }
-    }
+  } else if (call->isNamed("chpl__staticFastFollowCheck")  ||
+             call->isNamed("chpl__dynamicFastFollowCheck")  ) {
+    if (! call->isResolved())
+      buildFastFollowerChecksIfNeeded(call);
   }
 
   return retval;
@@ -1359,7 +1776,8 @@ static Expr* resolveTupleIndexing(CallExpr* call, Symbol* baseVar) {
         // and the current component are non-references.
         // And it's not an array (arrays are always yielded by reference)
         // - see boundaries() in release/examples/benchmarks/miniMD/miniMD.
-        if (!fieldType->symbol->hasFlag(FLAG_ARRAY)) {
+        if (!fieldType->symbol->hasFlag(FLAG_ARRAY) &&
+            !fieldType->symbol->hasFlag(FLAG_COPY_MUTATES)) {
           destSE->symbol()->addFlag(FLAG_CONST);
         }
       } else {
@@ -1391,7 +1809,8 @@ static Expr* resolveTupleIndexing(CallExpr* call, Symbol* baseVar) {
 // determine field associated with query expression
 //
 static Symbol* determineQueriedField(CallExpr* call) {
-  AggregateType* at     = toAggregateType(call->get(1)->getValType());
+  AggregateType* at     =
+    toAggregateType(canonicalDecoratedClassType(call->get(1)->getValType()));
   SymExpr*       last   = toSymExpr(call->get(call->numActuals()));
   VarSymbol*     var    = toVarSymbol(last->symbol());
   Symbol*        retval = NULL;
@@ -1400,20 +1819,38 @@ static Symbol* determineQueriedField(CallExpr* call) {
     retval = at->getField(var->immediate->v_string, false);
 
   } else {
-    Vec<ArgSymbol*> args;
+    Vec<Symbol*> args;
     int             position      = var->immediate->int_value();
-    FnSymbol*       typeConstruct = at->typeConstructor;
-    AggregateType*  source        = at->instantiatedFrom;
 
-    while (typeConstruct == NULL) {
-      typeConstruct = source->typeConstructor;
-      source        = source->instantiatedFrom;
+    if (at->symbol->hasFlag(FLAG_TUPLE)) {
+      return at->getField(position);
     }
 
-    for_formals(arg, typeConstruct) {
-      args.add(arg);
+    for_vector(Symbol, field, at->getRootInstantiation()->genericFields) {
+      args.add(field);
     }
 
+    // A PRIM_QUERY supports three forms:
+    // The first case occurs when the user exclusively used positional queries:
+    //     proc foo(arg : R(?A, ?B));
+    //     ===>
+    //     (query <integer>) for each query
+    //
+    // The second case occurs when the user wrote a named-query:
+    //     proc foo(arg : R(A=?A, B=?B));
+    //     ===>
+    //     (query <string>) for each query
+    //
+    // The third case occurs when the user wrote a mix of positional and named
+    // queries:
+    //     proc foo(arg : R(A=?A, B=?B, ?C, ?D));
+    //     ===>
+    //     (query "A")       // ?A
+    //     (query "B")       // ?B
+    //     (query "A" "B" 1) // ?C
+    //     (query "A" "B" 2) // ?D
+    // The positional arguments in this case contain a list of the named fields
+    // which are used to find the other unnamed fields.
     for (int i = 2; i < call->numActuals(); i++) {
       SymExpr*   actual = toSymExpr(call->get(i));
       VarSymbol* var    = toVarSymbol(actual->symbol());
@@ -1428,7 +1865,7 @@ static Symbol* determineQueriedField(CallExpr* call) {
       }
     }
 
-    forv_Vec(ArgSymbol, arg, args) {
+    forv_Vec(Symbol, arg, args) {
       if (arg != NULL) {
         if (position == 1) {
           retval = at->getField(arg->name, false);
@@ -1451,17 +1888,28 @@ static bool isInstantiatedField(Symbol* field) {
   AggregateType* at     = toAggregateType(ts->type);
   bool           retval = false;
 
-  for_formals(formal, at->typeConstructor) {
-    if (strcmp(field->name, formal->name) == 0) {
-      if (formal->hasFlag(FLAG_TYPE_VARIABLE) == true) {
-        retval = true;
-        break;
-      }
+  // BHARSH INIT TODO: Sometimes the type constructor is not resolved when
+  // initializers are used. Why?
+  if (at->hasInitializers()) {
+    Symbol* origField = at->getRootInstantiation()->getField(field->name);
+    DefExpr* def = origField->defPoint;
+
+    if (field->hasFlag(FLAG_TYPE_VARIABLE)) {
+      retval = true;
+    } else if (def->exprType == NULL && def->init == NULL) {
+      // Fully-generic types are apparently OK?
+      retval = true;
     }
+  } else if (at->symbol->hasFlag(FLAG_TUPLE)) {
+    retval = true;
+  } else {
+    INT_ASSERT(false);
   }
 
   return retval;
 }
+
+static VarSymbol* dummyFcfError = NULL;
 
 /*
   Captures a function as a first-class value by creating an object that will
@@ -1505,6 +1953,18 @@ static Expr* createFunctionAsValue(CallExpr *call) {
 
   resolveSignature(captured_fn);
 
+  for_formals(formal, captured_fn) {
+    if (formal->type->symbol->hasFlag(FLAG_GENERIC)) {
+      USR_FATAL_CONT(call, "'%s' cannot be captured as a value because it is a generic function", captured_fn->name);
+      if (dummyFcfError == NULL) {
+        AggregateType* parent = createAndInsertFunParentClass(call, "_fcf_error");
+        dummyFcfError = newTemp(parent);
+        theProgram->block->body.insertAtTail(new DefExpr(dummyFcfError));
+      }
+      return new SymExpr(dummyFcfError);
+    }
+  }
+
   resolveFnForCall(captured_fn, call);
 
   //
@@ -1522,7 +1982,8 @@ static Expr* createFunctionAsValue(CallExpr *call) {
   AggregateType* parent;
   FnSymbol*      thisParentMethod;
 
-  std::string parent_name = buildParentName(captured_fn->formals, true, captured_fn->retType);
+  std::string parent_name = buildParentName(captured_fn->formals, true,
+      captured_fn->retType, captured_fn->throwsError());
 
   if (functionTypeMap.find(parent_name) != functionTypeMap.end()) {
     std::pair<AggregateType*, FnSymbol*> ctfs = functionTypeMap[parent_name];
@@ -1532,7 +1993,9 @@ static Expr* createFunctionAsValue(CallExpr *call) {
 
   } else {
     parent = createAndInsertFunParentClass(call, parent_name.c_str());
-    thisParentMethod = createAndInsertFunParentMethod(call, parent, captured_fn->formals, true, captured_fn->retType);
+    thisParentMethod = createAndInsertFunParentMethod(call, parent,
+        captured_fn->formals, true, captured_fn->retType,
+        captured_fn->throwsError());
     functionTypeMap[parent_name] = std::pair<AggregateType*, FnSymbol*>(parent, thisParentMethod);
   }
 
@@ -1567,11 +2030,9 @@ static Expr* createFunctionAsValue(CallExpr *call) {
 
   ct->fields.insertAtHead(new DefExpr(super));
 
-  ct->buildConstructors();
+  ct->processGenericFields();
 
-  if (ct->wantsDefaultInitializer()) {
-    ct->buildDefaultInitializer();
-  }
+  ct->buildDefaultInitializer();
 
   buildDefaultDestructor(ct);
 
@@ -1580,6 +2041,7 @@ static Expr* createFunctionAsValue(CallExpr *call) {
 
   thisMethod->addFlag(FLAG_FIRST_CLASS_FUNCTION_INVOCATION);
   thisMethod->addFlag(FLAG_COMPILER_GENERATED);
+  thisMethod->addFlag(FLAG_OVERRIDE);
 
   thisMethod->insertFormalAtTail(new ArgSymbol(INTENT_BLANK,
                                                "_mt",
@@ -1605,10 +2067,6 @@ static Expr* createFunctionAsValue(CallExpr *call) {
 
     DefExpr*   dExp = toDefExpr(formalExpr);
     ArgSymbol* fArg = toArgSymbol(dExp->sym);
-
-    if (fArg->type->symbol->hasFlag(FLAG_GENERIC)) {
-      USR_FATAL_CONT("Generic functions can't be captured as values");
-    }
 
     ArgSymbol* newFormal = new ArgSymbol(INTENT_BLANK, fArg->name, fArg->type);
 
@@ -1645,6 +2103,10 @@ static Expr* createFunctionAsValue(CallExpr *call) {
     thisMethod->insertAtTail(new CallExpr(PRIM_RETURN, tmp));
   }
 
+  if (captured_fn->throwsError()) {
+    thisMethod->throwsErrorInit();
+  }
+
   // (Seen note above)
   if (isBlockStmt(call->parentExpr) == true) {
     call->insertBefore(new DefExpr(thisMethod));
@@ -1661,18 +2123,17 @@ static Expr* createFunctionAsValue(CallExpr *call) {
 
   wrapper->addFlag(FLAG_INLINE);
 
-  if (ct->wantsDefaultInitializer()) {
-    wrapper->insertAtTail(new CallExpr(PRIM_RETURN,
-                                       new CallExpr(PRIM_CAST,
-                                                    parent->symbol,
-                                                    new CallExpr("_new",
-                                                                 new SymExpr(ct->symbol)))));
-  } else {
-    wrapper->insertAtTail(new CallExpr(PRIM_RETURN,
-                                       new CallExpr(PRIM_CAST,
-                                                    parent->symbol,
-                                                    new CallExpr(ct->defaultInitializer))));
-  }
+  Type* undecorated = getDecoratedClass(ct, CLASS_TYPE_GENERIC_NONNIL);
+
+  CallExpr* n = new CallExpr(PRIM_NEW,
+                             new NamedExpr(astr_chpl_manager,
+                                           new SymExpr(dtUnmanaged->symbol)),
+                             new SymExpr(undecorated->symbol));
+
+  wrapper->insertAtTail(new CallExpr(PRIM_RETURN,
+                                     new CallExpr(PRIM_CAST,
+                                                  parent->symbol,
+                                                  n)));
 
   call->getStmtExpr()->insertBefore(new DefExpr(wrapper));
 
@@ -1681,6 +2142,18 @@ static Expr* createFunctionAsValue(CallExpr *call) {
   CallExpr* callWrapper = new CallExpr(wrapper);
 
   functionCaptureMap[captured_fn] = wrapper;
+
+
+  /* make writeThis for FCFs */
+  {
+    ArgSymbol* fileArg = NULL;
+    FnSymbol* fn = buildWriteThisFnSymbol(ct, &fileArg);
+    // when printing out a FCF, print out the function's name
+    fn->insertAtTail(new CallExpr(new CallExpr(".", fileArg,
+                                               new_StringSymbol("writeIt")),
+                                  new_StringSymbol(astr(flname, "()"))));
+    normalize(fn);
+  }
 
   return callWrapper;
 }
@@ -1696,7 +2169,8 @@ static AggregateType* createOrFindFunTypeFromAnnotation(AList&     argList,
   AggregateType* parent      = NULL;
   SymExpr*       retTail     = toSymExpr(argList.tail);
   Type*          retType     = retTail->symbol()->type;
-  std::string    parent_name = buildParentName(argList, false, retType);
+  bool           throws      = false; // TODO: how to distinguish?
+  std::string    parent_name = buildParentName(argList, false, retType, throws);
 
   if (functionTypeMap.find(parent_name) != functionTypeMap.end()) {
     parent = functionTypeMap[parent_name].first;
@@ -1710,7 +2184,8 @@ static AggregateType* createOrFindFunTypeFromAnnotation(AList&     argList,
                                                   parent,
                                                   argList,
                                                   false,
-                                                  retType);
+                                                  retType,
+                                                  throws);
 
     functionTypeMap[parent_name] = std::pair<AggregateType*,
                                              FnSymbol*>(parent, parentMethod);
@@ -1729,25 +2204,30 @@ static Expr* dropUnnecessaryCast(CallExpr* call) {
   if (!call->isCast())
     INT_FATAL("dropUnnecessaryCasts called on non cast call");
 
-  if (SymExpr* sym = toSymExpr(call->castFrom())) {
-    if (LcnSymbol* var = toLcnSymbol(sym->symbol())) {
+  if (SymExpr* fromSe = toSymExpr(call->castFrom())) {
+    if (LcnSymbol* var = toLcnSymbol(fromSe->symbol())) {
       // Casts of type variables are always required
       // eg. foo.type:string
       if (!var->hasFlag(FLAG_TYPE_VARIABLE)) {
-        if (SymExpr* sym = toSymExpr(call->castTo())) {
+        if (SymExpr* toSe = toSymExpr(call->castTo())) {
           Type* oldType = var->type->getValType();
-          Type* newType = sym->symbol()->type->getValType();
+          Type* newType = toSe->symbol()->type->getValType();
 
           if (newType == oldType) {
-            result = new SymExpr(var);
-            call->replace(result);
+            if (isUserDefinedRecord(newType) && !getSymbolImmediate(var)) {
+              result = new CallExpr("_removed_cast", var);
+              call->replace(result);
+            } else {
+              result = new SymExpr(var);
+              call->replace(result);
+            }
           }
         }
       }
-    } else if (EnumSymbol* e = toEnumSymbol(sym->symbol())) {
-      if (SymExpr* sym = toSymExpr(call->castTo())) {
+    } else if (EnumSymbol* e = toEnumSymbol(fromSe->symbol())) {
+      if (SymExpr* toSe = toSymExpr(call->castTo())) {
         EnumType* oldType = toEnumType(e->type);
-        EnumType* newType = toEnumType(sym->symbol()->type);
+        EnumType* newType = toEnumType(toSe->symbol()->type);
         if (newType && oldType == newType) {
           result = new SymExpr(e);
           call->replace(result);
@@ -1758,7 +2238,7 @@ static Expr* dropUnnecessaryCast(CallExpr* call) {
   return result;
 }
 
-static SymExpr* symOrParamExpr(Symbol* arg) {
+SymExpr* createSymExprPropagatingParam(Symbol* arg) {
   Symbol* result = arg;
   if (Symbol* paramVal = paramMap.get(arg))
     result = paramVal;
@@ -1773,8 +2253,6 @@ static bool isNormalField(Symbol* field)
 {
   if( field->hasFlag(FLAG_IMPLICIT_ALIAS_FIELD) ) return false;
   if( field->hasFlag(FLAG_SUPER_CLASS) ) return false;
-  // TODO -- this will break user fields named outer!
-  if( 0 == strcmp("outer", field->name)) return false;
 
   return true;
 }
@@ -1785,7 +2263,8 @@ static bool isNormalField(Symbol* field)
 */
 static std::string buildParentName(AList& arg_list,
                                    bool   isFormal,
-                                   Type*  retType) {
+                                   Type*  retType,
+                                   bool throws) {
   std::ostringstream oss;
   bool               isFirst = true;
 
@@ -1832,6 +2311,9 @@ static std::string buildParentName(AList& arg_list,
     }
   }
 
+  if (throws)
+    oss << "_throws";
+
   return oss.str();
 }
 
@@ -1864,7 +2346,9 @@ static AggregateType* createAndInsertFunParentClass(CallExpr*   call,
 
   parent->fields.insertAtHead(new DefExpr(parentSuper));
 
-  parent->buildConstructors();
+  parent->processGenericFields();
+
+  parent->buildDefaultInitializer();
 
   buildDefaultDestructor(parent);
 
@@ -1890,7 +2374,9 @@ static FnSymbol* createAndInsertFunParentMethod(CallExpr*      call,
                                                 AggregateType* parent,
                                                 AList&         arg_list,
                                                 bool           isFormal,
-                                                Type*          retType) {
+                                                Type*          retType,
+                                                bool           throws) {
+
   // Add a "getter" method that returns the return type of the function
   //
   //   * The return type itself is not actually stored as a member variable
@@ -2022,7 +2508,7 @@ static FnSymbol* createAndInsertFunParentMethod(CallExpr*      call,
       DefExpr* dExp = toDefExpr(formalExpr);
       ArgSymbol* fArg = toArgSymbol(dExp->sym);
 
-      if (fArg->type != dtVoid) {
+      if (fArg->type != dtNothing) {
         ArgSymbol* newFormal = new ArgSymbol(INTENT_BLANK,
                                              fArg->name,
                                              fArg->type);
@@ -2044,7 +2530,7 @@ static FnSymbol* createAndInsertFunParentMethod(CallExpr*      call,
       if (i != (alength-1)) {
         SymExpr* sExpr = toSymExpr(actualExpr);
 
-        if (sExpr->symbol()->type != dtVoid) {
+        if (sExpr->symbol()->type != dtNothing) {
           ArgSymbol* newFormal = new ArgSymbol(INTENT_BLANK,
                                                name_buffer,
                                                sExpr->symbol()->type);
@@ -2063,6 +2549,8 @@ static FnSymbol* createAndInsertFunParentMethod(CallExpr*      call,
     parent_method->insertAtTail(new DefExpr(tmp));
     parent_method->insertAtTail(new CallExpr(PRIM_RETURN, tmp));
   }
+  if (throws)
+    parent_method->throwsErrorInit();
 
   // Because this function type needs to be globally visible
   // (because we don't know the modules it will be passed to), we put

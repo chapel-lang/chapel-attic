@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2018 Cray Inc.
+ * Copyright 2004-2019 Cray Inc.
  * Other additional copyright holders may be indicated within.
  *
  * The entirety of this work is licensed under the Apache License,
@@ -40,6 +40,7 @@ const char*          yyfilename                    = NULL;
 int                  yystartlineno                 = 0;
 
 ModTag               currentModuleType             = MOD_INTERNAL;
+const char*          currentModuleName             = NULL;
 
 int                  chplLineno                    = 0;
 bool                 chplParseString               = false;
@@ -92,8 +93,6 @@ void parse() {
 
   checkConfigs();
 
-  convertForallExpressions();
-
   finishCountingTokens();
 
   parsed = true;
@@ -136,14 +135,19 @@ static Vec<const char*> sModNameList;
 static Vec<const char*> sModDoneSet;
 static Vec<UseStmt*>    sModReqdByInt;
 
+void addInternalModulePath(const ArgumentDescription* desc, const char* newpath) {
+  sIntModPath.add(astr(newpath));
+}
+
+void addStandardModulePath(const ArgumentDescription* desc, const char* newpath) {
+  sStdModPath.add(astr(newpath));
+}
+
 void setupModulePaths() {
   const char* modulesRoot = NULL;
 
   if (fMinimalModules == true) {
     modulesRoot = "modules/minimal";
-
-  } else if (fUseIPE == true) {
-    modulesRoot = "modules/ipe";
 
   } else {
     modulesRoot = "modules";
@@ -187,6 +191,8 @@ void setupModulePaths() {
                       modulesRoot,
                       "/standard/gen/",
                       CHPL_TARGET_PLATFORM,
+                      "-",
+                      CHPL_TARGET_ARCH,
                       "-",
                       CHPL_TARGET_COMPILER));
 
@@ -271,6 +277,9 @@ static void parseInternalModules() {
     baseModule            = parseMod("ChapelBase",           true);
     standardModule        = parseMod("ChapelStandard",       true);
     printModuleInitModule = parseMod("PrintModuleInitOrder", true);
+    if (fLibraryFortran) {
+                            parseMod("ISO_Fortran_binding", true);
+    }
 
     parseDependentModules(true);
 
@@ -307,7 +316,7 @@ static void parseCommandLineFiles() {
   }
 
   while ((inputFileName = nthFilename(fileNum++))) {
-    if (isChplSource(inputFileName) == true) {
+    if (isChplSource(inputFileName)) {
       parseFile(inputFileName, MOD_USER, true);
     }
   }
@@ -425,10 +434,7 @@ static void ensureRequiredStandardModulesAreParsed() {
 
             if (mod == NULL) {
               INT_FATAL("Trying to rename a standard module that's part of\n"
-                        "a file defining multiple\nmodules doesn't work yet;\n"
-                        "see "
-                        "test/modules/bradc/modNamedNewStringBreaks.future "
-                        "for details");
+                        "a file defining multiple\nmodules doesn't work yet");
             }
 
             mod->name      = astr("chpl_", modName);
@@ -499,10 +505,41 @@ static ModuleSymbol* parseMod(const char* modName, bool isInternal) {
 static bool containsOnlyModules(BlockStmt* block, const char* path);
 static void addModuleToDoneList(ModuleSymbol* module);
 
+//
+// This is a check to see whether we've already parsed this file
+// before to avoid re-parsing the same thing twice which can result in
+// defining its modules twice.
+//
+static bool haveAlreadyParsed(const char* path) {
+  static std::set<std::string> parsedPaths;
+
+  // normalize the path if possible via realpath() and use 'path' otherwise
+  const char* normpath = chplRealPath(path);
+  if (normpath == NULL) {
+    normpath = path;
+  }
+
+  // check whether we've seen this path before
+  if (parsedPaths.count(normpath) > 0) {
+    // if so, indicate it
+    return true;
+  } else {
+    // otherwise, add it to our set and list of paths
+    parsedPaths.insert(normpath);
+    return false;
+  }
+}
+
+
 static ModuleSymbol* parseFile(const char* path,
                                ModTag      modTag,
                                bool        namedOnCommandLine) {
   ModuleSymbol* retval = NULL;
+
+  // Make sure we haven't already parsed this file
+  if (haveAlreadyParsed(path)) {
+    return NULL;
+  }
 
   if (FILE* fp = openInputFile(path)) {
     gFilenameLookup.push_back(path);
@@ -518,6 +555,11 @@ static ModuleSymbol* parseFile(const char* path,
 
     currentFileNamedOnCommandLine = namedOnCommandLine;
 
+    // If this file only contains explicit module declarations, this
+    // 'currentModuleName' is not accurate, but also should not be
+    // used (because when the 'module' declarations are found, they
+    // will override it).
+    currentModuleName             = filenameToModulename(path);
     currentModuleType             = modTag;
 
     yyblock                       = NULL;
@@ -793,17 +835,6 @@ BlockStmt* parseString(const char* string,
 *                                                                             *
 ************************************** | *************************************/
 
-// Used by IPE
-const char* pathNameForInternalFile(const char* modName) {
-  return searchThePath(modName, true, sIntModPath);
-}
-
-// Used by IPE: Prefer user file to standard file
-const char* pathNameForStandardFile(const char* modName) {
-  bool isStandard = false;
-
-  return stdModNameToPath(modName, &isStandard);
-}
 
 static const char* stdModNameToPath(const char* modName,
                                     bool*       isStandard) {
@@ -852,9 +883,12 @@ static const char* searchThePath(const char*      modName,
 
       // 4/28/17 internal/ has an ambiguous duplicate for NetworkAtomicTypes
       } else if (isInternal == false) {
-        USR_WARN("Ambiguous module source file -- using %s over %s",
-                 cleanFilename(retval),
-                 cleanFilename(path));
+        // only generate these warnings if the two paths aren't the same
+        if (strcmp(chplRealPath(retval), chplRealPath(path)) != 0) {
+          USR_WARN("Ambiguous module source file -- using %s over %s",
+                   cleanFilename(retval),
+                   cleanFilename(path));
+        }
       }
     }
   }

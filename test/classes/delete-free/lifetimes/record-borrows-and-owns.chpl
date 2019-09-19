@@ -6,98 +6,98 @@ class MyClass {
 }
 
 record R {
-  var borrowed:MyClass;
+  var _borrowed:borrowed MyClass?;
 
   pragma "owned"
-  var owned:MyClass;
+  var myowned:unmanaged MyClass?;
 
   proc readOwned() {
-    return owned;
+    return _to_borrowed(myowned);
   }
 }
 
 proc R.deinit() {
-  delete owned;
+  delete myowned;
 }
 
-proc makeR(borrow:MyClass) {
-  return new R(borrow, new MyClass(10*borrow.x));
+proc makeR(borrow:borrowed MyClass) {
+  return new R(borrow, new unmanaged MyClass(10*borrow.x));
 }
 
-proc makeR2(borrow:MyClass) {
+proc makeR2(borrow:borrowed MyClass) {
   var r:R;
-  r.borrowed = borrow;
-  r.owned = new MyClass(10*borrow.x);
+  r._borrowed = borrow;
+  r.myowned = new unmanaged MyClass(10*borrow.x);
   return r;
 }
 
-proc myfun(ref lhs:R, const ref arg:R) {
+proc badMyFun(ref lhs:R, const ref arg:R) {
   var tmp:R;
   tmp = arg;
-  tmp.owned = nil;
+  tmp.myowned = nil;
   lhs = tmp;
 }
 
-proc badF1(borrow:MyClass) {
-  var r = makeR(borrow);
-  return r.owned;
-  // r.owned destroyed here.
-}
-
-proc badF2(borrow:MyClass) {
+proc badF2(borrow:borrowed MyClass) {
   var r = makeR(borrow);
   return r.readOwned();
-  // r.owned destroyed here.
+  // r.myowned destroyed here.
 }
 
 proc badF3() {
-  var c = new MyClass(1);
+  var own = new owned MyClass(1);
+  var c = own.borrow();
   var r = makeR(c);
   {
-    var r2 = makeR(r.borrowed);
+    var r2 = makeR(r._borrowed!);
     return r2;
   }
 }
 
-config const branch = false;
-proc g() {
-  var a = makeR(nil);
-  if branch then
-    return a;
-  else
-    return makeR(a.owned);
+proc badF4() {
+  var a = new R(nil, new unmanaged MyClass(10));
+  return makeR(a.myowned!);
+  // a's destructor will delete a.myowned
+}
+const badHelp = new MyClass();
+proc badF6() {
+  var a = makeR(badHelp);
+  return makeR(a.readOwned()!);
 }
 
-proc h() {
-  var a = makeR(nil);
+config const branch = false;
+
+proc badF8() {
+  var a = makeR(badHelp);
   if branch then
     return a;
   else
-    return makeR(a.readOwned());
+    return makeR(a.readOwned()!);
 }
 
 
 proc test() {
-  var c = new MyClass(1);
+  var myborrow = new borrowed MyClass(1);
   
-  var v1 = makeR(c);
-  var v2:R;
-  myfun(v2, v1);
+  var a = makeR(myborrow);
+  var b:R;
+  badMyFun(b, a);
   
-  var v3 = badF1(c);
-  var v4 = makeR2(c);
-  var v5 = g();
-  var v6 = h();
-  var v7 = badF2(c);
-  badF3();
+  var c = makeR2(myborrow);
+  var v2 = badF2(myborrow);
+  var v3 = badF3();
+  var v4 = badF4();
+  var v6 = badF6();
+  var v8 = badF8();
 
-  writeln(v1);
+  writeln(a);
+  writeln(b);
+  writeln(c);
   writeln(v2);
   writeln(v3);
   writeln(v4);
-  writeln(v5);
   writeln(v6);
-  writeln(v7);
+  writeln(v8);
 }
 
 test();

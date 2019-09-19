@@ -56,8 +56,8 @@ Timers["total"].start();
 
 timestampMessage("Starting Initialization");
 
-const Pot : BasePotential = if doeam then (new PotentialEAM()):BasePotential
-                            else (new PotentialLJ):BasePotential;
+const Pot: owned BasePotential = if doeam then (new owned PotentialEAM()): owned BasePotential
+                                          else (new owned PotentialLJ()): owned BasePotential;
 
 const Species = new SpeciesData(Pot.name, Pot.atomicNo, Pot.mass);
 
@@ -291,13 +291,13 @@ iter allAtoms() ref {
 }
 
 iter allAtoms(param tag : iterKind) ref where tag == iterKind.leader {
-  for follow in Boxes._value.these(iterKind.leader) {
+  for follow in Boxes.these(iterKind.leader) {
     yield follow;
   }
 }
 
 iter allAtoms(param tag : iterKind, followThis) ref where tag == iterKind.follower {
-  for box in Boxes._value.these(iterKind.follower, followThis) {
+  for box in Boxes.these(iterKind.follower, followThis) {
     for a in box.liveAtoms() do yield a;
   }
 }
@@ -397,9 +397,9 @@ proc sortAtomsInCell() {
 
   // TODO: seems like we need some kind of "fluff and all" iter
   forall box in Boxes {
-    quickSort(box.atoms[1..box.count], comparator=c);
+    sort(box.atoms[1..box.count], comparator=c);
   }
   forall (box, _) in Boxes.boundaries() {
-    quickSort(box.atoms[1..box.count], comparator=c);
+    sort(box.atoms[1..box.count], comparator=c);
   }
 }

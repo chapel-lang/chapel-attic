@@ -3,15 +3,13 @@
 // anything assigned into it.
 class Foo {
   var x;
-  var y;
 
   proc init(xVal = 3) {
     x = xVal;
-    y = xVal + 2;
   }
 }
 
-var foo: Foo(string);
-foo = new Foo("blah");
+var foo: borrowed Foo(string)?;
+foo = new borrowed Foo("blah");
 writeln(foo.type: string);
 writeln(foo);

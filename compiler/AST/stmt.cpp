@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2018 Cray Inc.
+ * Copyright 2004-2019 Cray Inc.
  * Other additional copyright holders may be indicated within.
  *
  * The entirety of this work is licensed under the Apache License,
@@ -70,7 +70,6 @@ BlockStmt::BlockStmt(Expr* initBody, BlockTag initBlockTag) :
   useList       = NULL;
   userLabel     = NULL;
   byrefVars     = NULL;
-  forallIntents = NULL;
   blockInfo     = NULL;
 
   body.parent   = this;
@@ -81,10 +80,19 @@ BlockStmt::BlockStmt(Expr* initBody, BlockTag initBlockTag) :
   gBlockStmts.add(this);
 }
 
+BlockStmt::BlockStmt(BlockTag initBlockTag) :
+  Stmt(E_BlockStmt) {
 
-BlockStmt::~BlockStmt() {
-  if (forallIntents)
-    delete forallIntents;
+
+  blockTag      = initBlockTag;
+  useList       = NULL;
+  userLabel     = NULL;
+  byrefVars     = NULL;
+  blockInfo     = NULL;
+
+  body.parent   = this;
+
+  gBlockStmts.add(this);
 }
 
 void BlockStmt::verify() {
@@ -126,14 +134,6 @@ void BlockStmt::verify() {
     }
   }
 
-  if (forallIntents) {
-    forallIntents->verifyFI(this);
-  }
-
-  if (byrefVars && forallIntents) {
-    INT_FATAL(this,"BlockStmt: byrefVars and forallIntents are both non-NULL");
-  }
-
   verifyNotOnList(useList);
   verifyNotOnList(byrefVars);
   verifyNotOnList(blockInfo);
@@ -148,7 +148,6 @@ BlockStmt::copyInner(SymbolMap* map) {
   _this->blockInfo = COPY_INT(blockInfo);
   _this->useList   = COPY_INT(useList);
   _this->byrefVars = COPY_INT(byrefVars);
-  _this->forallIntents = COPY_INT(forallIntents);
 
   for_alist(expr, body) {
     Expr* copy = COPY_INT(expr);
@@ -163,11 +162,7 @@ BlockStmt::copyInner(SymbolMap* map) {
           // otherwise the EnumType will not have the correct symbol, and the
           // symbol will not be in the tree.
 
-          // Also, NOTE: This does not generate new assignment and enumerate
-          // functions for the enum, as those are already local to the function
-          // being instantiated and so will get copied independently and
-          // updated when we replace the old type reference with the new one.
-          buildFarScopeEnumFunctions(et);
+          buildEnumFunctions(et);
         }
       }
     }
@@ -198,32 +193,12 @@ void BlockStmt::replaceChild(Expr* oldAst, Expr* newAst) {
   else
     handled = false;
 
-  if (!handled &&
-      forallIntents && forallIntents->replaceChildFI(oldAst, newAst))
-    handled = true; // OK
-
   if (!handled)
     INT_FATAL(this, "BlockStmt::replaceChild. Failed to match the oldAst ");
 
   // TODO: Handle the above special cases uniformly by specializing the
   // traversal of the children by block statement type.  I think blockInfo is
   // being deprecated anyway....
-}
-
-void BlockStmt::removeForallIntents() {
-  forallIntents->removeFI(this);
-  forallIntents = NULL;
-}
-
-//
-// Return true when parentExpr is a BlockStmt, except for exprs
-// under BlockStmt::forallIntents.
-//
-bool isDirectlyUnderBlockStmt(const Expr* expr) {
-  if (BlockStmt* parent = toBlockStmt(expr->parentExpr))
-    return !astUnderFI(expr, parent->forallIntents);
-
-  return false;
 }
 
 CallExpr* BlockStmt::blockInfoGet() const {
@@ -476,8 +451,8 @@ BlockStmt::length() const {
 
 
 void
-BlockStmt::useListAdd(ModuleSymbol* mod) {
-  useListAdd(new UseStmt(mod));
+BlockStmt::useListAdd(ModuleSymbol* mod, bool privateUse) {
+  useListAdd(new UseStmt(mod, privateUse));
 }
 
 void
@@ -553,10 +528,6 @@ BlockStmt::accept(AstVisitor* visitor) {
       byrefVars->accept(visitor);
     }
 
-    if (forallIntents) {
-      forallIntents->acceptFI(visitor);
-    }
-
     visitor->exitBlockStmt(this);
   }
 }
@@ -617,6 +588,18 @@ CallExpr* CondStmt::foldConstantCondition() {
         result = new CallExpr(PRIM_NOOP);
 
         insertBefore(result);
+
+        // A squashed IfExpr's result does not need FLAG_IF_EXPR_RESULT, which
+        // is only used when there are multiple paths that could return a
+        // different type.
+        if (CallExpr* call = toCallExpr(thenStmt->body.tail)) {
+          if (call->isPrimitive(PRIM_MOVE)) {
+            Symbol* LHS = toSymExpr(call->get(1))->symbol();
+            if (LHS->hasFlag(FLAG_IF_EXPR_RESULT)) {
+              LHS->removeFlag(FLAG_IF_EXPR_RESULT);
+            }
+          }
+        }
 
         if (var->immediate->bool_value() == gTrue->immediate->bool_value()) {
           Expr* then_stmt = thenStmt;
@@ -750,11 +733,36 @@ Expr* CondStmt::getNextExpr(Expr* expr) {
   return retval;
 }
 
+// If 'expr' is the condExpr in a CondStmt, return that CondStmt.
+// Otherwise, return NULL.
+CondStmt* isConditionalInCondStmt(Expr* expr) {
+  if (CondStmt* parent = toCondStmt(expr->parentExpr))
+    if (expr == parent->condExpr)
+      return parent;
+  return NULL;
+}
+
 /************************************* | **************************************
 *                                                                             *
 *                                                                             *
 *                                                                             *
 ************************************** | *************************************/
+
+const char* gotoTagToString(GotoTag gotoTag) {
+  switch (gotoTag) {
+    case GOTO_NORMAL:         return "normal";
+    case GOTO_BREAK:          return "break";
+    case GOTO_CONTINUE:       return "continue";
+    case GOTO_RETURN:         return "return";
+    case GOTO_GETITER_END:    return "getiter-end";
+    case GOTO_ITER_RESUME:    return "iter-resume";
+    case GOTO_ITER_END:       return "iter-end";
+    case GOTO_ERROR_HANDLING: return "error-handling";
+    case GOTO_BREAK_ERROR_HANDLING: return "break-error-handling";
+  }
+  INT_FATAL("invalid gotoTag %d", (int)gotoTag);
+  return NULL;
+}
 
 GotoStmt::GotoStmt(GotoTag init_gotoTag, const char* init_label) :
   Stmt(E_GotoStmt),
@@ -1038,7 +1046,7 @@ ForwardingStmt::ForwardingStmt(DefExpr* toFnDef, std::set<const char*>* args, bo
     // for instance.
     for (std::map<const char*, const char*>::iterator it = renames->begin();
          it != renames->end(); ++it) {
-      renamed[it->first] = it->second;
+      renamed[it->first] = astr(it->second);
     }
   }
 }

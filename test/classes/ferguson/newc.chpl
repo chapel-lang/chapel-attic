@@ -3,14 +3,11 @@ class C {
 }
 
 proc getC type {
-  return C;
+  return borrowed C;
 }
 
-var x = new C(10);
+var x = new borrowed C(10);
 writeln(x);
 
 var y = new getC(10);
 writeln(y);
-
-delete y;
-delete x;

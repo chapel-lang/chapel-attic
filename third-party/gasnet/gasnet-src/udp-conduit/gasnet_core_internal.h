@@ -46,7 +46,7 @@ extern volatile int gasnetc_AMLockYield;
    is unknown, eg exit-time processing */
 #if GASNET_DEBUG
   /* ignore recursive lock attempts */
-  #define _AMLOCK_CAUTIOUS_HELPER() if (gasnetc_AMlock.owner == GASNETI_THREADIDQUERY()) break
+  #define _AMLOCK_CAUTIOUS_HELPER() if (_gasneti_mutex_heldbyme(&gasnetc_AMlock)) break
 #else
   #define _AMLOCK_CAUTIOUS_HELPER() ((void)0)
 #endif
@@ -56,7 +56,7 @@ extern volatile int gasnetc_AMLockYield;
     for (_i=0; _i < 50; _i++) {                           \
       _AMLOCK_CAUTIOUS_HELPER();                          \
       if (!gasneti_mutex_trylock(&gasnetc_AMlock)) break; \
-      gasneti_sched_yield();                              \
+      else gasneti_sched_yield();                         \
     }                                                     \
     gasnetc_AMLockYield = 0;                              \
 } while (0)
@@ -95,7 +95,7 @@ const char *gasneti_AMErrorName(int errval) {
  * else, set retval to zero
  */
 #define GASNETI_AM_SAFE_NORETURN(retval,fncall) do {                   \
-   gasneti_assert(AM_OK == 0);                                         \
+   gasneti_static_assert(AM_OK == 0);                                  \
    retval = (fncall);                                                  \
    if_pf (retval) {                                                    \
      if (gasneti_VerboseErrors) {                                      \
@@ -110,24 +110,21 @@ const char *gasneti_AMErrorName(int errval) {
  } while (0)
 
 /* ------------------------------------------------------------------------------------ */
-#define GASNETC_HANDLER_BASE  1 /* reserve 1-63 for the core API */
-#define _hidx_gasnetc_auxseg_reqh             (GASNETC_HANDLER_BASE+0)
+#define _hidx_gasnetc_exchg_reqh              (GASNETC_HANDLER_BASE+0)
 /* add new core API handlers here and to the bottom of gasnet_core.c */
 
 /* ------------------------------------------------------------------------------------ */
-#if GASNET_PSHM || defined(GASNETI_BLCR_ENABLED)
-/* Shadow AM table for PSHM and for Checkpoint/Restart */
-#define GASNETC_MAX_NUMHANDLERS 256
-#include <gasnet_handler.h>
-extern gasneti_handler_fn_t gasnetc_handler[GASNETC_MAX_NUMHANDLERS];
-#endif
+/* handler table (temporary global impl) */
+extern gex_AM_Entry_t *gasnetc_handler;
 
 /* ------------------------------------------------------------------------------------ */
-/* AM category (recommended impl if supporting PSHM) */
-typedef enum {
-  gasnetc_Short=0,
-  gasnetc_Medium=1,
-  gasnetc_Long=2
-} gasnetc_category_t;
+/* Configure gasnet_event_internal.h and gasnet_event.c */
+// TODO-EX: prefix needs to move from "extended" to "core"
+
+// (###) Define as needed if iop counters should use something other than weakatomics:
+/* #define gasnete_op_atomic_(_id) gasnetc_atomic_##_id */
+
+// (###) Define if conduit performs local-completion detection:
+/* #define GASNETE_HAVE_LC */
 
 #endif

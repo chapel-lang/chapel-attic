@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2018 Cray Inc.
+ * Copyright 2004-2019 Cray Inc.
  * Other additional copyright holders may be indicated within.
  *
  * The entirety of this work is licensed under the Apache License,
@@ -82,7 +82,7 @@ void addModuleInitBlocks() {
         initBlock->insertAtTail(new CallExpr(parent->initFn));
 
     // Call the initializer for each module I use.
-    forv_Vec(ModuleSymbol, usedMod, mod->modUseList) {
+    for_vector(ModuleSymbol, usedMod, mod->modUseList) {
       if (usedMod != standardModule) {
         initBlock->insertAtTail(new CallExpr(usedMod->initFn));
       }
@@ -212,7 +212,7 @@ static void addPrintModInitOrder(FnSymbol* fn)
   const char* s1 = astr("%*s\\n");
   const char* s2 = astr(fn->getModule()->name);
   int myLen = strlen(s2);
-  char lenStr[5];
+  char lenStr[25];
   sprintf(lenStr, "%d", myLen);
   Expr *es1 = buildCStringLiteral(s1);
   Expr *es2 = buildCStringLiteral(s2);

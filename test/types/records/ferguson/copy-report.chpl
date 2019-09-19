@@ -10,61 +10,35 @@ class Instance {
 
 record R {
   var x: int = 0;
-  var ptr: Instance = nil;
+  var ptr: unmanaged Instance? = nil;
 }
 
-proc R.R(x:int) {
-  this.x = x;
-  this.ptr = new Instance(x);
-}
-
-/*
 proc R.init() {
   this.x = 0;
   this.ptr = nil;
-  super.init();
 }
 
 proc R.init(x:int) {
   this.x = x;
-  this.ptr = new Instance(x);
-  super.init();
+  this.ptr = new unmanaged Instance(x);
 }
 
-proc R.init(from: R) {
+proc R.init=(from: R) {
   this.x = from.x + 1;
-  this.ptr = new Instance(this.x);
-  super.init();
-  writeln("    initCopy"); // ie copy-init
+  this.ptr = new unmanaged Instance(this.x);
+  writeln("    R.init=(R)"); // ie copy-init
 }
-*/
 
 proc R.deinit() {
   delete this.ptr;
   this.ptr = nil;
 }
 
-// I'd like this to be ref, but that breaks
-//    var outerX: R; begin { var x = outerX; }
-pragma "init copy fn"
-proc chpl__initCopy(arg: R) {
-  // TODO - is no auto destroy necessary here?
-  pragma "no auto destroy"
-  var ret: R;
-
-  ret.x = arg.x + 1;
-  ret.ptr = new Instance(ret.x);
-
-  writeln("    initCopy");
-
-  return ret;
-}
-
 proc =(ref lhs: R, rhs: R) {
   writeln("    assign");
   lhs.x = rhs.x;
   delete lhs.ptr;
-  lhs.ptr = new Instance(rhs.x);
+  lhs.ptr = new unmanaged Instance(rhs.x);
 }
 
 
@@ -260,8 +234,8 @@ proc varInitArgInout(inout arg)
   writeln("   typed variable");
   var v2:R = arg;
   check(v2);
+  writeln("   function epilogue");
 }
-
 
 
 

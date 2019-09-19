@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2018 Cray Inc.
+ * Copyright 2004-2019 Cray Inc.
  * Other additional copyright holders may be indicated within.
  *
  * The entirety of this work is licensed under the Apache License,
@@ -20,6 +20,7 @@
 #ifndef _AGGREGATE_TYPE_H_
 #define _AGGREGATE_TYPE_H_
 
+#include "DecoratedClasses.h"
 #include "type.h"
 
 /************************************* | **************************************
@@ -34,13 +35,11 @@ enum AggregateTag {
   AGGREGATE_UNION
 };
 
-
-enum InitializerStyle {
-  DEFINES_CONSTRUCTOR,
-  DEFINES_INITIALIZER,
-  DEFINES_NONE_USE_DEFAULT
+enum AggregateResolved {
+  UNRESOLVED,
+  RESOLVING,
+  RESOLVED
 };
-
 
 class AggregateType : public Type {
 public:
@@ -64,8 +63,23 @@ public:
   bool                        isRecord()                                 const;
   bool                        isUnion()                                  const;
 
+  // is it a generic type (e.g. contains a type field with or without default)
+  // e.g. this would return true for
+  //    class C { type t = int; }
+  //    class C { type t; }
+  //    class C { param p; }
+  //    class C { var x; }
   bool                        isGeneric()                                const;
   void                        markAsGeneric();
+
+  // is it a generic type with defaults for all type/param fields?
+  // these don't behave the same as fully generic types.
+  // For example, returns true for
+  //    class C { type t = int; }
+  // and false for
+  //    class C { type t; }
+  bool                        isGenericWithDefaults()                    const;
+  void                        markAsGenericWithDefaults();
 
   const char*                 classStructName(bool standalone);
 
@@ -86,6 +100,7 @@ public:
 
   bool                        hasInitializers()                          const;
   bool                        hasPostInitializer()                       const;
+  bool                        hasUserDefinedInitEquals()                 const;
 
   bool                        mayHaveInstances()                         const;
 
@@ -95,20 +110,15 @@ public:
 
   GenRet                      codegenClassStructType();
 
-  int                         codegenStructure(FILE*       outfile,
-                                               const char* baseoffset);
-
-  int                         codegenFieldStructure(FILE*       outfile,
-                                                    bool        nested,
-                                                    const char* baseOffset);
-
   bool                        setFirstGenericField();
 
-  AggregateType*              getInstantiation(Symbol* sym, int index);
+  AggregateType*              getInstantiation(Symbol* sym, int index, Expr* insnPoint = NULL);
 
   AggregateType*              getInstantiationParent(AggregateType* pt);
 
-  AggregateType*              generateType(SymbolMap& subs);
+  AggregateType*              generateType(CallExpr* call, const char* callString);
+  AggregateType*              generateType(SymbolMap& subs, CallExpr* call, const char* callString, bool evalDefaults, Expr* insnPoint = NULL);
+  void                        resolveConcreteType();
 
   bool                        isInstantiatedFrom(const AggregateType* base)
                                                                          const;
@@ -119,20 +129,18 @@ public:
   DefExpr*                    toLocalField(SymExpr*    expr)             const;
   DefExpr*                    toLocalField(CallExpr*   expr)             const;
 
-  DefExpr*                    toSuperField(SymExpr*  expr);
-  DefExpr*                    toSuperField(CallExpr* expr);
+  DefExpr*                    toSuperField(const char* name)             const;
+  DefExpr*                    toSuperField(SymExpr*  expr)               const;
+  DefExpr*                    toSuperField(CallExpr* expr)               const;
 
-  int                         getMemberGEP(const char* name);
+  int                         getMemberGEP(const char* name,
+                                           bool& isCArrayField);
 
-  void                        createOuterWhenRelevant();
-
-  void                        buildConstructors();
+  void                        processGenericFields();
 
   void                        addRootType();
 
   void                        addClassToHierarchy();
-
-  bool                        parentDefinesInitializer()                 const;
 
   bool                        wantsDefaultInitializer()                  const;
 
@@ -142,6 +150,16 @@ public:
 
   Symbol*                     getSubstitution(const char* name);
 
+  Type*                       getDecoratedClass(ClassTypeDecorator d);
+
+  // Returns true if a field is considered generic
+  // (i.e. it needs a type constructor argument)
+  bool                        fieldIsGeneric(Symbol* field,
+                                             bool &hasDefault);
+
+
+  Type*                       cArrayElementType()                        const;
+  int64_t                     cArrayLength()                             const;
 
   //
   // Public fields
@@ -149,13 +167,16 @@ public:
 
   AggregateTag                aggregateTag;
 
-  FnSymbol*                   typeConstructor;
+  // These fields support differentiating between unmanaged class
+  // pointers and borrows. At the present time, borrows are represented
+  // by plain AggregateType and unmanaged class pointers use this special type.
+  DecoratedClassType*         decoratedClasses[NUM_PACKED_DECORATED_TYPES];
 
-  FnSymbol*                   defaultInitializer;
+  bool                        builtDefaultInit;
 
   AggregateType*              instantiatedFrom;
 
-  InitializerStyle            initializerStyle;
+  bool                        hasUserDefinedInit;
 
   bool                        initializerResolved;
 
@@ -163,9 +184,6 @@ public:
 
   // used from parsing, sets dispatchParents
   AList                       inherits;
-
-  // pointer to an outer class if this is an inner class
-  Symbol*                     outer;
 
   // Attached only to iterator class/records
   IteratorInfo*               iteratorInfo;
@@ -182,58 +200,54 @@ public:
   Vec<AggregateType*>         dispatchParents;    // dispatch hierarchy
   Vec<AggregateType*>         dispatchChildren;   // dispatch hierarchy
 
+  // Used to prevent recursive or repeated resolution of this type.
+  AggregateResolved           resolveStatus;
+
+  // String representation of the 'type constructor' for use in error messages
+  const char*                 typeSignature;
+  // Indicates whether we have already tried to look for generic fields.
+  bool                        foundGenericFields;
+  // A list of the generic fields in this type.
+  std::vector<Symbol*>        genericFields;
+
 private:
+
+  // Only used for LLVM.
+  std::map<std::string, bool> isCArrayFieldMap;
+
   static ArgSymbol*           createGenericArg(VarSymbol* field);
 
-  static void                 insertImplicitThis(FnSymbol*         fn,
-                                                 Vec<const char*>& names);
+  void                        insertImplicitThis(FnSymbol*         fn,
+                                                 Vec<const char*>& names) const;
 
 private:
   virtual std::string         docsDirective();
 
   std::string                 docsSuperClass();
 
-  bool                        fieldIsGeneric(Symbol* field)              const;
-
   void                        addDeclaration(DefExpr* defExpr);
 
   void                        addClassToHierarchy(
                                           std::set<AggregateType*>& seen);
 
-  AggregateType*              instantiationWithParent(AggregateType* parent);
+  void                        renameInstantiation();
+
+  AggregateType*              instantiationWithParent(AggregateType* parent, Expr* insnPoint = NULL);
 
   Symbol*                     substitutionForField(Symbol*    field,
                                                    SymbolMap& subs)      const;
 
-  AggregateType*              getCurInstantiation(Symbol* sym);
+  AggregateType*              getCurInstantiation(Symbol* sym, Type* symType);
 
-  AggregateType*              getNewInstantiation(Symbol* sym);
+  AggregateType*              getNewInstantiation(Symbol* sym, Type* symType, Expr* insnPoint = NULL);
 
   AggregateType*              discoverParentAndCheck(Expr* storesName);
 
-  FnSymbol*                   buildTypeConstructor();
-
-  CallExpr*                   typeConstrSuperCall(FnSymbol* fn)          const;
-
   bool                        isFieldInThisClass(const char* name)       const;
-
-  void                        typeConstrSetFields(FnSymbol* fn,
-                                                  CallExpr* superCall)   const;
 
   bool                        setNextGenericField();
 
-  void                        typeConstrSetField(FnSymbol*  fn,
-                                                 VarSymbol* field,
-                                                 Expr*      expr)        const;
-
-  ArgSymbol*                  insertGenericArg(FnSymbol*  fn,
-                                               VarSymbol* field)         const;
-
-  void                        buildConstructor();
-
-  bool                        needsConstructor();
-
-  ArgSymbol*                  moveConstructorToOuter(FnSymbol* fn);
+private:
 
   void                        fieldToArg(FnSymbol*              fn,
                                          std::set<const char*>& names,
@@ -243,7 +257,8 @@ private:
                                              ArgSymbol* arg);
 
   bool                        addSuperArgs(FnSymbol*                    fn,
-                                           const std::set<const char*>& names);
+                                           const std::set<const char*>& names,
+                                           SymbolMap&                   fieldArgMap);
 
   std::vector<AggregateType*> instantiations;
 
@@ -257,11 +272,14 @@ private:
   int                         genericField;
 
   bool                        mIsGeneric;
+  bool                        mIsGenericWithDefaults;
 };
 
 extern AggregateType* dtObject;
 
+extern AggregateType* dtBytes;
 extern AggregateType* dtString;
+extern AggregateType* dtLocale;
 
 DefExpr* defineObjectClass();
 

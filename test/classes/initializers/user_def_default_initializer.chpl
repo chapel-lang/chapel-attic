@@ -1,5 +1,3 @@
-// Modified from
-// test/classes/dinan/user_def_default_constructor.chpl
 class C {
   var x: int;
 
@@ -8,7 +6,7 @@ class C {
   }
 }
 
-var c = new C();
+var c = new unmanaged C();
 
 writeln(c.x);
 

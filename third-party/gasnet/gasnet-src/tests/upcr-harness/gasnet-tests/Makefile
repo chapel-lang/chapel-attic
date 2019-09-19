@@ -1,14 +1,13 @@
 all: 
 	@echo This Makefile is not intended to be called directly.
 	@echo It is used for running unit tests within the automated testing harness provided with the Berkeley UPC runtime.
-	@echo For information on downloading and using Berkeley UPC, see: http://upc.lbl.gov
+	@echo For information on downloading and using Berkeley UPC, see: https://upc.lbl.gov
 	@exit 1
 
 PERL ?= perl
 CONDUIT_DIR=$(TOP_BUILDDIR)/gasnet/$(NETWORK)-conduit
-STRICT_PROTO_FLAGS=`echo $$BUPC_STRICT_PROTO_FLAGS | $(PERL) -pe 's/-Wc,//'`
 
-testcxx%: force
+testcxx% testlegacycxx%: force
 	@if test -n "`$(UPCC) --network=udp --echo-var UPCR_LD 2>/dev/null`"; then \
 	  makename=`echo $@ | $(PERL) -pe 's/_.*-(seq|par|parsync)$$/-$$1/'`; \
 	   cmdname=`echo $@ | $(PERL) -pe 's/(_.*)?-(seq|par|parsync)$$//'`; \
@@ -25,7 +24,7 @@ test%: force
 	@makename=`echo $@ | $(PERL) -pe 's/_.*-(seq|par|parsync)$$/-$$1/'`; \
 	 cmdname=`echo $@ | $(PERL) -pe 's/(_.*)?-(seq|par|parsync)$$//'`; \
 	 echo "$$makename => $$cmdname => $@" ; set -x ; \
-         $(MAKE) -C $(CONDUIT_DIR) $$makename MANUAL_CFLAGS="$(STRICT_PROTO_FLAGS) $(MANUAL_CFLAGS)" && \
+         $(MAKE) -C $(CONDUIT_DIR) $$makename MANUAL_CFLAGS="$(MANUAL_CFLAGS)" && \
          cp -f $(CONDUIT_DIR)/$$cmdname$(EXESUFFIX) $@$(EXESUFFIX)
 
 testconduitspecific: force
@@ -41,7 +40,7 @@ testconduitspecific: force
            conduit_test=testam ;		\
            conduit_mode=parsync ;		\
          fi ;					\
-         $(MAKE) -C $(CONDUIT_DIR) $$conduit_test-$$conduit_mode MANUAL_CFLAGS="$(STRICT_PROTO_FLAGS) $(MANUAL_CFLAGS)" && \
+         $(MAKE) -C $(CONDUIT_DIR) $$conduit_test-$$conduit_mode MANUAL_CFLAGS="$(MANUAL_CFLAGS)" && \
 	 cp -f $(CONDUIT_DIR)/$$conduit_test$(EXESUFFIX) $@$(EXESUFFIX)
 
 parsync: force

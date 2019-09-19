@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2018 Cray Inc.
+ * Copyright 2004-2019 Cray Inc.
  * Other additional copyright holders may be indicated within.
  *
  * The entirety of this work is licensed under the Apache License,
@@ -31,6 +31,7 @@
 
 
 static void checkNamedArguments(CallExpr* call);
+static void checkManagedClassKinds(CallExpr* call);
 static void checkExplicitDeinitCalls(CallExpr* call);
 static void checkPrivateDecls(DefExpr* def);
 static void checkParsedVar(VarSymbol* var);
@@ -59,6 +60,7 @@ checkParsed() {
   setupForCheckExplicitDeinitCalls();
 
   forv_Vec(CallExpr, call, gCallExprs) {
+    checkManagedClassKinds(call);
     checkNamedArguments(call);
     checkExplicitDeinitCalls(call);
   }
@@ -141,6 +143,39 @@ checkNamedArguments(CallExpr* call) {
   }
 }
 
+static const char* getClassKindSpecifier(CallExpr* call) {
+  if (call->isPrimitive(PRIM_TO_UNMANAGED_CLASS) ||
+      call->isPrimitive(PRIM_TO_UNMANAGED_CLASS_CHECKED) ||
+      call->isNamed("_to_unmanaged"))
+    return "unmanaged";
+  if (call->isPrimitive(PRIM_TO_BORROWED_CLASS) ||
+      call->isPrimitive(PRIM_TO_BORROWED_CLASS_CHECKED) ||
+      call->isNamed("_to_borrowed"))
+    return "borrowed";
+  if (call->isNamed("_owned"))
+    return "owned";
+  if (call->isNamed("_shared"))
+    return "shared";
+
+  return NULL;
+}
+
+static void checkManagedClassKinds(CallExpr* call) {
+  const char* outer = getClassKindSpecifier(call);
+
+  if (outer != NULL) {
+    CallExpr* innerCall = toCallExpr(call->get(1));
+    if (innerCall) {
+      const char* inner = getClassKindSpecifier(innerCall);
+      if (inner != NULL) {
+        USR_FATAL_CONT(call,
+                       "Type expression uses multiple class kinds: %s %s",
+                       outer, inner);
+      }
+    }
+  }
+}
+
 static VarSymbol*  deinitStrLiteral;
 
 static void setupForCheckExplicitDeinitCalls() {
@@ -175,6 +210,11 @@ static void checkPrivateDecls(DefExpr* def) {
   if (def->sym->hasFlag(FLAG_PRIVATE) == true) {
     // The symbol has been declared private.
     if (def->inTree()) {
+
+      if (isTypeSymbol(def->sym) || def->sym->hasFlag(FLAG_TYPE_VARIABLE)) {
+        USR_FATAL_CONT(def, "Can't apply private to types yet");
+      }
+
       if (isFnSymbol(def->parentSymbol) == true) {
         // The parent symbol of this definition is a FnSymbol.
         // Private symbols at the function scope are meaningless
@@ -261,15 +301,34 @@ checkParsedVar(VarSymbol* var) {
     USR_FATAL_CONT(var->defPoint,
                    "Configuration %s are allowed only at module scope.", varType);
   }
+
+  // Export vars are not yet supported
+  if (var->hasFlag(FLAG_EXPORT))
+    USR_FATAL_CONT(var->defPoint, "Export variables are not yet supported");
 }
 
 
 static void
 checkFunction(FnSymbol* fn) {
-  // Ensure that the lhs of "=" and "<op>=" is passed by ref.
-  if (fn->hasFlag(FLAG_ASSIGNOP))
-    if (fn->getFormal(1)->intent != INTENT_REF)
-      USR_WARN(fn, "The left operand of '=' and '<op>=' should have 'ref' intent.");
+
+  // Chapel doesn't really support procedures with no-op bodies (a
+  // semicolon only).  Doing so is likely to cause confusion for C
+  // programmers who will think of it as a prototype, but we don't
+  // support prototypes, so require such programmers to type the
+  // empty body instead.  This is consistent with the current draft
+  // of the spec as well.
+  if (fn->hasFlag(FLAG_NO_FN_BODY) && !fn->hasFlag(FLAG_EXTERN))
+    USR_FATAL_CONT(fn, "no-op procedures are only legal for extern functions");
+
+  if (fn->hasFlag(FLAG_EXTERN) && !fn->hasFlag(FLAG_NO_FN_BODY))
+    USR_FATAL_CONT(fn, "Extern functions cannot have a body");
+
+  if (fn->hasFlag(FLAG_EXTERN) && fn->throwsError())
+    USR_FATAL_CONT(fn, "Extern functions cannot throw errors.");
+
+  if (fn->hasFlag(FLAG_EXPORT) && fn->where != NULL)
+    USR_FATAL_CONT(fn, "Exported functions cannot have where clauses.");
+
 
   if ((fn->name == astrThis) && fn->hasFlag(FLAG_NO_PARENS))
     USR_FATAL_CONT(fn, "method 'this' must have parentheses");
@@ -325,7 +384,7 @@ checkFunction(FnSymbol* fn) {
 
   if (numVoidReturns != 0 && numNonVoidReturns != 0)
     USR_FATAL_CONT(fn, "Not all returns in this function return a value");
-  if (!isIterator &&
+  if (!isIterator && !fn->hasFlag(FLAG_NO_FN_BODY) &&
       fn->returnsRefOrConstRef() &&
       numNonVoidReturns == 0) {
     USR_FATAL_CONT(fn, "function declared 'ref' but does not return anything");

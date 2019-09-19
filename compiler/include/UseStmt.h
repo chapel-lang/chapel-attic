@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2018 Cray Inc.
+ * Copyright 2004-2019 Cray Inc.
  * Other additional copyright holders may be indicated within.
  *
  * The entirety of this work is licensed under the Apache License,
@@ -26,12 +26,13 @@ class ResolveScope;
 
 class UseStmt : public Stmt {
 public:
-                  UseStmt(BaseAST* source);
+  UseStmt(BaseAST* source, bool isPrivate);
 
                   UseStmt(BaseAST*                            source,
                           std::vector<const char*>*           args,
                           bool                                exclude,
-                          std::map<const char*, const char*>* renames);
+                          std::map<const char*, const char*>* renames,
+                          bool isPrivate);
 
   DECLARE_COPY(UseStmt);
 
@@ -59,11 +60,15 @@ public:
 
   UseStmt*        applyOuterUse(const UseStmt* outer);
 
-  bool            skipSymbolSearch(const char* name)                     const;
+  bool            skipSymbolSearch(const char* name, bool methodCall)    const;
 
   bool            providesNewSymbols(const UseStmt* other)               const;
 
+  bool            isVisible(BaseAST* scope)                              const;
+
   BaseAST*        getSearchScope()                                       const;
+
+  ModuleSymbol*   checkIfModuleNameMatches(const char* name);
 
   void            writeListPredicate(FILE* mFP)                          const;
 
@@ -81,11 +86,10 @@ private:
 
   void            validateRenamed();
 
-  void            createRelatedNames(Symbol* maybeType);
+  void            trackMethods();
+  bool            isAllowedMethodName(const char* name, bool methodCall) const;
 
   bool            matchedNameOrConstructor(const char* name)             const;
-
-  bool            inRelatedNames(const char* name)                       const;
 
   void            noRepeats()                                            const;
 
@@ -93,10 +97,12 @@ public:
   Expr*                              src;
   std::vector<const char*>           named;
   std::map<const char*, const char*> renamed;
+  bool isPrivate;
 
 private:
   bool                               except;
-  std::vector<const char*>           relatedNames;
+  std::vector<const char*>           methodsAndFields;
+  std::vector<const char*>           functionsToAlwaysCheck;
 };
 
 #endif

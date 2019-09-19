@@ -1,4 +1,4 @@
-use CommDiagnostics;
+use CommDiagnostics, Map;
 
 config const n = 10;
 
@@ -7,7 +7,7 @@ class Helper {
 }
 
 record Foo {
-  var h : Helper;
+  var h : unmanaged Helper?;
   inline proc ranges {
     return h.x;
   }
@@ -18,7 +18,7 @@ record Foo {
 
   proc type chpl__deserialize(data) {
     var f : Foo;
-    f.h = new Helper(data);
+    f.h = new unmanaged Helper(data);
     return f;
   }
 
@@ -27,8 +27,7 @@ record Foo {
   }
 }
 
-var commStatsDom : domain(string);
-var commStats : [commStatsDom] [LocaleSpace] commDiagnostics;
+var commStats = new map(string, [LocaleSpace] commDiagnostics);
 
 proc start() {
   startCommDiagnostics();
@@ -43,7 +42,7 @@ proc stop(msg : string) {
 
 proc main() {
   const R = (1..n-1, 1..n, 1..n+1);
-  const f = new Foo(new Helper(R));
+  const f = new Foo(new unmanaged Helper(R));
 
   start();
   on Locales[numLocales-1] {
@@ -68,7 +67,7 @@ proc main() {
   }
   stop("begin-on");
 
-  for (msg, dat) in zip(commStatsDom, commStats) {
+  for (msg, dat) in commStats.items() {
     const sep = "===== " + msg + " =====";
     writeln(sep);
     for (loc, dat) in zip(Locales, dat) {

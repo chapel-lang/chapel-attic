@@ -11,24 +11,24 @@ class C {
 }
 
 class D : C {
-  var DsC: C;
-  var y: int = DsC.baz();
+  var DsC: unmanaged C?;
+  var y: int = DsC!.baz();
 
-  proc foo() {
+  override proc foo() {
     writeln("In D.foo(), y is ", y);
   }
 
-  proc baz(): int {
+  override proc baz(): int {
     return y;
   }
 
   proc buildNew() {
-    return new D();
+    return new unmanaged D();
   }
 }
 
-var myC = new C();
-var myD = new D(DsC=myC);
+var myC = new unmanaged C();
+var myD = new unmanaged D(DsC=myC);
 
 writeln("myC = ", myC);
 writeln("myD = ", myD);

@@ -11,19 +11,19 @@ class A {
 }
 
 class B: A {
-  proc foo(x) {
+  override proc foo(x) {
     super.foo(x);
     writeln("in B.foo() with arg ", x);
   }
 
-  proc bar(x: int) {
+  override proc bar(x: int) {
     super.bar(x);
     writeln("in B.bar() with arg ", x);
   }
 }
 
-var a = new A();
-var b = new B();
+var a = new unmanaged A();
+var b = new unmanaged B();
 
 a.foo(3);
 b.foo(2);

@@ -3,12 +3,12 @@ module bar {
     var x = [1];
 
     proc init(y) where y.type != BadBaz {
-      this.initDone();
+      this.complete();
       x[1] = y;
     }
 
-    proc init(other: BadBaz) {
-      this.initDone();
+    proc init=(other: BadBaz) {
+      this.complete();
       x[1] = other.x[1];
     }
   }

@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2018 Cray Inc.
+ * Copyright 2004-2019 Cray Inc.
  * Other additional copyright holders may be indicated within.
  *
  * The entirety of this work is licensed under the Apache License,
@@ -28,19 +28,7 @@
 */
 module DynamicIters {
 
-/*
-   An atomic test-and-set lock.
-*/
-pragma "no doc"
-record vlock {
-  var l: atomic bool;
-  proc lock() {
-    on this do while l.testAndSet() != false do chpl_task_yield();
-  }
-  proc unlock() {
-    l.write(false);
-  }
-}
+  private use ChapelLocks;
 
 /*
    Toggle debugging output.
@@ -105,7 +93,6 @@ where tag == iterKind.leader
   const remain:rType=densify(c,c);
 
   // If the number of tasks is insufficient, yield in serial
-  if c.length == 0 then halt("The range is empty");
   if nTasks == 1 then {
     if debugDynamicIters then
       writeln("Dynamic Iterator: serial execution because there is not enough work");
@@ -236,7 +223,7 @@ iter dynamic(param tag:iterKind, c:domain, chunkSize:int=1, numTasks:int, parDim
 where tag == iterKind.follower
 {
   //Invoke the default rectangular domain follower iterator
-  for i in c._value.these(tag=iterKind.follower, followThis=followThis) do
+  for i in c.these(tag=iterKind.follower, followThis=followThis) do
     yield i;
 }
 
@@ -281,7 +268,6 @@ where tag == iterKind.leader
   type rType=c.type;
   var remain:rType = densify(c,c);
   // If the number of tasks is insufficient, yield in serial
-  if c.length == 0 then halt("The range is empty");
   if nTasks == 1 then {
     if debugDynamicIters then
       writeln("Guided Iterator: serial execution because there is not enough work");
@@ -289,12 +275,11 @@ where tag == iterKind.leader
   }
 
   else {
-    var undone : atomic bool;
-    undone.write(true);
+    var undone: atomic bool = true;
     const factor=nTasks;
-    var lock : vlock;
+    var lock: chpl_LocalSpinlock;
 
-    coforall tid in 0..#nTasks with (ref remain, ref undone, ref lock) do {
+    coforall tid in 0..#nTasks with (ref remain) do {
       while undone.read() do {
         // There is local work in remain(tid)
         const current:rType=adaptSplit(remain, factor, undone, lock);
@@ -401,7 +386,7 @@ iter guided(param tag:iterKind, c:domain, numTasks:int, parDim:int, followThis)
 where tag == iterKind.follower
 {
   // Invoke the default rectangular domain follower iterator.
-  for i in c._value.these(tag=iterKind.follower, followThis=followThis) do {
+  for i in c.these(tag=iterKind.follower, followThis=followThis) do {
     yield i;
   }
 }
@@ -487,7 +472,6 @@ where tag == iterKind.leader
   type rType=c.type;
 
   // If the number of tasks is insufficient, yield in serial
-  if c.length == 0 then halt("The range is empty");
   if nTasks == 1 then {
     if debugDynamicIters then
       writeln("Adaptive work-stealing Iterator: serial execution because there is not enough work");
@@ -499,7 +483,7 @@ where tag == iterKind.leader
     const SpaceThreads:domain(1)=0..#nTasks;
     var localWork:[SpaceThreads] rType; // The remaining range to split on each Thread
     var moreLocalWork:[SpaceThreads] bool=true; // bool var to signal there is still work on each local range
-    var locks:[SpaceThreads] vlock; // sync var to control the splitting on each Thread
+    var locks: [SpaceThreads] chpl_LocalSpinlock;
     const factor:int=2;
 
     const factorSteal:int=2;
@@ -693,7 +677,7 @@ iter adaptive(param tag:iterKind, c:domain, numTasks:int, parDim:int, followThis
 where tag == iterKind.follower
 {
   // Invoke the default rectangular domain follower iterator.
-  for i in c._value.these(tag=iterKind.follower, followThis=followThis) do {
+  for i in c.these(tag=iterKind.follower, followThis=followThis) do {
     yield i;
   }
 }
@@ -701,17 +685,20 @@ where tag == iterKind.follower
 //************************* Helper functions
 private proc defaultNumTasks(nTasks:int)
 {
-  var dnTasks=nTasks;
-  if nTasks==0 then {
-    if dataParTasksPerLocale==0 then dnTasks=here.maxTaskPar;
-      else dnTasks=dataParTasksPerLocale;
-  } else if nTasks<0 then {
-    halt("'numTasks' is negative");
+  var dnTasks = nTasks;
+  if nTasks <= 0  {
+    if dataParTasksPerLocale == 0 then
+      dnTasks = here.maxTaskPar;
+    else
+      dnTasks = dataParTasksPerLocale;
+
+    if nTasks < 0 then
+      warning("'numTasks' < 0, defaulting to numTasks=", dnTasks);
   }
   return dnTasks;
 }
 
-private proc adaptSplit(ref rangeToSplit:range(?), splitFactor:int, ref itLeft, ref lock : vlock, splitTail:bool=false)
+private proc adaptSplit(ref rangeToSplit:range(?), splitFactor:int, ref itLeft, lock:chpl_LocalSpinlock, splitTail:bool=false)
 {
   type rType=rangeToSplit.type;
   type lenType=rangeToSplit.length.type;

@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2018 Cray Inc.
+ * Copyright 2004-2019 Cray Inc.
  * Other additional copyright holders may be indicated within.
  *
  * The entirety of this work is licensed under the Apache License,
@@ -43,10 +43,12 @@
 
 #include "ResolveScope.h"
 
+#include "DecoratedClassType.h"
+#include "ForallStmt.h"
+#include "LoopExpr.h"
 #include "scopeResolve.h"
-#include "stmt.h"
-#include "symbol.h"
-#include "type.h"
+
+ResolveScope* rootScope;
 
 static std::map<BaseAST*, ResolveScope*> sScopeMap;
 
@@ -77,6 +79,12 @@ ResolveScope* ResolveScope::findOrCreateScopeFor(DefExpr* def) {
 
     } else if (TypeSymbol* typeSymbol = toTypeSymbol(ast)) {
       retval = new ResolveScope(typeSymbol, NULL);
+
+    } else if (LoopExpr* fe = toLoopExpr(ast)) {
+      retval = new ResolveScope(fe, NULL);
+
+    } else if (ForallStmt* fs = toForallStmt(ast)) {
+      retval = new ResolveScope(fs, NULL);
 
     } else {
       INT_ASSERT(false);
@@ -122,43 +130,18 @@ ResolveScope::ResolveScope(ModuleSymbol*       modSymbol,
   mAstRef = modSymbol;
   mParent = parent;
 
+  // Use modSymbol->block for sScopeMap
   INT_ASSERT(getScopeFor(modSymbol->block) == NULL);
-
   sScopeMap[modSymbol->block] = this;
 }
 
-ResolveScope::ResolveScope(FnSymbol*           fnSymbol,
+ResolveScope::ResolveScope(BaseAST*            ast,
                            const ResolveScope* parent) {
-  mAstRef = fnSymbol;
+  mAstRef = ast;
   mParent = parent;
 
-  INT_ASSERT(getScopeFor(fnSymbol) == NULL);
-
-  sScopeMap[fnSymbol] = this;
-}
-
-ResolveScope::ResolveScope(TypeSymbol*         typeSymbol,
-                           const ResolveScope* parent) {
-  Type* type = typeSymbol->type;
-
-  INT_ASSERT(isEnumType(type) || isAggregateType(type));
-
-  mAstRef = typeSymbol;
-  mParent = parent;
-
-  INT_ASSERT(getScopeFor(typeSymbol) == NULL);
-
-  sScopeMap[typeSymbol] = this;
-}
-
-ResolveScope::ResolveScope(BlockStmt*          blockStmt,
-                           const ResolveScope* parent) {
-  mAstRef = blockStmt;
-  mParent = parent;
-
-  INT_ASSERT(getScopeFor(blockStmt) == NULL);
-
-  sScopeMap[blockStmt] = this;
+  INT_ASSERT(getScopeFor(ast) == NULL);
+  sScopeMap[ast] = this;
 }
 
 /************************************* | **************************************
@@ -184,13 +167,12 @@ ResolveScope::ResolveScope(BlockStmt*          blockStmt,
 ************************************** | *************************************/
 
 void ResolveScope::addBuiltIns() {
+  extend(dtNothing->symbol);
   extend(dtVoid->symbol);
   extend(dtStringC->symbol);
 
   extend(gFalse);
   extend(gTrue);
-
-  extend(gTryToken);
 
   extend(dtNil->symbol);
   extend(gNil);
@@ -198,13 +180,13 @@ void ResolveScope::addBuiltIns() {
   extend(gNoInit);
 
   extend(dtUnknown->symbol);
-  extend(dtValue->symbol);
+  extend(dtAnyRecord->symbol);
 
   extend(gUnknown);
+  extend(gNone);
   extend(gVoid);
 
   extend(dtBools[BOOL_SIZE_SYS]->symbol);
-  extend(dtBools[BOOL_SIZE_1]->symbol);
   extend(dtBools[BOOL_SIZE_8]->symbol);
   extend(dtBools[BOOL_SIZE_16]->symbol);
   extend(dtBools[BOOL_SIZE_32]->symbol);
@@ -231,11 +213,8 @@ void ResolveScope::addBuiltIns() {
 
   extend(dtCVoidPtr->symbol);
   extend(dtCFnPtr->symbol);
-  extend(gCVoidPtr);
-  extend(dtSymbol->symbol);
 
   extend(dtFile->symbol);
-  extend(gFile);
 
   extend(dtOpaque->symbol);
   extend(gOpaque);
@@ -250,12 +229,26 @@ void ResolveScope::addBuiltIns() {
   extend(gSingleVarAuxFields);
 
   extend(dtAny->symbol);
-  extend(dtIntegral->symbol);
+  extend(dtAnyBool->symbol);
   extend(dtAnyComplex->symbol);
+  extend(dtAnyEnumerated->symbol);
+  extend(dtAnyImag->symbol);
+  extend(dtAnyReal->symbol);
+
+  extend(dtIntegral->symbol);
   extend(dtNumeric->symbol);
 
   extend(dtIteratorRecord->symbol);
   extend(dtIteratorClass->symbol);
+  extend(dtBorrowed->symbol);
+  extend(dtBorrowedNonNilable->symbol);
+  extend(dtBorrowedNilable->symbol);
+  extend(dtUnmanaged->symbol);
+  extend(dtUnmanagedNonNilable->symbol);
+  extend(dtUnmanagedNilable->symbol);
+  extend(dtAnyManagementAnyNilable->symbol);
+  extend(dtAnyManagementNonNilable->symbol);
+  extend(dtAnyManagementNilable->symbol);
 
   extend(dtMethodToken->symbol);
   extend(gMethodToken);
@@ -266,14 +259,19 @@ void ResolveScope::addBuiltIns() {
   extend(dtModuleToken->symbol);
   extend(gModuleToken);
 
-  extend(dtAnyEnumerated->symbol);
-
   extend(gBoundsChecking);
   extend(gCastChecking);
+  extend(gNilChecking);
+  extend(gLegacyClasses);
+  extend(gOverloadSetsChecks);
   extend(gDivZeroChecking);
   extend(gPrivatization);
   extend(gLocal);
+  extend(gWarnUnstable);
   extend(gNodeID);
+
+  extend(gInfinity);
+  extend(gNan);
 }
 
 /************************************* | **************************************
@@ -364,11 +362,20 @@ ModuleSymbol* ResolveScope::enclosingModule() const {
 *                                                                             *
 ************************************** | *************************************/
 
-bool ResolveScope::extend(Symbol* newSym) {
+bool ResolveScope::extend(Symbol* newSym, bool isTopLevel) {
   const char* name   = newSym->name;
   bool        retval = false;
 
-  if (Symbol* oldSym = lookupNameLocally(name)) {
+  // If this is a top-level module, we look up the symbol's name as
+  // though we were resolving a 'use' in order to take module symbols
+  // (not visible through normal lexical scoping) into consideration.
+  // Without this, we no longer get duplicate symbol definition
+  // warnings when two top-level modules share the same name and a
+  // subsequent lookup of that module name picks the first module it
+  // finds (since we don't have a concept of overloading for modules
+  // or most symbol types other than functions.
+  //
+  if (Symbol* oldSym = lookupNameLocally(name, isTopLevel)) {
     FnSymbol* oldFn = toFnSymbol(oldSym);
     FnSymbol* newFn = toFnSymbol(newSym);
 
@@ -393,8 +400,11 @@ bool ResolveScope::extend(Symbol* newSym) {
                 newSym->stringLoc());
     }
 
-    // If oldSym is a constructor and newSym is a type, update with the type
-    if (newFn == NULL || newFn->_this == NULL) {
+    // Prefer storage of non-functions over functions,
+    //                   functions over methods,
+    //                   public functions over private functions
+    if (newFn == NULL || (newFn->_this == NULL &&
+                          newFn->hasFlag(FLAG_PRIVATE) == false)) {
       mBindings[name] = newSym;
     }
 
@@ -447,17 +457,17 @@ bool ResolveScope::isSymbolAndMethod(Symbol* sym0, Symbol* sym1) {
 *                                                                             *
 ************************************** | *************************************/
 
-Symbol* ResolveScope::lookup(Expr* expr) const {
+Symbol* ResolveScope::lookup(Expr* expr, bool isUse) const {
   Symbol* retval = NULL;
 
   // A lexical lookup from the current scope
   if (UnresolvedSymExpr* uSym = toUnresolvedSymExpr(expr)) {
-    retval = lookup(uSym);
+    retval = lookup(uSym, isUse);
 
   // A dotted reference (<object>.<field>) to a field in an object
   } else if (CallExpr* call = toCallExpr(expr)) {
     if (call->isNamedAstr(astrSdot) == true) {
-      retval = getFieldFromPath(call);
+      retval = getFieldFromPath(call, isUse);
 
     } else {
       INT_FATAL(expr, "Not a dotted expr");
@@ -476,20 +486,20 @@ Symbol* ResolveScope::lookup(Expr* expr) const {
 *                                                                             *
 ************************************** | *************************************/
 
-Symbol* ResolveScope::lookup(UnresolvedSymExpr* usymExpr) const {
+Symbol* ResolveScope::lookup(UnresolvedSymExpr* usymExpr, bool isUse) const {
   const ResolveScope* ptr    = NULL;
   Symbol*             retval = NULL;
 
   for (ptr = this; ptr != NULL && retval == NULL; ptr = ptr->mParent) {
-    retval = ptr->lookupWithUses(usymExpr);
+    retval = ptr->lookupWithUses(usymExpr, isUse);
   }
 
   return retval;
 }
 
-Symbol* ResolveScope::lookupWithUses(UnresolvedSymExpr* usymExpr) const {
+Symbol* ResolveScope::lookupWithUses(UnresolvedSymExpr* usymExpr, bool isUse) const {
   const char* name   = usymExpr->unresolved;
-  Symbol*     retval = lookupNameLocally(name);
+  Symbol*     retval = lookupNameLocally(name, isUse);
 
   if (retval == NULL && mUseList.size() > 0) {
     UseList useList = mUseList;
@@ -500,7 +510,7 @@ Symbol* ResolveScope::lookupWithUses(UnresolvedSymExpr* usymExpr) const {
     // Do not use for_vector(); it terminates on a NULL
     for (size_t i = 0; i < useList.size(); i++) {
       if (const UseStmt* use = useList[i]) {
-        if (use->skipSymbolSearch(name) == false) {
+        if (use->skipSymbolSearch(name, true) == false) {
           BaseAST*    scopeToUse = use->getSearchScope();
           const char* nameToUse  = name;
 
@@ -509,7 +519,7 @@ Symbol* ResolveScope::lookupWithUses(UnresolvedSymExpr* usymExpr) const {
           }
 
           if (ResolveScope* next = getScopeFor(scopeToUse)) {
-            if (Symbol* sym = next->lookupNameLocally(nameToUse)) {
+            if (Symbol* sym = next->lookupNameLocally(nameToUse, isUse)) {
               if (isRepeat(sym, symbols) == false) {
                 if (FnSymbol* fn = toFnSymbol(sym)) {
                   if (fn->isMethod() == false) {
@@ -562,11 +572,11 @@ bool ResolveScope::isRepeat(Symbol* toAdd, const SymList& symbols) const {
 *                                                                             *
 ************************************** | *************************************/
 
-Symbol* ResolveScope::getFieldFromPath(CallExpr* dottedExpr) const {
+Symbol* ResolveScope::getFieldFromPath(CallExpr* dottedExpr, bool isUse) const {
   Expr*   lhsExpr = dottedExpr->get(1);
   Symbol* retval  = NULL;
 
-  if (Symbol* symbol = lookup(lhsExpr)) {
+  if (Symbol* symbol = lookup(lhsExpr, isUse)) {
     if (ModuleSymbol* module = toModuleSymbol(symbol)) {
       if (SymExpr* rhs = toSymExpr(dottedExpr->get(2))) {
         const char* rhsName = NULL;
@@ -636,12 +646,17 @@ Symbol* ResolveScope::getFieldLocally(const char* fieldName) const {
 ************************************** | *************************************/
 
 // 2017/06/02 Used by scopeResolve.
-Symbol* ResolveScope::lookupNameLocally(const char* name) const {
+Symbol* ResolveScope::lookupNameLocally(const char* name, bool isUse) const {
   Bindings::const_iterator it     = mBindings.find(name);
   Symbol*                  retval = NULL;
 
   if (it != mBindings.end()) {
-    retval = it->second;
+    Symbol* sym = it->second;
+
+    // don't consider top-level modules to be visible unless this is a use
+    if (toModuleSymbol(sym) == NULL || this != rootScope || isUse) {
+      retval = sym;
+    }
   }
 
   return retval;
@@ -677,6 +692,18 @@ void ResolveScope::getFields(const char* fieldName,
       INT_ASSERT(false);
     }
   }
+
+  if (symbols.size() > 0) {
+    for (std::vector<Symbol*>::iterator it = symbols.begin();
+         it != symbols.end();
+         it++) {
+      if (*it == mAstRef) {
+        // Only and except lists should not return the original module name.
+        symbols.erase(it);
+        break;
+      }
+    }
+  }
 }
 
 bool ResolveScope::getFieldsWithUses(const char* fieldName,
@@ -695,7 +722,7 @@ bool ResolveScope::getFieldsWithUses(const char* fieldName,
         const UseStmt* use = useList[i];
 
         if (use != NULL) {
-          if (use->skipSymbolSearch(fieldName) == false) {
+          if (use->skipSymbolSearch(fieldName, true) == false) {
             BaseAST*    scopeToUse = use->getSearchScope();
             const char* nameToUse  = NULL;
 

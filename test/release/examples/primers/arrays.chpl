@@ -135,7 +135,7 @@ writeln("After calling printArr, B is:\n", B, "\n");
 // of storing distributed arrays across multiple similar array
 // variables.
 //
-// The following domain declaration defines a 2D arithmetic domain
+// The following domain declaration defines a 2D rectangular domain
 // called ``ProbSpace`` which is the same size and shape as ``B`` was above.
 //
 
@@ -385,5 +385,5 @@ writeln("Y is:\n", Y);
 //
 // For further information, see the :ref:`Domain Primer <primers-domains>`
 // and other array primers: :ref:`Sparse <primers-sparse>`,
-// :ref:`Opaque <primers-opaque-domains>`, :ref:`Associative <primers-associative>`.
+// :ref:`Associative <primers-associative>`.
 //

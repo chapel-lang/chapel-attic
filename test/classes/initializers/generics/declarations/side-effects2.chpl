@@ -15,9 +15,9 @@ class Foo {
 }
 
 proc FooX(param p) type {
-  var localvar = new Foo(p);
+  var localvar = new borrowed Foo(p);
   return localvar.type;
 }
 
-var foo: FooX(3);
-writeln(foo.type:string);
+var foo: FooX(3)?;
+writeln(foo.type!:string);

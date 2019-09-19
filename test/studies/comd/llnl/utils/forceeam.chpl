@@ -20,7 +20,7 @@ class InterpolationObject {
     this.dx = dx;
     this.invDx = 1.0/dx;
     this.nSpace = -1..n+1;
-    this.initDone();
+    this.complete();
 
     var nSpaceInner : domain(1) = 0..n-1;
 
@@ -59,8 +59,8 @@ class InterpolationObject {
 //    var df : real = 0.5*(g1 + r*(g2-g1))*invDx;
   }
 
-  proc replicate() : InterpolationObject {
-    return new InterpolationObject(this.n, this.x0, this.dx, this.values);
+  proc replicate() : unmanaged InterpolationObject {
+    return new unmanaged InterpolationObject(this.n, this.x0, this.dx, this.values);
   }
 }
 
@@ -87,26 +87,23 @@ class EAMDomain {
 }
 
 class EAMPot {
-  var eamDom : [locDom] EAMDomain;
+  var eamDom : [locDom] unmanaged EAMDomain;
 }
 
 class ForceEAM : Force {
 
-  var eamPot : EAMPot;
-  var phiIO, rhoIO, fIO : InterpolationObject;
+  var eamPot : unmanaged EAMPot?;
+  var phiIO, rhoIO, fIO : unmanaged InterpolationObject?;
 
-  proc ForceEAM() {}
+  proc init() {}
 
-  proc ForceEAM(potDir:string, potFile:string, potType:string) {
+  proc init(potDir:string, potFile:string, potType:string) {
+    this.complete();
+
     this.potName = "EAM";
     var input_file = potDir + "/" + potFile;
     var fchan: file;
-    try {
-      open(input_file, iomode.r);
-    } catch {
-      var errMsg : string = "Can't open file " + input_file + ". Fatal Error";
-      throwError(errMsg);
-    }
+    try! open(input_file, iomode.r);
 
     if (potType == "setfl") then eamReadSetfl(fchan);
     else if (potType == "funcfl") then eamReadFuncfl(fchan);
@@ -117,16 +114,16 @@ class ForceEAM : Force {
     this.eamPot = nil;
   }
 
-  proc epilogue() : void {
+  override proc epilogue() : void {
 if useChplVis then tagVdebug("setupEAMForce");
-    this.eamPot = new EAMPot();
+    this.eamPot = new unmanaged EAMPot();
     const boxSpace = {1..numBoxes(1), 1..numBoxes(2), 1..numBoxes(3)};
     const distSpace = boxSpace dmapped Block(boundingBox=boxSpace, targetLocales=locGrid);
     ref eamDom = this.eamPot.eamDom;
     coforall ijk in locDom {
       on locGrid[ijk] {
         const MyLocDom = distSpace.localSubdomain();
-        var MyEAMDom = new EAMDomain(localDom = MyLocDom);
+        var MyEAMDom = new unmanaged EAMDomain(localDom = MyLocDom);
         eamDom[ijk] = MyEAMDom;
 
         const lDh = locDom.high;
@@ -213,7 +210,7 @@ if useChplVis then pauseVdebug();
 
     // Read embedding energy F(rhobar)
     for ii in 0..nRho-1 do values(ii) = r.read(real);
-    this.fIO   = new InterpolationObject(nRho, x0, dRho, values);
+    this.fIO   = new unmanaged InterpolationObject(nRho, x0, dRho, values);
 
     // Read Z(r) and convert to phi(r)
     for ii in 0..nR-1 do values(ii) = r.read(real);
@@ -223,11 +220,11 @@ if useChplVis then pauseVdebug();
       values(ii) *= (hartreeToEv * bohrToAngs);
     }
     values(0) = values(1) + (values(1) - values(2));
-    this.phiIO = new InterpolationObject(nR, x0, dR, values);
+    this.phiIO = new unmanaged InterpolationObject(nR, x0, dR, values);
 
     // Read electron density rho(r)
     for ii in 0..nR-1 do values(ii) = r.read(real);
-    this.rhoIO = new InterpolationObject(nR, x0, dR, values);
+    this.rhoIO = new unmanaged InterpolationObject(nR, x0, dR, values);
   }
 
   inline proc eamReadSetfl(fchan) {
@@ -272,11 +269,11 @@ if useChplVis then pauseVdebug();
 
     // Read embedding energy F(rhobar)
     for ii in 0..nRho-1 do values(ii) = r.readln(real);
-    this.fIO   = new InterpolationObject(nRho, x0, dRho, values);
+    this.fIO   = new unmanaged InterpolationObject(nRho, x0, dRho, values);
 
     // Read electron density rho(r)
     for ii in 0..nR-1 do values(ii) = r.readln(real);
-    this.rhoIO = new InterpolationObject(nR, x0, dR, values);
+    this.rhoIO = new unmanaged InterpolationObject(nR, x0, dR, values);
 
     // Read phi(r)*r and convert to phi(r)
     for ii in 0..nR-1 do values(ii) = r.readln(real);
@@ -285,10 +282,10 @@ if useChplVis then pauseVdebug();
       values(ii) /= rx;
     }
     values(0) = values(1) + (values(1) - values(2));
-    this.phiIO = new InterpolationObject(nR, x0, dR, values);
+    this.phiIO = new unmanaged InterpolationObject(nR, x0, dR, values);
   }
 
-  inline proc haloExchange(const ref MyEAMDom : EAMDomain, const ref eamDom : [] EAMDomain, const in face : int) {
+  inline proc haloExchange(const ref MyEAMDom : unmanaged EAMDomain, const ref eamDom : [] unmanaged EAMDomain, const in face : int) {
     const ref dest = MyEAMDom.destSlice;
     const ref src = MyEAMDom.srcSlice;
     const nf = MyEAMDom.neighs[face];
@@ -307,7 +304,7 @@ if useChplVis then pauseVdebug();
   }
 
   // exchange data along fm and fp faces
-  inline proc exchangeData(const ref MyEAMDom : EAMDomain, const ref eamDom : [] EAMDomain, const in i : int) {
+  inline proc exchangeData(const ref MyEAMDom : unmanaged EAMDomain, const ref eamDom : [] unmanaged EAMDomain, const in i : int) {
     cobegin {
       { haloExchange(MyEAMDom, eamDom, i); }
       { haloExchange(MyEAMDom, eamDom, i+1); }
@@ -349,7 +346,7 @@ if useChplVis then pauseVdebug();
     fij += (dfEmbed*dRho/r)*dr;
   }
 
-  proc compute() : void {
+  override proc compute() : void {
     tArray[timerEnum.FORCE1].start();
 if useChplVis then tagVdebug("computeEAMForce");
     const ref eamDom = this.eamPot.eamDom;
@@ -419,7 +416,7 @@ if useChplVis then tagVdebug("computeEAMForce");
 if useChplVis then pauseVdebug();
   }
 
-  proc computeLocal() : void {
+  override proc computeLocal() : void {
     tArray[timerEnum.FORCE1].start();
 if useChplVis then tagVdebug("computeEAMForce");
     const ref eamDom = this.eamPot.eamDom;
@@ -493,7 +490,7 @@ local {
 if useChplVis then pauseVdebug();
   }
 
-  proc print() : void {
+  override proc print() : void {
     writeln("Potential Data:");
     writeln("   Potential type   : ", potName);
     writeln("   Species name     : ", name);
@@ -504,8 +501,8 @@ if useChplVis then pauseVdebug();
     writeln("   Cutoff           : ", cutoff, " Angstroms");
   }
 
-  proc replicate() : ForceEAM {
-    var temp = new ForceEAM();
+  override proc replicate() : unmanaged ForceEAM? {
+    var temp = new unmanaged ForceEAM();
     temp.cutoff = this.cutoff;
     temp.mass = this.mass;
     temp.lat = this.lat;

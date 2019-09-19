@@ -14,9 +14,9 @@ enum NPB {S,A,B,C}; // TODO : Make complete.
 const ProblemSizes : [NPB.S..NPB.C] int = [32, 256, 256, 512],
       ProblemIters : [NPB.S..NPB.C] int = [4, 4, 20, 20],
       ExpectedResids : [NPB.S..NPB.C] real = [0.5307707005735e-04,
-                                              0.2433365309069e-05,
-                                              0.1800564401355e-05,
-                                              0.5706732285705e-06],
+                                      0.2433365309069e-05,
+                                      0.1800564401355e-05,
+                                      0.5706732285705e-06],
       fracGoal = 1.0e-8;
 
 config const NPBClass : NPB = NPB.S;
@@ -49,8 +49,8 @@ var fluffTime : Timer;
 
 proc main() {
   // Allocate the levels
-  var Levels : [LevelDom] MGLevel;
-  for ilevel in LevelDom do Levels[ilevel] = new MGLevel(2**ilevel);
+  var Levels : [LevelDom] owned MGLevel;
+  for ilevel in LevelDom do Levels[ilevel] = new owned MGLevel(2**ilevel);
 
   var U,V,R : [Levels[numlevels].dom] real;
 
@@ -92,9 +92,6 @@ proc main() {
     writeln("Elapsed time (seconds):", timeit.elapsed());
     writeln("Fluff time :", fluffTime.elapsed());
   }
-
-  for il in Levels do delete il;
-
 }
 
 
@@ -289,7 +286,7 @@ proc stencilConvolve(dest : [?Dom] real, const ref src : []real, const w : coeff
           dest.localAccess[i,j,klo] += w2 * valA(i,j,klo-1) +
                                        w3 * valB(i,j,klo-1);
 
-          for k in vectorizeOnly(klo..khi) {
+          for k in klo..khi {
             const val1 = locSrc[i,j,k];
             const val2 = valA(i,j,k);
             const val3 = valB(i,j,k);
@@ -301,8 +298,10 @@ proc stencilConvolve(dest : [?Dom] real, const ref src : []real, const w : coeff
             // Update previous and next destinations with this iteration's
             // val2 and val3
             const temp = w2 * val2 + w3 * val3;
-            dest.localAccess[i,j,k-1] += temp;
-            dest.localAccess[i,j,k+1] += temp;
+            if k-1>=klo then
+              dest.localAccess[i,j,k-1] += temp;
+            if k+1<=khi then
+              dest.localAccess[i,j,k+1] += temp;
           }
 
           dest.localAccess[i,j,khi] += w2 * valA(i,j,khi+1) +

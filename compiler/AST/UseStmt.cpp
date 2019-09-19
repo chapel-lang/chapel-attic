@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2018 Cray Inc.
+ * Copyright 2004-2019 Cray Inc.
  * Other additional copyright holders may be indicated within.
  *
  * The entirety of this work is licensed under the Apache License,
@@ -27,7 +27,8 @@
 
 #include <algorithm>
 
-UseStmt::UseStmt(BaseAST* source) : Stmt(E_UseStmt) {
+UseStmt::UseStmt(BaseAST* source, bool isPrivate) : Stmt(E_UseStmt) {
+  this->isPrivate = isPrivate;
   src    = NULL;
   except = false;
 
@@ -47,9 +48,11 @@ UseStmt::UseStmt(BaseAST* source) : Stmt(E_UseStmt) {
 UseStmt::UseStmt(BaseAST*                            source,
                  std::vector<const char*>*           args,
                  bool                                exclude,
-                 std::map<const char*, const char*>* renames) :
+                 std::map<const char*, const char*>* renames,
+                 bool isPrivate) :
   Stmt(E_UseStmt) {
 
+  this->isPrivate = isPrivate;
   src    = NULL;
   except = exclude;
 
@@ -88,13 +91,13 @@ UseStmt* UseStmt::copyInner(SymbolMap* map) {
   UseStmt *_this = 0;
 
   if (named.size() > 0) { // MPF: should this have || renamed.size() > 0?
-    _this = new UseStmt(COPY_INT(src), &named, except, &renamed);
+    _this = new UseStmt(COPY_INT(src), &named, except, &renamed, isPrivate);
   } else {
-    _this = new UseStmt(COPY_INT(src));
+    _this = new UseStmt(COPY_INT(src), isPrivate);
   }
 
-  for_vector(const char, sym, relatedNames) {
-    _this->relatedNames.push_back(sym);
+  for_vector(const char, sym, methodsAndFields) {
+    _this->methodsAndFields.push_back(sym);
   }
 
   return _this;
@@ -126,14 +129,6 @@ void UseStmt::verify() {
 
   if (src == NULL) {
     INT_FATAL(this, "Bad UseStmt::src");
-  }
-
-  if (relatedNames.size() != 0 &&
-      named.size()        == 0 &&
-      renamed.size()      == 0) {
-    INT_FATAL(this,
-              "Have names to avoid, but nothing was listed in the "
-              "use to begin with");
   }
 
   verifyNotOnList(src);
@@ -181,7 +176,7 @@ void UseStmt::scopeResolve(ResolveScope* scope) {
     if (SymExpr* se = toSymExpr(src)) {
       INT_ASSERT(se->symbol() == rootModule);
 
-    } else if (Symbol* sym = scope->lookup(src)) {
+    } else if (Symbol* sym = scope->lookup(src, /*isUse=*/ true)) {
       SET_LINENO(this);
 
       if (ModuleSymbol* modSym = toModuleSymbol(sym)) {
@@ -319,6 +314,7 @@ void UseStmt::validateList() {
 
     validateNamed();
     validateRenamed();
+    trackMethods();
   }
 }
 
@@ -394,10 +390,14 @@ void UseStmt::validateNamed() {
       scope->getFields(name, symbols);
 
       if (symbols.size() == 0) {
+        SymExpr* srcExpr = toSymExpr(src);
+        INT_ASSERT(srcExpr); // should have been resolved by this point
         USR_FATAL_CONT(this,
-                       "Bad identifier in '%s' clause, no known '%s'",
+                       "Bad identifier in '%s' clause, no known '%s' defined in"
+                       " '%s'",
                        (except == true) ? "except" : "only",
-                       name);
+                       name,
+                       srcExpr->symbol()->name);
 
       } else {
         for_vector(Symbol, sym, symbols) {
@@ -407,8 +407,6 @@ void UseStmt::validateNamed() {
                            (except == true) ? "except" : "only",
                            name);
           }
-
-          createRelatedNames(sym);
         }
       }
     }
@@ -437,10 +435,7 @@ void UseStmt::validateRenamed() {
     } else if (symbols.size() == 1) {
       Symbol* sym = symbols[0];
 
-      if (sym->hasFlag(FLAG_PRIVATE) == false) {
-        createRelatedNames(sym);
-
-      } else {
+      if (sym->hasFlag(FLAG_PRIVATE)) {
         USR_FATAL_CONT(this,
                        "Bad identifier in rename, '%s' is private",
                        it->second);
@@ -474,35 +469,59 @@ BaseAST* UseStmt::getSearchScope() const {
   return retval;
 }
 
-void UseStmt::createRelatedNames(Symbol* maybeType) {
-  if (TypeSymbol* ts = toTypeSymbol(maybeType)) {
-    Type* type = ts->type;
+void UseStmt::trackMethods() {
+  if (SymExpr* se = toSymExpr(src)) {
+    if (ModuleSymbol* mod = toModuleSymbol(se->symbol())) {
+      std::vector<AggregateType*> types = mod->getTopLevelClasses();
 
-    forv_Vec(FnSymbol, method, type->methods) {
-      relatedNames.push_back(method->name);
-    }
+      // Note: stores duplicates
+      for_vector(AggregateType, t, types) {
+        forv_Vec(FnSymbol, method, t->methods) {
+          if (method != NULL)
+            methodsAndFields.push_back(method->name);
+        }
 
-    if (AggregateType* at = toAggregateType(type)) {
-      for_fields(sym, at) {
-        relatedNames.push_back(sym->name);
+        for_fields(sym, t) {
+          methodsAndFields.push_back(sym->name);
+        }
+      }
+
+      if (types.size() != 0) {
+        // These are all compiler generated functions that might (or in some
+        // cases definitely are) not defined on the type explicitly.  Allow them
+        // as well.
+        functionsToAlwaysCheck.push_back("init");
+        functionsToAlwaysCheck.push_back("_new");
+        functionsToAlwaysCheck.push_back("deinit");
+        functionsToAlwaysCheck.push_back("_defaultOf");
+      }
+
+      std::vector<FnSymbol*> fns = mod->getTopLevelFunctions(false);
+      for_vector(FnSymbol, fn, fns) {
+        if (fn->hasFlag(FLAG_METHOD)) {
+          // Again, stores duplicates.  This is probably less costly than
+          // checking for them.
+          methodsAndFields.push_back(fn->name);
+        }
       }
     }
-
-    unsigned int constrLen      = strlen(ts->name) + strlen("_construct_") + 1;
-    unsigned int typeConstrLen  = constrLen        + strlen("_type");
-
-    char*        constrName     = (char*) malloc(constrLen);
-    char*        typeConstrName = (char*) malloc(typeConstrLen);
-
-    strcpy(constrName,     "_construct_");
-    strcat(constrName,     ts->name);
-
-    strcpy(typeConstrName, "_type_construct_");
-    strcat(typeConstrName, ts->name);
-
-    relatedNames.push_back(constrName);
-    relatedNames.push_back(typeConstrName);
   }
+}
+
+ModuleSymbol* UseStmt::checkIfModuleNameMatches(const char* name) {
+  if (SymExpr* se = toSymExpr(src)) {
+    if (ModuleSymbol* modSym = toModuleSymbol(se->symbol())) {
+      if (strcmp(name, se->symbol()->name) == 0) {
+        return modSym;
+      }
+    }
+  } else {
+    // It seems as though we'd need to handle matches against more general
+    // expressions here (e.g., 'use M.N.O'), yet I can't seem to construct
+    // an example that requires this.  I suppose it could be because we
+    // resolve such cases element-by-element rather than wholesale...
+  }
+  return NULL;
 }
 
 /************************************* | **************************************
@@ -528,7 +547,7 @@ void UseStmt::writeListPredicate(FILE* mFP) const {
 *                                                                             *
 ************************************** | *************************************/
 
-bool UseStmt::skipSymbolSearch(const char* name) const {
+bool UseStmt::skipSymbolSearch(const char* name, bool methodCall) const {
   bool retval = false;
 
   if (isPlainUse() == true) {
@@ -536,9 +555,6 @@ bool UseStmt::skipSymbolSearch(const char* name) const {
 
   } else if (except == true) {
     if (matchedNameOrConstructor(name) == true) {
-      retval =  true;
-
-    } else if (inRelatedNames(name)) {
       retval =  true;
 
     } else {
@@ -549,7 +565,10 @@ bool UseStmt::skipSymbolSearch(const char* name) const {
     if (matchedNameOrConstructor(name) == true) {
       retval = false;
 
-    } else if (inRelatedNames(name) == true) {
+    } else if (isAllowedMethodName(name, methodCall) == true) {
+      // Only allow the symbol if the call is a method call.  Functions with
+      // the same name should not be allowed unqualified when they are omitted
+      // from the explicit only list, except for "init", "_new", etc.
       retval = false;
 
     } else {
@@ -578,11 +597,19 @@ bool UseStmt::matchedNameOrConstructor(const char* name) const {
   return false;
 }
 
-// Returns true if the name was in the relatedNames field, false otherwise.
-bool UseStmt::inRelatedNames(const char* name) const {
-  for_vector(const char, toCheck, relatedNames) {
+// Returns true if the name was in the list of methods and fields defined in
+// this module, false otherwise.
+bool UseStmt::isAllowedMethodName(const char* name, bool methodCall) const {
+  for_vector(const char, toCheck, functionsToAlwaysCheck) {
     if (strcmp(name, toCheck) == 0) {
       return true;
+    }
+  }
+  if (methodCall) {
+    for_vector(const char, toCheck, methodsAndFields) {
+      if (strcmp(name, toCheck) == 0) {
+        return true;
+      }
     }
   }
 
@@ -655,10 +682,7 @@ UseStmt* UseStmt::applyOuterUse(const UseStmt* outer) {
         // The only list will be shorter, create a new UseStmt with it.
         SET_LINENO(this);
 
-        return new UseStmt(src, &newOnlyList, false, &newRenamed);
-        // Note: we don't populate the relatedNames vector for the new use,
-        // since we don't have a way to connect the names in it back to the
-        // types we did or didn't include in the shorter 'only' list.
+        return new UseStmt(src, &newOnlyList, false, &newRenamed, isPrivate);
       }
 
     } else {
@@ -715,7 +739,7 @@ UseStmt* UseStmt::applyOuterUse(const UseStmt* outer) {
           // outer 'only' list)
           SET_LINENO(this);
 
-          return new UseStmt(src, &newOnlyList, false, &newRenamed);
+          return new UseStmt(src, &newOnlyList, false, &newRenamed, isPrivate);
 
         } else {
           // all the 'only' identifiers were in the 'except'
@@ -771,7 +795,7 @@ UseStmt* UseStmt::applyOuterUse(const UseStmt* outer) {
           // There were symbols that were in both 'only' lists, so
           // this module use is still interesting.
           SET_LINENO(this);
-          return new UseStmt(src, &newOnlyList, false, &newRenamed);
+          return new UseStmt(src, &newOnlyList, false, &newRenamed, isPrivate);
 
         } else {
           // all of the 'only' identifiers in the outer use

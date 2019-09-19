@@ -11,9 +11,9 @@ module torus_graph_generator_utilities {
     use SSCA2_compilation_config_params, Random;
 
     var Rand_Gen = if REPRODUCIBLE_PROBLEMS then 
-                     new NPBRandomStream (seed = 8737935341)
+                     new unmanaged NPBRandomStream (seed = 8737935341)
 		    else
-		      new NPBRandomStream ();
+		      new unmanaged NPBRandomStream ();
 
     const n_neighbors = 2*G.dimensions;
     var Unif_Random : [1..n_neighbors] real;
@@ -28,9 +28,15 @@ module torus_graph_generator_utilities {
     for v in G.vertices do
       {
 	Rand_Gen.fillRandom ( Unif_Random );
+
+      /* Issue #12424: instead of the for-loop below, we would like to write:
 	G.edge_weight (v) = floor ( 1 + 
 				    Unif_Random * MAX_EDGE_WEIGHT )
 	  : int;
+      */
+        for (w,r) in zip(G.edge_weight(v), Unif_Random) do
+          w = floor ( 1 + r * MAX_EDGE_WEIGHT ) : int;
+
 	if DEBUG_WEIGHT_GENERATOR then {
 	  writeln ( v, ": ", G.edge_weight (v) );}
       }

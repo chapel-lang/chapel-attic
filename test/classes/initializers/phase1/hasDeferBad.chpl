@@ -7,11 +7,11 @@ class Foo {
       writeln("deferred!");
     }
     writeln("should be first");
-    this.initDone();
+    this.complete();
     writeln("should be second");
   }
 }
 
-var foo = new Foo(10);
+var foo = new unmanaged Foo(10);
 writeln(foo);
 delete foo;

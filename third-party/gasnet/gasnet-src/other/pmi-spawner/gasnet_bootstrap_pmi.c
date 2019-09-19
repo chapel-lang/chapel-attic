@@ -73,7 +73,7 @@ uint8_t a85_dec(uint8_t c) {
 static
 void do_encode(uint8_t *in, size_t len) {
     char *p = kvs_value;
-    gasneti_assert(5 * ((len + 3) / 4) <= max_val_len);
+    gasneti_assert_always(5 * ((len + 3) / 4) <= max_val_len);
     while (len) {
         uint32_t x = 0;
         const int sz = MIN(4, len);
@@ -111,7 +111,7 @@ void do_encode(uint8_t *in, size_t len) {
 }
 
 static
-void do_decode(uint8_t *out, size_t len) {
+void do_decode(uint8_t *out, size_t len, size_t in_len) {
     const char *p = kvs_value;
     while (len) {
         uint32_t x;
@@ -126,7 +126,7 @@ void do_decode(uint8_t *out, size_t len) {
             p += 1;
         } else {
             const int pad = 4 - sz;
-            gasneti_assert(!pad || (strlen(p) == (5 - pad)));
+            gasneti_assert_always(!pad || (strlen(p) == (5 - pad)));
             x  = a85_dec(p[0]);
             x *= 85;
             x += a85_dec(p[1]);
@@ -136,7 +136,7 @@ void do_decode(uint8_t *out, size_t len) {
             x += a85_dec((pad < 2) ? p[3] : 'u');
             x *= 85;
             x += a85_dec((pad < 1) ? p[4] : 'u');
-            p += 5;
+            p += (5 - pad);
             x = x >> (8 * pad);
         }
 
@@ -149,6 +149,9 @@ void do_decode(uint8_t *out, size_t len) {
         len -= sz;
         out += sz;
     }
+    // Check that we consumed the entire input
+    size_t decoded = p - kvs_value;
+    gasneti_assert_always_uint(decoded ,==, in_len);
 }
 
 /* Put/Get/Fence wrappers */
@@ -159,10 +162,10 @@ void do_kvs_put(void *value, size_t sz) {
     do_encode(value, sz);
 #if USE_PMI2_API
     rc = PMI2_KVS_Put(kvs_key, kvs_value);
-    gasneti_assert(PMI2_SUCCESS == rc);
+    gasneti_assert_always(PMI2_SUCCESS == rc);
 #else
     rc = PMI_KVS_Put(kvs_name, kvs_key, kvs_value);
-    gasneti_assert(PMI_SUCCESS == rc);
+    gasneti_assert_always(PMI_SUCCESS == rc);
 #endif
 }
 
@@ -172,12 +175,14 @@ void do_kvs_get(void *value, size_t sz) {
 #if USE_PMI2_API
     int len;
     rc = PMI2_KVS_Get(kvs_name, PMI2_ID_NULL, kvs_key, kvs_value, max_val_len, &len);
-    gasneti_assert(PMI2_SUCCESS == rc);
+    gasneti_assert_always(PMI2_SUCCESS == rc);
+    gasneti_assert_always(len > 0); // Negative would mean value larger than max_val_len
 #else
     rc = PMI_KVS_Get(kvs_name, kvs_key, kvs_value, max_val_len);
-    gasneti_assert(PMI_SUCCESS == rc);
+    gasneti_assert_always(PMI_SUCCESS == rc);
+    size_t len = strlen(kvs_value);
 #endif
-    do_decode(value, sz);
+    do_decode(value, sz, len);
 }
 
 GASNETI_INLINE(do_kvs_fence)
@@ -197,7 +202,7 @@ PMI_BOOL  gasneti_pmi_initialized = PMI_FALSE;
  */
 extern gasneti_spawnerfn_t const * gasneti_bootstrapInit_pmi(
         int *argc_p, char ***argv_p,
-        gasnet_node_t *nodes_p, gasnet_node_t *mynode_p) {
+        gex_Rank_t *nodes_p, gex_Rank_t *mynode_p) {
     int size, rank;
 
 #if USE_PMI2_API
@@ -318,15 +323,15 @@ static void bootstrapBarrier(void) {
 }
 
 #if HAVE_PMI_ALLGATHER
-static gasnet_node_t *gasnetc_pmi_allgather_order = NULL;
+static gex_Rank_t *gasnetc_pmi_allgather_order = NULL;
 GASNETI_INLINE(gasnetc_pmi_allgather_init)
 void gasnetc_pmi_allgather_init(void) {
     /* perform (just once) an Allgather of node number to establish the order */
     if_pf (!gasnetc_pmi_allgather_order) {
         int rc;
-        gasnetc_pmi_allgather_order = gasneti_malloc(gasneti_nodes * sizeof(gasnet_node_t));
-        rc = PMI_Allgather(&gasneti_mynode, gasnetc_pmi_allgather_order, sizeof(gasnet_node_t));
-        gasneti_assert(PMI_SUCCESS == rc);
+        gasnetc_pmi_allgather_order = gasneti_malloc(gasneti_nodes * sizeof(gex_Rank_t));
+        rc = PMI_Allgather(&gasneti_mynode, gasnetc_pmi_allgather_order, sizeof(gex_Rank_t));
+        gasneti_assert_always(PMI_SUCCESS == rc);
     }
 }
 #endif
@@ -336,18 +341,18 @@ void gasnetc_pmi_allgather_init(void) {
 static void bootstrapExchange(void *src, size_t len, void *dest) {
 #if HAVE_PMI_ALLGATHER
     uint8_t *unsorted = gasneti_malloc(len * gasneti_nodes); /* TODO: use alloca()? */
-    gasnet_node_t i;
+    gex_Rank_t i;
     int rc;
 
     /* Allgather the callers data to a temporary array */
     gasnetc_pmi_allgather_init();
     rc = PMI_Allgather(src, unsorted, len);
-    gasneti_assert(PMI_SUCCESS == rc);
+    gasneti_assert_always(PMI_SUCCESS == rc);
 
     /* extract the records from the unsorted array by using the 'order' array */
     for (i = 0; i < gasneti_nodes; i += 1) {
-      gasnet_node_t peer = gasnetc_pmi_allgather_order[i];
-      gasneti_assert(peer < gasneti_nodes);
+      gex_Rank_t peer = gasnetc_pmi_allgather_order[i];
+      gasneti_assert_always(peer < gasneti_nodes);
       memcpy((void *) ((uintptr_t) dest + (peer * len)), &unsorted[i * len], len);
     }
 
@@ -361,7 +366,7 @@ static void bootstrapExchange(void *src, size_t len, void *dest) {
     while (remain) {
         size_t chunk = MIN(remain, max_val_bytes);
         uint8_t *p;
-        gasnet_node_t i;
+        gex_Rank_t i;
 
         snprintf(kvs_key, max_key_len, "GNE%x-%x", counter, (unsigned int)gasneti_mynode);
         do_kvs_put(s, chunk);
@@ -395,7 +400,7 @@ static void bootstrapAlltoall(void *src, size_t len, void *dest) {
     while (remain) {
         size_t chunk = MIN(remain, max_val_bytes);
         uint8_t *p;
-        gasnet_node_t i;
+        gex_Rank_t i;
 
         for (i = 0, p = s; i < gasneti_nodes; ++i, p += len) {
             snprintf(kvs_key, max_key_len, "GNA%x-%x.%x", counter, (unsigned int)gasneti_mynode, (unsigned int)i);
@@ -464,11 +469,11 @@ static void bootstrapSNodeBroadcast(void *src, size_t len, void *dest, int rootn
     /* Allgather the data to the temporary array */
     gasnetc_pmi_allgather_init();
     rc = PMI_Allgather(src ? src : dest, tmp, len);
-    gasneti_assert(PMI_SUCCESS == rc);
+    gasneti_assert_always(PMI_SUCCESS == rc);
 
     /* Find the right piece */
     for (i = 0; i < gasneti_nodes; i += 1) {
-        gasnet_node_t peer = gasnetc_pmi_allgather_order[i];
+        gex_Rank_t peer = gasnetc_pmi_allgather_order[i];
         if (peer == rootnode) {
             memcpy(dest, &tmp[i * len], len);
             break;

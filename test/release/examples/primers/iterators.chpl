@@ -122,26 +122,25 @@ postorder
 //
 class Tree {
   var data: string;
-  var left, right: Tree;
-
-  proc deinit() {
-    if left  then delete left;
-    if right then delete right;
-  }
+  var left, right: owned Tree?;
 }
 
-iter postorder(tree: Tree): Tree {
-  if tree != nil {
-    // Call the iterator recursively on the left subtree and expand.
-    for child in postorder(tree.left) do
-      yield child;
+iter postorder(tree: borrowed Tree?): borrowed Tree {
+  if tree {
+    if tree!.left {
+      // Call the iterator recursively on the left subtree and expand.
+      for child in postorder(tree!.left) do
+        yield child;
+    }
 
-    // Call the iterator recursively on the right subtree and expand.
-    for child in postorder(tree.right) do
-      yield child;
+    if tree!.right {
+      // Call the iterator recursively on the right subtree and expand.
+      for child in postorder(tree!.right) do
+        yield child;
+    }
 
     // Finally, yield the node itself.
-    yield tree;
+    yield tree!;
   }
 }
 
@@ -155,11 +154,11 @@ iter postorder(tree: Tree): Tree {
          / \
         d   e
 */
-var tree = new Tree( "a",
-  new Tree("b"),
-  new Tree("c",
-    new Tree("d"),
-    new Tree("e")));
+var tree = new owned Tree( "a",
+  new owned Tree("b"),
+  new owned Tree("c",
+    new owned Tree("d"),
+    new owned Tree("e")));
 
 //
 // This method uses the postorder iterator to print out each node.
@@ -169,7 +168,7 @@ proc Tree.writeThis(x)
 {
   var first = true;
 
-  for node in postorder(tree) {
+  for node in postorder(this) {
     if first then
       first = false;
     else
@@ -216,5 +215,3 @@ coforall node in postorder(tree) do
 
 writeln(tree);
 writeln();
-
-delete tree;

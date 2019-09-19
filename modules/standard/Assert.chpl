@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2018 Cray Inc.
+ * Copyright 2004-2019 Cray Inc.
  * Other additional copyright holders may be indicated within.
  * 
  * The entirety of this work is licensed under the Apache License,
@@ -38,6 +38,8 @@ module Assert {
   :arg test: the boolean condition
   :type test: `bool`
 */
+pragma "insert line file info"
+pragma "always propagate line file info"
 proc assert(test: bool) {
   if !test then
     __primitive("chpl_error", c"assert failed");
@@ -54,6 +56,8 @@ proc assert(test: bool) {
 
   :arg args: other arguments to print
 */
+pragma "insert line file info"
+pragma "always propagate line file info"
 proc assert(test: bool, args ...?numArgs) {
   if !test {
     var tmpstring = "assert failed - " + stringify((...args));

@@ -2,16 +2,12 @@ class Bar {
   type t;
 }
 
-proc foo(a: Bar(?t)) {
+proc foo(a: borrowed Bar(?t)) {
   writeln("foo1");
-
-  delete a;
 }
 
 proc foo(a:?T) {
   writeln("foo2");
-
-  delete a;
 }
 
-foo(new Bar(real));
+foo(new borrowed Bar(real));

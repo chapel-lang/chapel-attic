@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2018 Cray Inc.
+ * Copyright 2004-2019 Cray Inc.
  * Other additional copyright holders may be indicated within.
  *
  * The entirety of this work is licensed under the Apache License,
@@ -56,12 +56,12 @@ module LocaleModel {
     const sid: chpl_sublocID_t;
     const ndName: string; // note: locale provides `proc name`
 
-    proc chpl_id() return (parent:LocaleModel)._node_id; // top-level node id
-    proc chpl_localeid() {
+    override proc chpl_id() return (parent:LocaleModel)._node_id; // top-level node id
+    override proc chpl_localeid() {
       return chpl_buildLocaleID((parent:LocaleModel)._node_id:chpl_nodeID_t,
                                 sid);
     }
-    proc chpl_name() return ndName;
+    override proc chpl_name() return ndName;
 
     proc init() {
     }
@@ -69,31 +69,37 @@ module LocaleModel {
     proc init(_sid, _parent) {
       super.init(_parent);
       sid = _sid;
-      ndName = "ND"+sid;
+      ndName = "ND"+sid:string;
     }
 
-    proc writeThis(f) {
-      parent.writeThis(f);
+    override proc writeThis(f) {
+      if parent then
+        parent!.writeThis(f);
       f <~> '.'+ndName;
     }
 
-    proc getChildCount(): int { return 0; }
+    override proc getChildCount(): int { return 0; }
     iter getChildIndices() : int {
       halt("No children to iterate over.");
       yield -1;
     }
-    proc addChild(loc:locale) { halt("Cannot add children to this locale type."); }
-    proc getChild(idx:int) : locale { return nil; }
+    proc addChild(loc:locale) {
+      halt("Cannot add children to this locale type.");
+    }
+    pragma "unsafe"
+    override proc getChild(idx:int) : locale {
+      halt("Cannot getChild with this locale type");
+      var ret: locale; // default-initialize
+      return ret;
+    }
 
-    // This is commented out b/c it leads to an internal error during
-    // the resolveIntents pass.  See
-    // test/functions/iterators/sungeun/iterInClass.future
-    //
-    // iter getChildren() : locale {
-    //  halt("No children to iterate over.");
-    //  yield nil;
-    // }
+    iter getChildren() : locale {
+      halt("No children to iterate over.");
+    }
   }
+
+  const chpl_emptyLocaleSpace: domain(1) = {1..0};
+  const chpl_emptyLocales: [chpl_emptyLocaleSpace] locale;
 
   //
   // The node model
@@ -104,7 +110,7 @@ module LocaleModel {
 
     var numSublocales: int; // should never be modified after first assignment
     var childSpace: domain(1);
-    var childLocales: [childSpace] NumaDomain;
+    var childLocales: [childSpace] unmanaged NumaDomain;
 
     // This constructor must be invoked "on" the node
     // that it is intended to represent.  This trick is used
@@ -116,7 +122,7 @@ module LocaleModel {
       }
       _node_id = chpl_nodeID: int;
 
-      this.initDone();
+      this.complete();
 
       setup();
     }
@@ -129,16 +135,16 @@ module LocaleModel {
 
       _node_id = chpl_nodeID: int;
 
-      this.initDone();
+      this.complete();
 
       setup();
     }
 
-    proc chpl_id() return _node_id;     // top-level locale (node) number
-    proc chpl_localeid() {
+    override proc chpl_id() return _node_id;     // top-level locale (node) number
+    override proc chpl_localeid() {
       return chpl_buildLocaleID(_node_id:chpl_nodeID_t, c_sublocid_any);
     }
-    proc chpl_name() return local_name;
+    override proc chpl_name() return local_name;
 
     //
     // Support for different types of memory:
@@ -162,24 +168,16 @@ module LocaleModel {
       return this;
     }
 
-
-    proc writeThis(f) {
-      // Most classes will define it like this:
-      //      f <~> name;
-      // but here it is defined thus for backward compatibility.
-      f <~> new ioLiteral("LOCALE") <~> _node_id;
-    }
-
     proc getChildSpace() return childSpace;
 
-    proc getChildCount() return numSublocales;
+    override proc getChildCount() return numSublocales;
 
     iter getChildIndices() : int {
       for idx in childSpace do
         yield idx;
     }
 
-    proc getChild(idx:int) : locale {
+    override proc getChild(idx:int) : locale {
       if boundsChecking then
         if (idx < 0) || (idx >= numSublocales) then
           halt("sublocale child index out of bounds (",idx,")");
@@ -241,18 +239,18 @@ module LocaleModel {
     // We return numLocales for now, since we expect nodes to be
     // numbered less than this.
     // -1 is used in the abstract locale class to specify an invalid node ID.
-    proc chpl_id() return numLocales;
-    proc chpl_localeid() {
+    override proc chpl_id() return numLocales;
+    override proc chpl_localeid() {
       return chpl_buildLocaleID(numLocales:chpl_nodeID_t, c_sublocid_none);
     }
-    proc chpl_name() return local_name();
+    override proc chpl_name() return local_name();
     proc local_name() return "rootLocale";
 
-    proc writeThis(f) {
+    override proc writeThis(f) {
       f <~> name;
     }
 
-    proc getChildCount() return this.myLocaleSpace.numIndices;
+    override proc getChildCount() return this.myLocaleSpace.numIndices;
 
     proc getChildSpace() return this.myLocaleSpace;
 
@@ -261,17 +259,17 @@ module LocaleModel {
         yield idx;
     }
 
-    proc getChild(idx:int) return this.myLocales[idx];
+    override proc getChild(idx:int) return this.myLocales[idx];
 
     iter getChildren() : locale  {
       for loc in this.myLocales do
         yield loc;
     }
 
-    proc getDefaultLocaleSpace() const ref return this.myLocaleSpace;
-    proc getDefaultLocaleArray() const ref return myLocales;
+    override proc getDefaultLocaleSpace() const ref return this.myLocaleSpace;
+    override proc getDefaultLocaleArray() const ref return myLocales;
 
-    proc localeIDtoLocale(id : chpl_localeID_t) {
+    override proc localeIDtoLocale(id : chpl_localeID_t) {
       const node = chpl_nodeFromLocaleID(id);
       const subloc = chpl_sublocFromLocaleID(id);
       if chpl_isActualSublocID(subloc) then
@@ -284,7 +282,7 @@ module LocaleModel {
       for loc in myLocales {
         on loc {
           rootLocaleInitialized = false;
-          delete loc;
+          delete _to_unmanaged(loc);
         }
       }
     }

@@ -7,7 +7,7 @@ class PotentialLJ : BasePotential {
   var epsilon : real;
 
   proc init() {
-    this.initDone();
+    this.complete();
     sigma   = 2.315;
     epsilon = 0.167;
     mass    = 63.55 * amuToInternalMass;
@@ -19,7 +19,7 @@ class PotentialLJ : BasePotential {
     atomicNo    = 29;
   }
 
-  proc print() {
+  override proc print() {
     writeln("  Potential type   : Lennard-Jones");
     writeln("  Species name     : ", name);
     writeln("  Atomic number    : ", atomicNo);
@@ -31,7 +31,7 @@ class PotentialLJ : BasePotential {
     writef ("  Sigma            : %r Angstroms\n", sigma);
   }
 
-  proc force() {
+  override proc force() {
     const cut2 = cutoff**2;
 
     var ePot = 0.0;

@@ -4,8 +4,8 @@ class A {
   proc init() {
     writeln("A.init");
   }
-  proc postInit() {
-    writeln("A.postInit");
+  proc postinit() {
+    writeln("A.postinit");
   }
 }
 
@@ -15,21 +15,19 @@ class B : A {
     writeln("B.init");
     this.b = b;
   }
-  proc postInit() {
+  proc postinit() {
     if b {
-      writeln("B.postInit");
-      super.postInit();
+      writeln("B.postinit");
+      super.postinit();
     } else {
-      super.postInit();
-      writeln("B.postInit");
+      super.postinit();
+      writeln("B.postinit");
     }
   }
 }
 
-var t = new B(true);
-delete t;
+var t = new shared B(true);
 
 writeln();
 
-var f = new B(false);
-delete f;
+var f = new owned B(false);

@@ -24,13 +24,13 @@ proc clusterFlags (
 
   //---- Create stack of unprocessed domains ----
   
-  var unprocessed_domain_stack = new Stack( domain(rank,stridable=true) );
+  var unprocessed_domain_stack = new unmanaged Stack( domain(rank,stridable=true) );
   unprocessed_domain_stack.push(full_domain);
   
   
   //---- List of finished domains ----
   
-  var finished_domain_list = new List( domain(rank, stridable=true) );
+  var finished_domain_list = new unmanaged List( domain(rank, stridable=true) );
   
   
   while !unprocessed_domain_stack.isEmpty()
@@ -39,7 +39,7 @@ proc clusterFlags (
     //---- Make the top domain a candidate ----
     
     var D = unprocessed_domain_stack.pop();
-    var candidate = new CandidateDomain(rank,D,flags(D),min_width);
+    var candidate = new unmanaged CandidateDomain(rank,D,flags(D),min_width);
     
     
     //===> If candidate is inefficient, then split ===>
@@ -96,22 +96,21 @@ proc clusterFlags (
 //| >    CandidateDomain class    | >
 //|/______________________________|/
 
+// helper class
+class ArrayWrapper
+{
+  var Domain: domain(1,stridable=true);
+  var array: [Domain] int;
+}
+
 class CandidateDomain {
   
   param rank:       int;
   const D:          domain(rank,stridable=true);
   const flags:      [D] bool;
   const min_width:  rank*int;
-  var   signatures: rank*ArrayWrapper;
+  var   signatures: rank*unmanaged ArrayWrapper;
 
-  
-  class ArrayWrapper
-  {
-    var Domain: domain(1,stridable=true);
-    var array: [Domain] int;
-  }
-  
-  
   //|\''''''''''''''''''''|\
   //| >    constructor    | >
   //|/....................|/
@@ -131,16 +130,23 @@ class CandidateDomain {
   // comment can/should be reverted (the introduction of the
   // CandidateDomain() constructor below).
   //
-  proc CandidateDomain(param rank: int,
+  proc init(param rank: int,
                        initD,
                        initFlags,
                        initMin_width) {
+    this.rank = rank;
     D = initD;
     flags = initFlags;
     min_width = initMin_width;
-    //---- Calculate signatures ----
-    for d in 1..rank do
-      signatures(d) = new ArrayWrapper( {D.dim(d)} );
+
+    proc calculate_signatures(param d) {
+      if d == rank then return ( new unmanaged ArrayWrapper( {D.dim(d)} ) ,);
+      else              return ( new unmanaged ArrayWrapper( {D.dim(d)} ) ,
+                                 ( ...calculate_signatures( d + 1 ) )      );
+    }
+    signatures = calculate_signatures(1);
+
+    this.complete();
       
     for idx in D 
     {

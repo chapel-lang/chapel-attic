@@ -9,7 +9,7 @@ use BlockDist;
 const dummyBB: domain(1) = {1..1}; // or whatever bounding box type you want eventually
 
 // Create a distribution without knowing its bounding box dimensions.
-const dist = new Block(dummyBB);
+const dist = new unmanaged Block(dummyBB);
 
 // Any computations here, should not involve 'dist'. //
 
@@ -46,7 +46,7 @@ and destroys the original. We have a .future on this.
 For now, do this instead:
 */
 
-const distTemp = new Block(dummyBB);
+const distTemp = new unmanaged Block(dummyBB);
 const DM = new dmap(distTemp);
 
 DM.changeBoundingBox(1..4);
@@ -79,18 +79,16 @@ proc Block.changeBoundingBox(newBB) {
 
   // From Block.dsiAssign, with mods.
   boundingBox = newBB;
-  const boundingBoxDims = boundingBox.dims();
-  const targetLocDomDims = targetLocDom.dims();
   coforall locid in targetLocDom do
     on targetLocales(locid) {
       delete locDist(locid);
-      locDist(locid) = new LocBlock(rank, idxType, locid, boundingBoxDims,
-                                    targetLocDomDims);
+      locDist(locid) = new unmanaged LocBlock(rank, idxType, locid, boundingBox,
+                                              targetLocDom);
     }
   // NB at this point privatized copies of 'this' on other locales, if any,
   // have stale pointers in their locDist arrays.
 
   // Replicate across locales, if needed.
   if pid >= 0 then
-    _reprivatize(this);
+    _reprivatize(_to_unmanaged(this));
 }

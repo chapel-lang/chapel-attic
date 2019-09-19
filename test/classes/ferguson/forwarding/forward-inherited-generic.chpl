@@ -6,7 +6,7 @@ class Collection {
 }
 
 class Deque : Collection {
-    proc add(elt : eltType) : bool {
+    override proc add(elt : eltType) : bool {
         writeln("Called");
         return true;
     }
@@ -14,12 +14,12 @@ class Deque : Collection {
 
 record wrapper {
     type t;
-    var instance : Deque(t);
+    var instance : unmanaged Deque(t)?;
 
-    inline proc _value { 
+    inline proc _value {
         if instance == nil then
-            instance = new Deque(t);
-        return instance;
+            instance = new unmanaged Deque(t);
+        return instance!;
     }
 
     forwarding _value;

@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2018 Cray Inc.
+ * Copyright 2004-2019 Cray Inc.
  * Other additional copyright holders may be indicated within.
  *
  * The entirety of this work is licensed under the Apache License,
@@ -49,9 +49,6 @@ static void check_afterCallDestructors(); // Checks to be performed after every
                                           // pass following callDestructors.
 static void check_afterLowerIterators();
 static void checkIsIterator(); // Ensure each iterator is flagged so.
-static void checkAggregateTypes(); // Checks that class and record types have
-                                   // default initializers and default type
-                                   // constructors.
 static void check_afterInlineFunctions();
 static void checkResolveRemovedPrims(void); // Checks that certain primitives
                                             // are removed after resolution
@@ -445,7 +442,6 @@ static void check_afterScopeResolve()
 {
   if (fVerify)
   {
-    checkAggregateTypes();
   }
 }
 
@@ -582,29 +578,6 @@ static void checkIsIterator() {
 
 
 //
-// Checks that class and record types have a default initializer and a default
-// type constructor.
-//
-static void checkAggregateTypes() {
-  for_alive_in_Vec(AggregateType, at, gAggregateTypes) {
-    if (at->defaultInitializer == NULL &&
-        at->initializerStyle   == DEFINES_CONSTRUCTOR) {
-      INT_FATAL(at,
-                "aggregate type did not define an initializer "
-                "and has no default constructor");
-    }
-
-    if (at->typeConstructor  == NULL &&
-        at->initializerStyle != DEFINES_CONSTRUCTOR) {
-      INT_FATAL(at,
-                "aggregate type did not define an initializer and "
-                "has no default type constructor");
-    }
-  }
-}
-
-
-//
 // Checks that certain primitives are removed after function resolution
 //
 static void
@@ -614,10 +587,9 @@ checkResolveRemovedPrims(void) {
       switch(call->primitive->tag) {
         case PRIM_BLOCK_PARAM_LOOP:
 
-        case PRIM_INIT:
+        case PRIM_DEFAULT_INIT_VAR:
         case PRIM_INIT_FIELD:
         case PRIM_INIT_VAR:
-        case PRIM_NO_INIT:
         case PRIM_TYPE_INIT:
 
         case PRIM_LOGICAL_FOLDER:
@@ -626,6 +598,7 @@ checkResolveRemovedPrims(void) {
         case PRIM_IS_TUPLE_TYPE:
         case PRIM_IS_STAR_TUPLE_TYPE:
         case PRIM_IS_SUBTYPE:
+        case PRIM_REDUCE:
         case PRIM_REDUCE_ASSIGN:
         case PRIM_TUPLE_EXPAND:
         case PRIM_QUERY:
@@ -633,6 +606,7 @@ checkResolveRemovedPrims(void) {
         case PRIM_QUERY_TYPE_FIELD:
         case PRIM_ERROR:
         case PRIM_COERCE:
+        case PRIM_GATHER_TESTS:
           if (call->parentSymbol)
             INT_FATAL("Primitive should no longer be in AST");
           break;
@@ -649,7 +623,7 @@ static void checkNoRecordDeletes() {
   forv_Vec(CallExpr, call, gCallExprs)
     if (FnSymbol* fn = call->resolvedFunction())
       if(fn->hasFlag(FLAG_DESTRUCTOR))
-        if (!isClass(call->get(1)->typeInfo()->getValType()))
+        if (!isClassLike(call->get(1)->typeInfo()->getValType()))
           INT_FATAL(call, "delete not on a class");
 }
 
@@ -757,7 +731,7 @@ checkFormalActualBaseTypesMatch()
             // Exact match, so OK.
             continue;
 
-          if (isClass(formal->type))
+          if (isClassLikeOrPtr(formal->type))
             // dtNil can be converted to any class type, so OK.
             continue;
 
@@ -814,13 +788,19 @@ checkFormalActualTypesMatch()
             // Exact match, so OK.
             continue;
 
-          if (isClass(formal->type))
+          if (isClassLikeOrPtr(formal->type))
             // dtNil can be converted to any class type, so OK.
             continue;
 
           // All other cases == error.
           INT_FATAL(call, "nil is passed to the formal %s of a non-class type",
                     formal->name);
+        }
+
+        if (SymExpr* se = toSymExpr(actual)) {
+          if (se->symbol() == gDummyRef && formal->hasFlag(FLAG_RETARG))
+            // The compiler generates this combination.
+            continue;
         }
 
         if (formal->getValType() != actual->getValType()) {

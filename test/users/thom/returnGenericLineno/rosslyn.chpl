@@ -1,4 +1,4 @@
-/* 
+/*
  Rosslyn Chapel Benchmarking Suite wotsit
 
  The plan:
@@ -12,14 +12,14 @@ module Rosslyn
     use Time;
 
     /** If we had the facilities, this class would be abstract. */
-    
+
     class Benchmark
     {
         var name = "<Default Benchmark>"; //override this in subclass.
 
         var hasBeenRun = false;
 
-        proc runKernel() 
+        proc runKernel()
         {
             assert(false,"runKernel() method not overridden in Benchmark ",
                    name," subclass");
@@ -43,7 +43,7 @@ module Rosslyn
             timer.start();
             runKernel(); //assume there is minimal overhead here
             timer.stop();
-        
+
             assert(validate(),"Benchmark run did not validate");
 
             return timer.elapsed(units);
@@ -53,13 +53,13 @@ module Rosslyn
 
 
     class BenchmarkFactory
-    {   
+    {
         //abstract
-        proc getInstance() : Benchmark
+        proc getInstance() : unmanaged Benchmark
         {
             assert(false,"BenchmarkFactory.getInstance() should be",
                          "overridden in the subclass");
-            return new Benchmark();
+            return new unmanaged Benchmark();
         }
 
 
@@ -73,12 +73,12 @@ module Rosslyn
 
     class BenchmarkRunner
     {
-        var factory : BenchmarkFactory;
+        var factory : unmanaged BenchmarkFactory;
         var repeats : int;
-           
+
 
         /** Explicit form of default constructor */
-        proc init(factory : BenchmarkFactory, repeats = 5 )
+        proc init(factory : unmanaged BenchmarkFactory, repeats = 5 )
         {
             this.factory = factory;
             this.repeats = repeats;
@@ -86,23 +86,23 @@ module Rosslyn
 
         proc runBenchmark()// : ResultSet
         {
-            var benchmark : Benchmark;
+            var benchmark : unmanaged Benchmark?;
             writeln("Running benchmark: \"",factory,"\", ",repeats," runs");
             var results : [1..repeats] real;//TimeResult;
             for run in 1..repeats
             {
-                
+
                 benchmark = factory.getInstance();
 
-                results[run] = benchmark.timeKernel();                
+                results[run] = benchmark!.timeKernel();
                 writeln("Run[",run,"]: ",results[run]);
             }
-        
-            
+
+
             writeln("Min: ",min reduce results," ",
                     "Avg: ",(+ reduce results)/results.numElements);
-            
+
         }
-        
+
     }
 }

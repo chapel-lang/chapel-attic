@@ -9,7 +9,8 @@
 
 writeln("CHPL_TARGET_PLATFORM: darwin +");
 writeln("CHPL_TARGET_COMPILER: clang +");
-writeln("CHPL_TARGET_ARCH: native +");
+writeln("CHPL_TARGET_ARCH: x86_64 +");
+writeln("CHPL_TARGET_CPU: native +");
 writeln("CHPL_LOCALE_MODEL: flat +");
 writeln("CHPL_COMM: none +");
 writeln("CHPL_TASKS: qthreads +");
@@ -21,4 +22,5 @@ writeln("CHPL_ATOMICS: intrinsics +");
 writeln("CHPL_GMP: none +");
 writeln("CHPL_HWLOC: hwloc +");
 writeln("CHPL_REGEXP: re2 +");
+writeln("CHPL_LLVM: none +");
 writeln("CHPL_AUX_FILESYS: none +");

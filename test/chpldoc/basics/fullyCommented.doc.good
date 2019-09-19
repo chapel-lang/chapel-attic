@@ -1,0 +1,64 @@
+.. default-domain:: chpl
+
+.. module:: fullyCommented.doc
+
+fullyCommented.doc
+==================
+**Usage**
+
+.. code-block:: chapel
+
+   use fullyCommented.doc;
+
+**Submodules**
+
+.. toctree::
+   :maxdepth: 1
+   :glob:
+
+   fullyCommented.doc/*
+
+.. function:: proc method1()
+
+   Comment for method1 
+
+.. function:: proc body()
+
+   Comment for a function with a body 
+
+.. function:: proc hasArg(val: int)
+
+   Comment for a function with an argument 
+
+.. function:: proc argAndBody(val: int)
+
+   Comment for a function with argument and body 
+
+.. default-domain:: chpl
+
+.. module:: Other
+
+Other
+=====
+**Usage**
+
+.. code-block:: chapel
+
+   use fullyCommented.doc.Other;
+
+.. function:: proc inside
+
+   Comment for a function inside module 
+
+.. function:: proc body()
+
+   Comment for a function with a body inside module 
+
+.. function:: proc hasArg(val: int)
+
+   Comment for a function with an argument inside module 
+
+.. function:: proc argAndBody(val: int)
+
+   Comment for a function with argument and body inside module 
+

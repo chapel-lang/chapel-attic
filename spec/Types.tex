@@ -11,13 +11,23 @@ types (sync, single, atomic).
 The syntax of a type is as follows:
 
 \begin{syntax}
-type-specifier:
+type-expression:
   primitive-type
   enum-type
   structured-type
   dataparallel-type
   synchronization-type
+  lvalue-expression
+  if-expression
+  unary-expression
+  binary-expression
 \end{syntax}
+
+Many expressions are syntactically allowed as a type; however not
+all expressions produce a type. For example, a call to a function is
+syntactically allowed as the type of a variable. However it would be an
+error for that call to result in a value (rather than a type) in that
+context.
 
 Programmers can define their own enumerated types, classes, records,
 unions, and type aliases using type declaration statements:
@@ -39,16 +49,18 @@ These statements are defined in Sections \rsec{Enumerated_Types},
 \label{Primitive_Types}
 \index{types!primitive}
 
-%REVIEW: vass: we should explain what separates primitive types from the rest.
-The primitive types are: \chpl{void}, \chpl{bool},
+The concrete primitive types are: \chpl{void}, \chpl{nothing}, \chpl{bool},
 \chpl{int}, \chpl{uint}, \chpl{real}, \chpl{imag}, \chpl{complex},
-and \chpl{string}.  They are defined
-in this section.
+\chpl{string} and \chpl{bytes}.  They are defined in this section.
+
+In addition, there are several generic primitive types that are described
+in~\rsec{Built_in_Generic_types}.
 
 The primitive types are summarized by the following syntax:
 \begin{syntax}
 primitive-type:
   `void'
+  `nothing'
   `bool' primitive-type-parameter-part[OPT]
   `int' primitive-type-parameter-part[OPT]
   `uint' primitive-type-parameter-part[OPT]
@@ -56,6 +68,14 @@ primitive-type:
   `imag' primitive-type-parameter-part[OPT]
   `complex' primitive-type-parameter-part[OPT]
   `string'
+  `bytes'
+  `enum'
+  `record'
+  `class'
+  `owned'
+  `shared'
+  `unmanaged'
+  `borrowed'
 
 primitive-type-parameter-part:
   ( integer-parameter-expression )
@@ -79,10 +99,28 @@ types.
 \index{types!void@\chpl{void}}
 
 The \chpl{void} type is used to represent the lack of a value, for
-example when a function has no arguments and/or no return type.  
+example when a function has no arguments and/or no return type.
+It is an error to assign the result of a function that returns
+\chpl{void} to a variable.
 
-There may be storage associated with a value of type \chpl{void}, in which
-case its lifetime obeys the same rules as a value of type \chpl{int}.
+\subsection{The Nothing Type}
+\label{The_Nothing_type}
+\index{nothing@\chpl{nothing}}
+\index{types!nothing@\chpl{nothing}}
+
+The \chpl{nothing} type is used to indicate a variable or field that
+should be removed by the compiler. The value \chpl{none} is the only
+value of type \chpl{nothing}.
+
+The value \chpl{none} can only be assigned to a variable of type
+\chpl{nothing}, or to a generic variable that will take on the type
+\chpl{nothing}. The variable will be removed from the program and
+have no representation at run-time.
+
+\begin{rationale}
+The \chpl{nothing} type can be used to conditionally remove a variable
+or field from the code based on a \chpl{param} conditional expression. 
+\end{rationale}
 
 \subsection{The Bool Type}
 \label{The_Bool_Type}
@@ -195,7 +233,7 @@ The standard \chpl{Math} module provides some functions on
 complex types. See
 \\ %formatting
 \mbox{$$ $$ $$ $$ $$} %indent
-\url{https://chapel-lang.org/docs/latest/modules/standard/Math.html}
+\url{https://chapel-lang.org/docs/modules/standard/Math.html}
 
 \begin{example}
 Given a complex number \chpl{c} with the value \chpl{3.14+2.72i}, the
@@ -208,19 +246,24 @@ and \chpl{2.72} respectively.
 \index{string@\chpl{string}}
 \index{types!string@\chpl{string}}
 
-Strings are a primitive type designated by the symbol \chpl{string}
-comprised of ASCII characters.  Their length is unbounded.
-
+Strings are a primitive type designated by the symbol \chpl{string} comprised of
+Unicode characters in UTF-8 encoding.  Their length is unbounded.
 
 \begin{openissue}
 There is an expectation of future support for fixed-length strings.
 \end{openissue}
 
-\begin{openissue}
-There is an expectation of future support for different character
-sets, possibly including internationalization.
-\end{openissue}
+\subsection{The Bytes Type}
+\label{The_Bytes_Type}
+\index{bytes@\chpl{bytes}}
+\index{types!bytes@\chpl{bytes}}
 
+Bytes is a primitive type designated by the symbol \chpl{bytes} comprised of
+arbitrary bytes. Bytes are immutable in-place and their length is unbounded.
+
+\begin{openissue}
+There is an expectation of future support for mutable bytes.
+\end{openissue}
 
 \section{Enumerated Types}
 \label{Enumerated_Types}
@@ -254,18 +297,33 @@ enum-type:
 
 An enumerated type defines a set of named constants that can be
 referred to via a member access on the enumerated type.
-These constants are treated as parameters of integral type.  Each
-enumerated type is a distinct type. If the \sntx{init-part} is
-omitted, the \sntx{enum-constant} has an integral value one higher
-than the previous \sntx{enum-constant} in the enum, with the first
-having the value \chpl{1}.
+Each enumerated type is a distinct type.
+
+\index{enumerated types!abstract}
+\index{enumerated types!concrete}
+\index{enumerated types!semi-concrete}
+If the \sntx{init-part} is omitted for all of the named constants in
+an enumerated type, the enumerated values are \emph{abstract} and do
+not have associated integer values.  Any constant that has an
+\sntx{init-part} will be associated with that integer value.  Such
+constants must be parameter values of integral type.  Any constant
+that does not have an \sntx{init-part}, yet which follows one that
+does, will be associated with an integer value one greater than its
+predecessor.  An enumerated type whose first constant has
+an \sntx{init-part} is called \emph{concrete}, since all constants in
+the enum will have an associated integer value, whether explicit or
+implicit.  An enumerated type that specifies an \sntx{init-part} for
+some constants, but not the first is called \emph{semi-concrete}.
+Numeric conversions are automatically supported for enumerated types
+which are concrete or semi-concrete
+(see~\rsec{Explicit_Enumeration_Conversions}).
 
 \begin{chapelexample}{enum.chpl}
 The code
 \begin{chapel}
 enum statesman { Aristotle, Roosevelt, Churchill, Kissinger }
 \end{chapel}
-defines an enumerated type with four constants.  The function
+defines an abstract enumerated type with four constants.  The function
 \begin{chapel}
 proc quote(s: statesman) {
   select s {
@@ -282,7 +340,7 @@ proc quote(s: statesman) {
 }
 \end{chapel}
 \begin{chapelnoprint}
-for s in statesman.Aristotle..statesman.Kissinger do
+for s in statesman do
   quote(s:statesman);
 \end{chapelnoprint}
 \begin{chapeloutput}
@@ -304,7 +362,7 @@ The following method is also available:
 \index{enumerated types!size@\chpl{size}}
 \index{predefined functions!size (enum)@\chpl{size} (enum)}
 \begin{protohead}
-proc $enum$.size: int
+proc $enum$.size: param int
 \end{protohead}
 \begin{protobody}
 The number of constants in the given enumerated type.
@@ -335,17 +393,35 @@ discussed in \rsec{Tuples}.
 
 % TODO: the first sentence does not make strict sense.
 % Overall, it does not feel like this paragraph has any value here.
-The class type defines a type that contains variables and constants,
-called fields, and functions, called methods.  Classes are defined
+A class can contain variables, constants, and methods.
+
+Classes are defined
 in~\rsec{Classes}.  The class type can also contain type aliases and
 parameters.  Such a class is generic and is defined
 in~\rsec{Generic_Types}.
 
+A class type \chpl{C} has several variants:
+\begin{itemize}
+  \item \chpl{C} and \chpl{C?}
+  \item \chpl{owned C} and \chpl{owned C?}
+  \item \chpl{shared C} and \chpl{shared C?}
+  \item \chpl{borrowed C} and \chpl{borrowed C?}
+  \item \chpl{unmanaged C} and \chpl{unmanaged C?}
+\end{itemize}
+
+The variants with a question mark, such as \chpl{owned C?}, can store
+\chpl{nil} (see~\rsec{Nilable_Classes}). Variants without a question mark
+cannot store \chpl{nil}. The keywords \chpl{owned}, \chpl{shared},
+\chpl{borrowed}, and \chpl{unmanaged} indicate the memory management
+strategy used for the class. When none is specified, as with \chpl{C} or
+\chpl{C?}, the class is considered to have generic memory management
+strategy. See~\rsec{Class_Types}.
+
 \subsection{Record Types}
 \label{Types_Record_Types}
 
-The record type is similar to a class type; the primary difference is
-that a record is a value rather than a reference.  Records are defined
+Records can contain variables, constants, and methods. Unlike class
+types, records are values rather than references. Records are defined
 in~\rsec{Records}.
 
 \subsection{Union Types}
@@ -429,12 +505,12 @@ type-alias-declaration-list:
   type-alias-declaration , type-alias-declaration-list
 
 type-alias-declaration:
-  identifier = type-specifier
+  identifier = type-expression
   identifier
 \end{syntax}
 A type alias is a symbol that aliases the type specified in the
-\sntx{type-specifier}.  A use of a type alias has the same meaning as using
-the type specified by \sntx{type-specifier} directly.
+\sntx{type-expression}.  A use of a type alias has the same meaning as using
+the type specified by \sntx{type-expression} directly.
 
 Type aliases defined at the module level are public by default.  The
 optional \sntx{privacy-specifier} keywords are provided to specify or
@@ -444,7 +520,7 @@ see ~\rsec{Visibility_Of_Symbols}.
 If the keyword \chpl{config} precedes the keyword \chpl{type}, the
 type alias is called a configuration type alias.  Configuration type
 aliases can be set at compilation time via compilation flags or other
-implementation-defined means.  The \sntx{type-specifier} in the
+implementation-defined means.  The \sntx{type-expression} in the
 program is ignored if the type-alias is alternatively set.
 
 If the keyword \chpl{extern} precedes the \chpl{type} keyword, the type alias is
@@ -452,7 +528,7 @@ external.  The declared type name is used by Chapel for type resolution, but no
 type alias is generated by the backend.  See the chapter on interoperability
 (\rsec{Interoperability}) for more information on external types.
 
-The \sntx{type-specifier} is optional in the definition of a class or
+The \sntx{type-expression} is optional in the definition of a class or
 record.  Such a type alias is called an unspecified type
 alias. Classes and records that contain type aliases, specified or
 unspecified, are generic~(\rsec{Type_Aliases_in_Generic_Types}).

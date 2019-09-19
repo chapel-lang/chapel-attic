@@ -1,6 +1,7 @@
 foo
 int
 integral
+integral
 any type
 R
 Parent
@@ -12,6 +13,7 @@ GenericParent
 
 bar
 int
+integral
 integral
 any type
 R

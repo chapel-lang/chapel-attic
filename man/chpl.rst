@@ -104,6 +104,26 @@ OPTIONS
 
     Print the module search path used to resolve module for further details.
 
+*Warning and Language Control Options*
+
+**--[no-]permit-unhandled-module-errors**
+
+    Normally, the compiler ensures that all errors are handled for code
+    inside of a module declaration (unless the module overrides that
+    behavior). This flag overrides this default, so that the compiler
+    will compile code in a module that does not handle its errors. If any
+    error comes up during execution, it will cause the program to halt.
+
+**--[no-]warn-unstable**
+
+    Enable [disable] warnings for code that has recently or will recently
+    change in meaning due to language changes.
+
+**--[no-]warnings**
+
+    Enable [disable] the printing of compiler warnings. Defaults to printing
+    warnings.
+
 *Parallelism Control Options*
 
 **--[no-]local**
@@ -160,6 +180,12 @@ OPTIONS
     moved. This is currently a rather conservative pass in the sense that it
     may not identify all code that is truly invariant.
 
+**--[no-]optimize-forall-unordered-ops**
+
+    Enable [disable] optimization of the last statement in forall statements
+    to use unordered communication. This optimization works with runtime
+    support for unordered operations with CHPL_COMM=ugni.
+
 **--[no-]ignore-local-classes**
 
     Disable [enable] local classes
@@ -183,6 +209,12 @@ OPTIONS
 
     Enable [disable] live variable analysis, which is currently only used to
     optimize iterators that are not inlined.
+
+**--[no-]optimize-range-iteration**
+
+    Enable [disable] anonymous range iteration optimizations. This allows the
+    compiler to avoid creating ranges when they are only used for iteration.
+    By default this is enabled.
 
 **--[no-]optimize-loop-iterators**
 
@@ -365,22 +397,31 @@ OPTIONS
 
 **-I, --hdr-search-path <dir>**
 
-    Add dir to the back-end C compiler's search path for header files.
+    Add the specified dir[ectories] to the back-end C compiler's
+    search path for header files along with any directories in the
+    CHPL\_INCLUDE\_PATH environment variable.  Both the environment
+    variable and this flag accept a colon-separated list of
+    directories.
 
 **--ldflags <flags>**
 
-    Add the specified flags to the C compiler link line when linking the
-    generated code. Multiple **--ldflags** *options* can be provided and in
-    that case the combination of the flags will be forwarded to the C
-    compiler.
+    Add the specified flags to the back-end C compiler link line when
+    linking the generated code. Multiple **--ldflags** *options* can
+    be provided and in that case the combination of the flags will be
+    forwarded to the C compiler.
 
 **-l, --lib-linkage <library>**
 
-    Specify a C library to link in on the C compiler command line.
+    Specify a C library to link to on the back-end C compiler command
+    line.
 
 **-L, --lib-search-path <dir>**
 
-    Specify a C library search path on the C compiler command line.
+    Add the specified dir[ectories] to the back-end C compiler's
+    search path for libraries along with any directories in the
+    CHPL\_LIB\_PATH environment variable.  Both the environment
+    variable and this flag accept a colon-separated list of
+    directories.
 
 **-O, --[no-]optimize**
 
@@ -394,8 +435,8 @@ OPTIONS
 
     Causes the generated C code to be compiled with flags that specialize
     the executable to the architecture that is defined by
-    CHPL\_TARGET\_ARCH. The effects of this flag will vary based on choice
-    of back-end compiler and the value of CHPL\_TARGET\_ARCH.
+    CHPL\_TARGET\_CPU. The effects of this flag will vary based on choice
+    of back-end compiler and the value of CHPL\_TARGET\_CPU.
 
 **-o, --output <filename>**
 
@@ -490,6 +531,12 @@ OPTIONS
     instantiated. This flag raises that maximum in the event that a legal
     instantiation is being pruned too aggressively.
 
+**--[no-]print-all-candidates**
+
+    By default, function resolution errors show only a few candidates.
+    Use this flag to see all of the candidates for a call that could
+    not be resolved.
+
 **--[no-]print-callgraph**
 
     Print a textual call graph representing the program being compiled. The
@@ -510,19 +557,11 @@ OPTIONS
     Print the names and source locations of unused functions within the
     user program.
 
-**-s, --set <config param>[=<value>]**
+**-s, --set <config>[=<value>]**
 
-    Overrides the default value of a configuration parameter in the code.
-    For boolean configuration variables, the value can be omitted, causing
-    the default value to be toggled.
-
-**--[no-]permit-unhandled-module-errors**
-
-    Normally, the compiler ensures that all errors are handled for code
-    inside of a module declaration (unless the module overrides that
-    behavior). This flag overrides this default, so that the compiler
-    will compile code in a module that does not handle its errors. If any
-    error comes up during execution, it will cause the program to halt.
+    Overrides the default value of a configuration param, type, var,
+    or const in the code.  If the value is omitted, it will default
+    to the value `true`.
 
 **--[no-]task-tracking**
 
@@ -532,34 +571,6 @@ OPTIONS
     adds compilation-time overhead when it will not be used, so is off by
     default.
 
-**--[no-]warn-const-loops**
-
-    Enable [disable] warnings for 'while' loops whose condition is a 'const'
-    variable, because such a loop condition is likely unintended. 'While'
-    loops with 'param' conditions do not trigger this warning.
-
-**--[no-]warn-special**
-
-    Enable [disable] all special compiler warnings issued due to syntax and
-    other language changes. Currently, these include
-    --[no-]warn-domain-literal and --[no-]warn-tuple-iteration.
-
-**--[no-]warn-domain-literal**
-
-    Enable [disable] compiler warnings regarding the potential use of the
-    old-style domain literal syntax (e.g. [1..2, 3..4]). All array literals
-    with range elements will result in warnings.
-
-**--[no-]warn-tuple-iteration**
-
-    Enable [disable] compiler warnings regarding the potential use of
-    old-style zippering syntax. All uses of tuple iteration will produce
-    warnings.
-
-**--[no-]warnings**
-
-    Enable [disable] the printing of compiler warnings. Defaults to printing
-    warnings.
 
 *Compiler Configuration Options*
 
@@ -655,11 +666,9 @@ OPTIONS
 
 **--target-arch <architecture>**
 
-    Specify the architecture that the compiled executable will be
-    specialized to when **--specialize** is enabled. This flag corresponds
-    with and overrides the $CHPL\_TARGET\_ARCH environment variable
-    (defaults to a best guess based on $CHPL\_COMM, $CHPL\_TARGET\_COMPILER,
-    and $CHPL\_TARGET\_PLATFORM).
+    Specify the machine type or general architecture to use.
+    This flag corresponds with and overrides the $CHPL\_TARGET\_ARCH
+    environment variable (defaults to the result of `uname -m`).
 
 **--target-compiler <compiler>**
 
@@ -668,6 +677,14 @@ OPTIONS
     with and overrides the $CHPL\_TARGET\_COMPILER environment variable
     (defaults to a best guess based on $CHPL\_HOST\_PLATFORM,
     $CHPL\_TARGET\_PLATFORM, and $CHPL\_HOST\_COMPILER).
+
+**--target-cpu <cpu>**
+
+    Specify the cpu model that the compiled executable will be
+    specialized to when **--specialize** is enabled. This flag corresponds
+    with and overrides the $CHPL\_TARGET\_CPU environment variable
+    (defaults to a best guess based on $CHPL\_COMM, $CHPL\_TARGET\_COMPILER,
+    and $CHPL\_TARGET\_PLATFORM).
 
 **--target-platform <platform>**
 

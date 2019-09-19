@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2018 Cray Inc.
+ * Copyright 2004-2019 Cray Inc.
  * Other additional copyright holders may be indicated within.
  *
  * The entirety of this work is licensed under the Apache License,
@@ -37,43 +37,32 @@ struct Serializers {
 };
 
 
-extern bool                             beforeLoweringForallStmts;
-
 extern int                              explainCallLine;
 
 extern SymbolMap                        paramMap;
 
 extern Vec<CallExpr*>                   callStack;
 
-extern bool                             tryFailure;
-
-extern Vec<CallExpr*>                   inits;
-
 extern Vec<BlockStmt*>                  standardModuleSet;
 
 extern char                             arrayUnrefName[];
+extern char                             primCoerceTmpName[];
 
 extern Map<Type*,     FnSymbol*>        autoDestroyMap;
-
-extern Map<FnSymbol*, FnSymbol*>        iteratorLeaderMap;
-
-extern Map<FnSymbol*, FnSymbol*>        iteratorFollowerMap;
 
 extern Map<Type*,     FnSymbol*>        valueToRuntimeTypeMap;
 
 extern std::map<Type*,     Serializers> serializeMap;
 
-extern std::map<CallExpr*, CallExpr*>   eflopiMap;
-
-
-
 
 
 bool       propagateNotPOD(Type* t);
 
-Expr*      resolvePrimInit(CallExpr* call);
+void       resolvePrimInit(CallExpr* call);
 
 bool       isTupleContainingOnlyReferences(Type* t);
+
+bool       isTupleContainingAnyReferences(Type* t);
 
 void       ensureEnumTypeResolved(EnumType* etype);
 
@@ -113,9 +102,34 @@ bool explainCallMatch(CallExpr* call);
 
 bool isDispatchParent(Type* t, Type* pt);
 
+bool allowImplicitNilabilityRemoval(Type* actualType,
+                                    Symbol* actualSym,
+                                    Type* formalType,
+                                    Symbol* formalSym);
+
+bool canCoerceDecorators(ClassTypeDecorator actual,
+                         ClassTypeDecorator formal,
+                         bool allowNonSubtypes,
+                         bool implicitBang);
+bool canInstantiateDecorators(ClassTypeDecorator actual,
+                              ClassTypeDecorator formal);
+bool canInstantiateOrCoerceDecorators(ClassTypeDecorator actual,
+                                      ClassTypeDecorator formal,
+                                      bool allowNonSubtypes,
+                                      bool implicitBang);
+
+bool canCoerceAsSubtype(Type*     actualType,
+                        Symbol*   actualSym,
+                        Type*     formalType,
+                        ArgSymbol* formalSym,
+                        FnSymbol* fn,
+                        bool*     promotes = NULL,
+                        bool*     paramNarrows = NULL);
+
 bool canCoerce(Type*     actualType,
                Symbol*   actualSym,
                Type*     formalType,
+               ArgSymbol* formalSym,
                FnSymbol* fn,
                bool*     promotes = NULL,
                bool*     paramNarrows = NULL);
@@ -123,31 +137,37 @@ bool canCoerce(Type*     actualType,
 bool canDispatch(Type*     actualType,
                  Symbol*   actualSym,
                  Type*     formalType,
+                 ArgSymbol* formalSym = NULL,
                  FnSymbol* fn          = NULL,
                  bool*     promotes    = NULL,
                  bool*     paramNarrows= NULL,
                  bool      paramCoerce = false);
 
-bool fixupDefaultInitCopy(FnSymbol* fn, FnSymbol* newFn, CallExpr* call);
 
 void parseExplainFlag(char* flag, int* line, ModuleSymbol** module);
 
+FnSymbol* findCopyInit(AggregateType* ct);
+
 FnSymbol* getTheIteratorFn(Symbol* ic);
-FnSymbol* getTheIteratorFn(CallExpr* call);
 FnSymbol* getTheIteratorFn(Type* icType);
+
+// task intents
+extern Symbol* markPruned;
+bool isReduceOp(Type* type);
+void convertFieldsOfRecordThis(FnSymbol* fn);
 
 // forall intents
 CallExpr* resolveForallHeader(ForallStmt* pfs, SymExpr* origSE);
-void implementForallIntents1(DefExpr* defChplIter);
-void implementForallIntents2(CallExpr* call, CallExpr* origToLeaderCall);
-void implementForallIntents2wrapper(CallExpr* call, CallExpr* origToLeaderCall);
-void implementForallIntentsNew(ForallStmt* fs, CallExpr* parCall);
-void stashPristineCopyOfLeaderIter(FnSymbol* origLeader, bool ignoreIsResolved);
+void  resolveForallStmts2();
+Expr* replaceForWithForallIfNeeded(ForLoop* forLoop);
+void  setReduceSVars(ShadowVarSymbol*& PRP, ShadowVarSymbol*& PAS,
+                     ShadowVarSymbol*& RP, ShadowVarSymbol* AS);
+void setupAndResolveShadowVars(ForallStmt* fs);
+bool preserveShadowVar(Symbol* var);
+void adjustVoidShadowVariables();
+Expr* lowerPrimReduce(CallExpr* call);
 
-// reduce intents
-void cleanupRedRefs(Expr*& redRef1, Expr*& redRef2);
-void setupRedRefs(FnSymbol* fn, bool nested, Expr*& redRef1, Expr*& redRef2);
-bool isReduceOp(Type* type);
+void buildFastFollowerChecksIfNeeded(CallExpr* checkCall);
 
 FnSymbol* instantiate(FnSymbol* fn, SymbolMap& subs);
 FnSymbol* instantiateSignature(FnSymbol* fn, SymbolMap& subs, CallExpr* call);
@@ -156,6 +176,7 @@ void      instantiateBody(FnSymbol* fn);
 // generics support
 TypeSymbol* getNewSubType(FnSymbol* fn, Symbol* key, TypeSymbol* actualTS);
 void checkInfiniteWhereInstantiation(FnSymbol* fn);
+void popInstantiationLimit(FnSymbol* fn);
 void renameInstantiatedTypeString(TypeSymbol* sym, VarSymbol* var);
 
 FnSymbol* determineRootFunc(FnSymbol* fn);
@@ -164,13 +185,6 @@ void determineAllSubs(FnSymbol*  fn,
                       FnSymbol*  root,
                       SymbolMap& subs,
                       SymbolMap& allSubs);
-
-FnSymbol* instantiateFunction(FnSymbol*  fn,
-                              FnSymbol*  root,
-                              SymbolMap& allSubs,
-                              CallExpr*  call,
-                              SymbolMap& subs,
-                              SymbolMap& map);
 
 void explainAndCheckInstantiation(FnSymbol* newFn, FnSymbol* fn);
 
@@ -208,8 +222,6 @@ void      insertAndResolveCasts(FnSymbol* fn);
 void      ensureInMethodList(FnSymbol* fn);
 
 
-bool      doNotChangeTupleTypeRefLevel(FnSymbol* fn, bool forRet);
-
 bool      hasAutoCopyForType(Type* type);
 FnSymbol* getAutoCopyForType(Type* type);   // requires hasAutoCopyForType()==true
 void      getAutoCopyTypeKeys(Vec<Type*>& keys);
@@ -217,28 +229,34 @@ FnSymbol* getAutoCopy(Type* t);             // returns NULL if there are none
 FnSymbol* getAutoDestroy(Type* t);          //  "
 FnSymbol* getUnalias(Type* t);
 
-Expr*     resolveExpr(Expr* expr);
-
 
 
 bool isPOD(Type* t);
 
 // resolution errors and warnings
+
+// This one does not call USR_STOP
 void printResolutionErrorUnresolved(CallInfo&                  info,
                                     Vec<FnSymbol*>&            visibleFns);
 
 void printResolutionErrorAmbiguous (CallInfo&                  info,
                                     Vec<ResolutionCandidate*>& candidates);
+void printUndecoratedClassTypeNote(Expr* ctx, Type* type);
 
 FnSymbol* resolveNormalCall(CallExpr* call, bool checkonly=false);
 
 void      resolveNormalCallCompilerWarningStuff(FnSymbol* resolvedFn);
+
+void checkMoveIntoClass(CallExpr* call, Type* lhs, Type* rhs);
 
 void lvalueCheck(CallExpr* call);
 
 void checkForStoringIntoTuple(CallExpr* call, FnSymbol* resolvedFn);
 
 bool signatureMatch(FnSymbol* fn, FnSymbol* gn);
+
+bool isSubtypeOrInstantiation(Type* sub, Type* super, Expr* ctx);
+bool isCoercibleOrInstantiation(Type* sub, Type* super, Expr* ctx);
 
 void printTaskOrForallConstErrorNote(Symbol* aVar);
 
@@ -251,13 +269,63 @@ bool fixupTupleFunctions(FnSymbol* fn, FnSymbol* newFn, CallExpr* call);
 AggregateType* computeNonRefTuple(AggregateType* t);
 
 AggregateType* computeTupleWithIntent(IntentTag intent, AggregateType* t);
+AggregateType* computeTupleWithIntentForArg(IntentTag intent, AggregateType* t, ArgSymbol* arg);
 
+void addTupleCoercion(AggregateType* fromT, AggregateType* toT, Symbol* fromSym, Symbol* toSym, Expr* insertBefore);
+
+// other resolution functions
 bool evaluateWhereClause(FnSymbol* fn);
 
 bool isAutoDestroyedVariable(Symbol* sym);
 
+static inline bool isUnresolvedOrGenericReturnType(Type* retType) {
+  return retType == dtUnknown || retType->symbol->hasFlag(FLAG_GENERIC);
+}
+
 SymExpr* findSourceOfYield(CallExpr* yield);
 
+void expandInitFieldPrims();
+
+void removeCopyFns(Type* t);
+
+bool isUnusedClass(Type* t);
+
+void pruneResolvedTree();
+
+void resolveTypeWithInitializer(AggregateType* at, FnSymbol* fn);
+
 void resolvePromotionType(AggregateType* at);
+
+void resolveDestructor(AggregateType* at);
+
+void fixTypeNames(AggregateType* at);
+
+Type* getInstantiationType(Type* actualType, Symbol* actualSym,
+                           Type* formalType, Symbol* formalSym,
+                           Expr* ctx,
+                           bool allowCoercion=true,
+                           bool implicitBang=false);
+
+void resolveIfExprType(CondStmt* stmt);
+
+void trimVisibleCandidates(CallInfo& call,
+                           Vec<FnSymbol*>& mostApplicable,
+                           Vec<FnSymbol*>& visibleFns);
+
+void resolveGenericActuals(CallExpr* call);
+
+Type* computeDecoratedManagedType(AggregateType* canonicalClassType,
+                                  ClassTypeDecorator useDec,
+                                  AggregateType* manager,
+                                  Expr* ctx);
+
+void checkDuplicateDecorators(Type* decorator, Type* decorated, Expr* ctx);
+
+// These enable resolution for functions that don't really match
+// according to the language definition in order to get more errors
+// reported at once. E.g. C? can pass to C.
+void startGenerousResolutionForErrors();
+bool inGenerousResolutionForErrors();
+void stopGenerousResolutionForErrors();
 
 #endif

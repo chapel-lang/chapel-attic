@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2018 Cray Inc.
+ * Copyright 2004-2019 Cray Inc.
  * Other additional copyright holders may be indicated within.
  * 
  * The entirety of this work is licensed under the Apache License,
@@ -24,8 +24,8 @@
 // The required methods are marked with 'REQ' followed by a brief description.
 //
 
-use DimensionalDist2D;
-use RangeChunk only ;
+private use DimensionalDist2D;
+private use RangeChunk only ;
 
 /*
 This Replicated dimension specifier is for use with the
@@ -34,17 +34,17 @@ This Replicated dimension specifier is for use with the
 The dimension of a domain or array for which this specifier is used
 has a *replicand* for each element of ``targetLocales``
 in the same dimension. This is similar to the Replicated distribution
-(:class:`Replicated`). The dimension specifies differs
+(``Replicated``). The dimension specifies differs
 in that it always accesses the local replicand, whereas the Replicated
 distribution accesses all replicands in certain cases, as specified there.
 
-**Constructor Arguments**
+**Initializer Arguments**
 
-The ``ReplicatedDim`` class constructor is available as follows:
+The ``ReplicatedDim`` class initializer is available as follows:
 
   .. code-block:: chapel
 
-    proc ReplicatedDim.ReplicatedDim(numLocales:int)
+    proc ReplicatedDim.init(numLocales:int)
 
 It creates a dimension specifier for replication over ``numLocales`` locales.
 */
@@ -70,7 +70,7 @@ class Replicated1dom {
 //todo-remove?  proc domainT type return domain(1, idxType, stridable);
 
   // our range
-  var wholeR: rangeT;
+  var wholeR: range(idxType, BoundedRangeType.bounded, stridable);
 
   // locale ID in our dimension of the locale this instance is on
   var localLocID = invalidLocID;
@@ -100,7 +100,7 @@ proc ReplicatedDim.dsiGetPrivatizeData1d() {
 
 // REQ if privatization is supported - same purpose as dsiPrivatize()
 proc ReplicatedDim.dsiPrivatize1d(privatizeData) {
-  return new ReplicatedDim(numLocales = privatizeData(1));
+  return new unmanaged ReplicatedDim(numLocales = privatizeData(1));
 }
 
 // REQ does this class need -- and provide -- the localLocID?
@@ -148,7 +148,7 @@ proc Replicated1dom.dsiGetPrivatizeData1d() {
 // privatized (if it supports privatization).
 proc Replicated1dom.dsiPrivatize1d(privDist, privatizeData) {
   assert(privDist.locale == here); // sanity check
-  return new Replicated1dom(idxType   = this.idxType,
+  return new unmanaged Replicated1dom(idxType   = this.idxType,
                   stridable = this.stridable,
                   wholeR    = privatizeData(1));
 }
@@ -215,7 +215,7 @@ proc ReplicatedDim.dsiNewRectangularDom1d(type idxType, param stridable: bool,
                                   type stoIndexT)
 {
   // ignore stoIndexT - all we need is for other places to work out
-  return new Replicated1dom(idxType, stridable);
+  return new unmanaged Replicated1dom(idxType, stridable);
 }
 
 // A nicety: produce a string showing the parameters.
@@ -233,7 +233,7 @@ proc Replicated1dom.dsiIsReplicated1d() param return true;
 // stoIndexT must be the index type of the range returned by
 // dsiSetLocalIndices1d().
 proc Replicated1dom.dsiNewLocalDom1d(type stoIndexT, locId: locIdT) {
-  return new Replicated1locdom(stoIndexT, wholeR.stridable);
+  return new unmanaged Replicated1locdom(stoIndexT, wholeR.stridable);
 }
 
 // REQ given our dimension of the array index, on which locale is it located?

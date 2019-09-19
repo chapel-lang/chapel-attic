@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2018 Cray Inc.
+ * Copyright 2004-2019 Cray Inc.
  * Other additional copyright holders may be indicated within.
  *
  * The entirety of this work is licensed under the Apache License,
@@ -20,6 +20,7 @@
 #include "initializerRules.h"
 
 #include "astutil.h"
+#include "AstVisitorTraverse.h"
 #include "expr.h"
 #include "ForallStmt.h"
 #include "InitNormalize.h"
@@ -29,6 +30,15 @@
 #include "TryStmt.h"
 #include "type.h"
 #include "typeSpecifier.h"
+
+#include "LoopStmt.h"
+#include "ForLoop.h"
+#include "WhileDoStmt.h"
+#include "DoWhileStmt.h"
+#include "ParamForLoop.h"
+#include "ForallStmt.h"
+
+#include <stack>
 
 static bool     isInitStmt (CallExpr* stmt);
 
@@ -54,6 +64,8 @@ static bool     isStringLiteral(Expr* expr, const char* name);
 static bool     isSymbolThis(Expr* expr);
 
 static void     addSuperInit(FnSymbol* fn);
+
+static DefExpr* toLocalField(AggregateType* at, CallExpr* expr);
 
 /************************************* | **************************************
 *                                                                             *
@@ -189,9 +201,26 @@ void errorOnFieldsInArgList(FnSymbol* fn) {
 
     for_vector(SymExpr, se, symExprs) {
       if (se->symbol() == fn->_this) {
-        USR_FATAL_CONT(se,
-                       "invalid access of class member in "
-                       "initializer argument list");
+        bool error = true;
+        if (fn->isCopyInit()) {
+          if (CallExpr* call = toCallExpr(se->parentExpr)) {
+            AggregateType* at = toAggregateType(fn->_this->getValType());
+            if (call->isPrimitive(PRIM_TYPEOF)) {
+              error = false;
+            } else if (DefExpr* def = toLocalField(at, call)) {
+              Symbol* sym = def->sym;
+              if (sym->hasFlag(FLAG_TYPE_VARIABLE) ||
+                  sym->hasFlag(FLAG_PARAM)) {
+                error = false;
+              }
+            }
+          }
+        }
+        if (error) {
+          USR_FATAL_CONT(se,
+                         "invalid access of class member in "
+                         "initializer argument list");
+        }
 
         break;
       }
@@ -216,8 +245,8 @@ static bool isReturnVoid(FnSymbol* fn) {
 
     collectMyCallExprs(fn->body, calls, fn);
 
-    for (size_t i = 0; i < calls.size() && retval == true; i++) {
-      if (calls[i]->isPrimitive(PRIM_RETURN) == true) {
+    for (size_t i = 0; i < calls.size() && retval; i++) {
+      if (calls[i]->isPrimitive(PRIM_RETURN)) {
         SymExpr* value = toSymExpr(calls[i]->get(1));
 
         if (value == NULL || value->symbol()->type != dtVoid) {
@@ -258,7 +287,7 @@ static void preNormalizeInit(FnSymbol* fn) {
   if (fn->throwsError() == true) {
     USR_FATAL(fn, "initializers are not yet allowed to throw errors");
 
-  } else if (at->isRecord() == true) {
+  } else if (at->isRecord() == true || at->isUnion()) {
     preNormalizeInitRecord(fn);
 
   } else if (at->isClass()  == true) {
@@ -339,7 +368,6 @@ static void preNormalizeInitClass(FnSymbol* fn) {
   }
 
   if (at->isGeneric() == false) {
-    buildClassAllocator(fn);
     fn->addFlag(FLAG_INLINE);
 
   } else {
@@ -399,7 +427,7 @@ static void checkInvalidInit(InitNormalize& state, CallExpr* callExpr) {
   } else if (isThisInit(callExpr) == true) {
     initName = "this.init()";
   } else if (isInitDone(callExpr) == true) {
-    initName = "this.initDone()";
+    initName = "this.complete()";
   }
 
   if (initName == NULL) {
@@ -551,32 +579,35 @@ static InitNormalize preNormalize(AggregateType* at,
 
       // Stmt is assignment to a super field
       } else if (DefExpr* field = toSuperFieldInit(state.type(), callExpr)) {
-        if (state.isPhase2() == false) {
+        if (state.isPhase0() == true) {
           USR_FATAL(stmt,
                     "can't set value of field \"%s\" from parent type "
-                    "during phase 1 of initialization",
+                    "before calling this.init() or super.init()",
                     field->sym->name);
 
         } else {
           if (field->sym->hasFlag(FLAG_CONST) == true) {
             USR_FATAL(stmt,
                       "cannot update a const field, \"%s\", "
-                      "from parent type in phase 2",
+                      "from parent type in child initializer",
                       field->sym->name);
 
           } else if (field->sym->hasFlag(FLAG_PARAM) == true) {
             USR_FATAL(stmt,
                       "cannot update a param field, \"%s\", "
-                      "from parent type in phase 2",
+                      "from parent type in child initializer",
                       field->sym->name);
 
           } else if (field->sym->hasFlag(FLAG_TYPE_VARIABLE)) {
             USR_FATAL(stmt,
                       "cannot update a type field, \"%s\", "
-                      "from parent type in phase 2",
+                      "from parent type in child initializer",
                       field->sym->name);
 
           } else {
+            if (state.isPhase1()) {
+              state.processThisUses(callExpr);
+            }
             stmt = stmt->next;
           }
         }
@@ -617,8 +648,9 @@ static InitNormalize preNormalize(AggregateType* at,
             cond->elseStmt = new BlockStmt();
             insert_help(cond->elseStmt, cond, cond->parentSymbol);
 
-            state.initializeFieldsThroughField(cond->elseStmt,
-                                               stateThen.currField());
+            state.initializeFieldsAtTail(cond->elseStmt,
+                                         stateThen.currField());
+
             INT_ASSERT(stateThen.currField() == state.currField());
           }
         }
@@ -637,7 +669,7 @@ static InitNormalize preNormalize(AggregateType* at,
           if (stateThen.isPhase2() != stateElse.isPhase2()) {
             USR_FATAL(cond,
                       "Both arms of a conditional must use this.init() "
-                      "or this.initDone() in phase 1");
+                      "or this.complete() in phase 1");
 
           } else if (stateThen.currField() != stateElse.currField()) {
             unifyConditionalBranchLastField(at, cond, &stateThen, &stateElse);
@@ -682,8 +714,9 @@ void unifyConditionalBranchLastField(AggregateType* at,
                                      InitNormalize* stateElse) {
   DefExpr* thenFieldDef = stateThen->currField();
   DefExpr* elseFieldDef = stateElse->currField();
-  int thenFieldPos = -1;
-  int elseFieldPos = -1;
+  int  thenFieldPos = -1;
+  int  elseFieldPos = -1;
+  bool updateElse   = false;
 
   if (thenFieldDef != NULL) {
     thenFieldPos = at->getFieldPosition(thenFieldDef->name());
@@ -695,31 +728,18 @@ void unifyConditionalBranchLastField(AggregateType* at,
 
   if (thenFieldPos != -1 && elseFieldPos != -1) {
     // Both branches still have fields left to initialize
-    if (thenFieldPos > elseFieldPos) {
-      // The then branch is further along, so update the else branch
-      stateElse->initializeFieldsThroughField(cond->elseStmt,
-                                              thenFieldDef);
-
-    } else if (elseFieldPos > thenFieldPos) {
-      // The else branch is further along, so update the then branch
-      stateThen->initializeFieldsThroughField(cond->thenStmt,
-                                              elseFieldDef);
-
-    } else {
-      // Should never happen, as this function should only be called with
-      // different field positions.
-      INT_ASSERT(false);
-    }
-  } else if (thenFieldPos == -1) {
-    // The then branch initialized the last field, update the else branch
-    stateElse->initializeFieldsThroughField(cond->elseStmt,
-                                            thenFieldDef);
+    updateElse = (thenFieldPos > elseFieldPos);
+    INT_ASSERT(thenFieldPos != elseFieldPos);
   } else {
-    // elseFieldPos == -1
-    // The else branch initialized the last field, update the then branch
-    stateThen->initializeFieldsThroughField(cond->thenStmt,
-                                            elseFieldDef);
+    // then == -1 or else == -1, someone initialized the last field
+    updateElse = (thenFieldPos == -1);
   }
+
+  InitNormalize* mutState = updateElse ? stateElse      : stateThen;
+  BlockStmt*     mutBlock = updateElse ? cond->elseStmt : cond->thenStmt;
+  DefExpr*       endField = updateElse ? thenFieldDef   : elseFieldDef;
+
+  mutState->initializeFieldsAtTail(mutBlock, endField);
 }
 
 /************************************* | **************************************
@@ -821,14 +841,14 @@ bool isInitDone(CallExpr* callExpr) {
 
   if (callExpr->numActuals() == 0) {
     if (UnresolvedSymExpr* usym = toUnresolvedSymExpr(callExpr->baseExpr)) {
-      if (strcmp(usym->unresolved, "initDone") == 0) {
+      if (strcmp(usym->unresolved, "complete") == 0) {
         retval = true;
       }
 
     } else if (CallExpr* subCall = toCallExpr(callExpr->baseExpr)) {
       if (subCall->numActuals()                        ==    2 &&
           subCall->isNamedAstr(astrSdot)               == true &&
-          isStringLiteral(subCall->get(2), "initDone") == true) {
+          isStringLiteral(subCall->get(2), "complete") == true) {
 
         if (isSymbolThis(subCall->get(1)) == true) {
           retval = true;
@@ -875,14 +895,16 @@ static bool isUnacceptableTry(Expr* stmt) {
 *                                                                             *
 ************************************** | *************************************/
 
-static DefExpr* toLocalField(AggregateType* at, CallExpr* expr);
-
 static DefExpr* fieldByName(AggregateType* at, const char* name);
 
 static DefExpr* toSuperFieldInit(AggregateType* at, CallExpr* callExpr) {
   forv_Vec(AggregateType, pt, at->dispatchParents) {
     if (DefExpr* field = toLocalFieldInit(pt, callExpr)) {
       return field;
+    } else if (pt != dtObject) {
+      if (DefExpr* field = toSuperFieldInit(pt, callExpr)) {
+        return field;
+      }
     }
   }
 
@@ -959,7 +981,7 @@ static bool isAssignment(CallExpr* callExpr) {
 static bool isSimpleAssignment(CallExpr* callExpr) {
   bool retval = false;
 
-  if (callExpr->isNamedAstr(astrSequals) == true) {
+  if (callExpr->isNamedAstr(astrSassign) == true) {
     retval = true;
   }
 
@@ -988,138 +1010,23 @@ static bool isCompoundAssignment(CallExpr* callExpr) {
   return retval;
 }
 
-/************************************* | **************************************
-*                                                                             *
-* Consider                                                                    *
-*                                                                             *
-*   var x = new MyClass(10, 20, 30);                                          *
-*                                                                             *
-* and assume MyClass defines an initializer that accepts 3 integers.          *
-*                                                                             *
-* The goal is to allocate an instance of MyClass on the heap and then invoke  *
-* the appropriate init method on this instance.                               *
-*                                                                             *
-* This is implemented by defining an internal "type method" on MyClass that   *
-* performs the allocation and then invokes the init method on the resulting   *
-* instance.  Note that there is a distinct _new method for every init         *
-* method.                                                                     *
-*                                                                             *
-************************************** | *************************************/
-
-FnSymbol* buildClassAllocator(FnSymbol* initMethod) {
-  Symbol*        _this       = initMethod->_this;
-  AggregateType* at          = toAggregateType(_this->type);
-
-  SET_LINENO(at);
-
-  FnSymbol*      fn          = new FnSymbol("_new");
-  BlockStmt*     body        = fn->body;
-  ArgSymbol*     type        = new ArgSymbol(INTENT_BLANK, "chpl_t", at);
-  VarSymbol*     newInstance = newTemp("instance", at);
-  CallExpr*      allocCall   = callChplHereAlloc(at);
-  CallExpr*      initCall    = NULL;
-
-  if (initMethod->hasFlag(FLAG_RESOLVED)) {
-    initCall = new CallExpr(initMethod, gMethodToken, newInstance);
-  } else {
-    initCall = new CallExpr("init", gMethodToken, newInstance);
-  }
-
-  if (initMethod->where != NULL) {
-    fn->where = initMethod->where->copy();
-  }
-
-  type->addFlag(FLAG_TYPE_VARIABLE);
-
-  fn->setMethod(true);
-
-  fn->addFlag(FLAG_COMPILER_GENERATED);
-  fn->addFlag(FLAG_LAST_RESORT);
-
-  if (initMethod->hasFlag(FLAG_SUPPRESS_LVALUE_ERRORS)) {
-    fn->addFlag(FLAG_SUPPRESS_LVALUE_ERRORS);
-  }
-
-  fn->retType = at;
-
-  // Add the formal that provides the type for the type method
-  fn->insertFormalAtTail(type);
-
-  //
-  // Walk the formals to the init method
-  // Ignore _mt and _this
-  //   1) add a corresponding formal to the new type method
-  //   2) add that formal to the call to "init"
-  //
-  int       count = 1;
-  SymbolMap initArgToNewArgMap;
-
-  for_formals(formal, initMethod) {
-    // Ignore _mt and this
-    if (count >= 3) {
-      ArgSymbol* arg = formal->copy();
-
-      initArgToNewArgMap.put(formal, arg);
-
-      fn->insertFormalAtTail(arg);
-
-      if (arg->variableExpr != NULL) {
-        // The argument is a vararg.  If we pass it in plainly, it will be
-        // treated as a single argument instead of the multiple arguments that
-        // we want it to be treated as.  Expand the tuple before passing it in.
-        initCall->insertAtTail(new CallExpr(PRIM_TUPLE_EXPAND,
-                                            new SymExpr(arg)));
-      } else {
-        initCall->insertAtTail(new SymExpr(arg));
-      }
-
-      if (arg->hasFlag(FLAG_INSTANTIATED_PARAM)) {
-        // Continue the building of the parameter map, since these two args are
-        // linked.
-        paramMap.put(arg, paramMap.get(formal));
-      }
-    }
-
-    count = count + 1;
-  }
-
-  // Don't reference arguments to the initializer in the _new argument list
-  // or where clause.
-  update_symbols(fn, &initArgToNewArgMap);
-
-  // Construct the body
-  body->insertAtTail(new DefExpr(newInstance));
-
-  body->insertAtTail(new CallExpr(PRIM_MOVE,   newInstance, allocCall));
-  body->insertAtTail(new CallExpr(PRIM_SETCID, newInstance));
-
-  body->insertAtTail(initCall);
-
-  body->insertAtTail(new CallExpr(PRIM_RETURN, newInstance));
-
-  // Insert the definition in to the tree
-  at->symbol->defPoint->insertBefore(new DefExpr(fn));
-
-  normalize(fn);
-
-  return fn;
-}
-
 static void addSuperInit(FnSymbol* fn) {
-  BlockStmt* body     = fn->body;
+  if (fn->_this->getValType()->symbol->hasFlag(FLAG_NO_OBJECT) == false) {
+    BlockStmt* body     = fn->body;
 
-  VarSymbol* tmp      = newTemp("super_tmp");
+    VarSymbol* tmp      = newTemp("super_tmp");
 
-  Symbol*    _this    = fn->_this;
-  Symbol*    superSym = new_CStringSymbol("super");
-  CallExpr*  superGet = new CallExpr(PRIM_GET_MEMBER_VALUE, _this, superSym);
+    Symbol*    _this    = fn->_this;
+    Symbol*    superSym = new_CStringSymbol("super");
+    CallExpr*  superGet = new CallExpr(PRIM_GET_MEMBER_VALUE, _this, superSym);
 
-  tmp->addFlag(FLAG_SUPER_TEMP);
+    tmp->addFlag(FLAG_SUPER_TEMP);
 
-  // Adding at head therefore add in reverse order
-  body->insertAtHead(new CallExpr("init",    gMethodToken, tmp));
-  body->insertAtHead(new CallExpr(PRIM_MOVE, tmp,          superGet));
-  body->insertAtHead(new DefExpr(tmp));
+    // Adding at head therefore add in reverse order
+    body->insertAtHead(new CallExpr("init",    gMethodToken, tmp));
+    body->insertAtHead(new CallExpr(PRIM_MOVE, tmp,          superGet));
+    body->insertAtHead(new DefExpr(tmp));
+  }
 }
 
 /************************************* | **************************************
@@ -1224,10 +1131,10 @@ static bool isSymbolThis(Expr* expr) {
 
 //
 // Builds the list of AggregateTypes in the hierarchy of `at` that have or
-// require a postInit.
+// require a postinit.
 //
 // Let's say we have a series of classes named from A through Z, where Z
-// inherits from Y and so on. If class Q has a postInit, this function will
+// inherits from Y and so on. If class Q has a postinit, this function will
 // add AggregateTypes to 'chain' from Q through Z with 'Q' at the head.
 //
 static bool buildPostInitChain(AggregateType* at,
@@ -1264,7 +1171,7 @@ static bool isSuperPostInit(CallExpr* stmt) {
   if (CallExpr* call = toCallExpr(stmt->baseExpr)) {
     if (call->numActuals()                        ==    2 &&
         call->isNamedAstr(astrSdot)               == true &&
-        isStringLiteral(call->get(2), "postInit") == true) {
+        isStringLiteral(call->get(2), "postinit") == true) {
       if (CallExpr* subExpr = toCallExpr(call->get(1))) {
         if (subExpr->numActuals()                     == 2    &&
             subExpr->isNamedAstr(astrSdot)            == true &&
@@ -1279,40 +1186,144 @@ static bool isSuperPostInit(CallExpr* stmt) {
   return retval;
 }
 
-static bool hasSuperPostInit(BlockStmt* block) {
-  Expr* stmt   = block->body.head;
-  bool  retval = false;
+class PostinitVisitor : public AstVisitorTraverse {
+  public:
+    PostinitVisitor() : found(false) { }
+    virtual ~PostinitVisitor() { }
 
-  while (stmt != NULL && retval == false) {
-    if (CallExpr* callExpr = toCallExpr(stmt)) {
-      retval = isSuperPostInit(callExpr);
+    bool found;
 
-    } else if (CondStmt* cond = toCondStmt(stmt)) {
-      if (cond->elseStmt == NULL) {
-        retval = hasSuperPostInit(cond->thenStmt);
+    virtual bool enterCondStmt(CondStmt* node);
+    virtual bool enterCallExpr(CallExpr* node);
 
-      } else {
-        retval = hasSuperPostInit(cond->thenStmt) ||
-                 hasSuperPostInit(cond->elseStmt);
-      }
+    virtual bool enterForallStmt(ForallStmt* node);
+    virtual bool enterWhileDoStmt(WhileDoStmt* node);
+    virtual bool enterDoWhileStmt(DoWhileStmt* node);
+    virtual bool enterForLoop(ForLoop* node);
+    virtual bool enterParamForLoop(ParamForLoop* node);
+    virtual bool enterBlockStmt(BlockStmt* node);
 
-    } else if (BlockStmt* block = toBlockStmt(stmt)) {
-      retval = hasSuperPostInit(block);
+    void enterLoopStmt(BlockStmt* node);
+};
 
-    } else if (ForallStmt* block = toForallStmt(stmt)) {
-      retval = hasSuperPostInit(block->loopBody());
-    }
+bool PostinitVisitor::enterCondStmt(CondStmt* node) {
+  PostinitVisitor vis;
+  node->thenStmt->accept(&vis);
 
-    stmt = stmt->next;
+  bool thenPostinit = vis.found;
+  vis.found = false;
+
+  bool elsePostinit = false;
+  if (node->elseStmt != NULL) {
+    node->elseStmt->accept(&vis);
+    elsePostinit = vis.found;
+  } else if (thenPostinit) {
+    USR_FATAL_CONT(node, "\"super.postinit()\" may not be called in a if-statement without an else-branch");
+    return false;
   }
 
-  return retval;
+  if (thenPostinit != elsePostinit) {
+    USR_FATAL_CONT(node, "\"super.postinit()\" must be called in each branch of a conditional or not at all");
+    this->found = true;
+  } else if (thenPostinit) {
+    this->found = true;
+  }
+
+  return false;
+}
+
+bool PostinitVisitor::enterCallExpr(CallExpr* node) {
+  if (isSuperPostInit(node)) {
+    if (found == false) {
+      found = true;
+    } else {
+      USR_FATAL_CONT(node, "Multiple calls to \"super.postinit()\"");
+      return false;
+    }
+  }
+  return true;
+}
+
+bool PostinitVisitor::enterBlockStmt(BlockStmt* node) {
+  if (CallExpr* info = node->blockInfoGet()) {
+    const char* name = NULL;
+    bool isLoweredElseCoforall = false;
+    if (info->isPrimitive(PRIM_BLOCK_BEGIN) ||
+        info->isPrimitive(PRIM_BLOCK_BEGIN_ON)) {
+      name = "begin";
+    } else if (info->isPrimitive(PRIM_BLOCK_COBEGIN)) {
+      name = "cobegin";
+    } else if (info->isPrimitive(PRIM_BLOCK_COFORALL) ||
+               info->isPrimitive(PRIM_BLOCK_COFORALL_ON)) {
+      // coforalls are lowered really early into a CondStmt where each branch
+      // has a for-loop and a PRIM_BLOCK_COFORALL*. In order to avoid
+      // duplicate messages about coforall-statements, do not issue an error
+      // if the coforall is in the else branch.
+      if (ForLoop* loop = toForLoop(node->parentExpr)) {
+        if (BlockStmt* loopParent = toBlockStmt(loop->parentExpr)) {
+          if (CondStmt* cond = toCondStmt(loopParent->parentExpr)) {
+            isLoweredElseCoforall = cond->elseStmt == loopParent;
+          }
+        }
+      }
+
+      name = "coforall";
+    }
+    if (name != NULL) {
+      PostinitVisitor vis;
+      for_alist(next_ast, node->body)
+        next_ast->accept(&vis);
+      if (vis.found && isLoweredElseCoforall == false) {
+        USR_FATAL_CONT(node, "\"super.postinit()\" is not allowed in a %s statement", name);
+      }
+      return false;
+    }
+  }
+
+  return true;
+}
+
+void PostinitVisitor::enterLoopStmt(BlockStmt* node) {
+  PostinitVisitor vis;
+  for_alist(next_ast, node->body)
+    next_ast->accept(&vis);
+
+  if (vis.found) {
+    USR_FATAL_CONT(node, "\"super.postinit()\" is not allowed in loop statements");
+    found = true;
+  }
+}
+
+bool PostinitVisitor::enterForallStmt(ForallStmt* node) {
+  enterLoopStmt(node->loopBody());
+  return false;
+}
+bool PostinitVisitor::enterWhileDoStmt(WhileDoStmt* node) {
+  enterLoopStmt(node);
+  return false;
+}
+bool PostinitVisitor::enterDoWhileStmt(DoWhileStmt* node) {
+  enterLoopStmt(node);
+  return false;
+}
+bool PostinitVisitor::enterForLoop(ForLoop* node) {
+  enterLoopStmt(node);
+  return false;
+}
+bool PostinitVisitor::enterParamForLoop(ParamForLoop* node) {
+  enterLoopStmt(node);
+  return false;
+}
+
+static bool hasSuperPostInit(BlockStmt* block) {
+  PostinitVisitor vis;
+  block->accept(&vis);
+  return vis.found;
 }
 
 //
-// Inserts a call to super.postInit if none exists anywhere in 'fn'
+// Inserts a call to super.postinit if none exists anywhere in 'fn'
 //
-// TODO: what should we do with super.postInits in conditionals?
 // TODO: merge with addSuperInit
 //
 static void insertSuperPostInit(FnSymbol* fn) {
@@ -1329,19 +1340,19 @@ static void insertSuperPostInit(FnSymbol* fn) {
     tmp->addFlag(FLAG_SUPER_TEMP);
 
     // Adding at head therefore add in reverse order
-    body->insertAtHead(new CallExpr("postInit", gMethodToken, tmp));
+    body->insertAtHead(new CallExpr("postinit", gMethodToken, tmp));
     body->insertAtHead(new CallExpr(PRIM_MOVE,  tmp,          superGet));
     body->insertAtHead(new DefExpr(tmp));
   }
 }
 
 //
-// Creates a method named "postInit" on 'at'. A call to "super.postInit" is
+// Creates a method named "postinit" on 'at'. A call to "super.postinit" is
 // added if 'at' is a class.
 //
 static void buildPostInit(AggregateType* at) {
   SET_LINENO(at);
-  FnSymbol* fn     = new FnSymbol("postInit");
+  FnSymbol* fn     = new FnSymbol("postinit");
   ArgSymbol* _mt   = new ArgSymbol(INTENT_BLANK, "_mt", dtMethodToken);
   ArgSymbol* _this = new ArgSymbol(INTENT_BLANK, "this", at);
 
@@ -1368,8 +1379,8 @@ static void buildPostInit(AggregateType* at) {
 }
 
 //
-// Inserts a zero-arg where-less postInit for `at` unless one already exists.
-// Also inserts a super.postInit for any postInit if omitted.
+// Inserts a zero-arg where-less postinit for `at` unless one already exists.
+// Also inserts a super.postinit for any postinit if omitted.
 //
 // Returns number of errors found.
 //
@@ -1386,7 +1397,7 @@ static int insertPostInit(AggregateType* at, bool insertSuper) {
       if (method->formals.length > 2) {
         // Only accept method token and 'this'
         ret += 1;
-        USR_FATAL_CONT(method, "postInit must have zero arguments");
+        USR_FATAL_CONT(method, "postinit must have zero arguments");
       }
       if (at->isClass() == true && insertSuper == true) {
         insertSuperPostInit(method);
@@ -1401,21 +1412,21 @@ static int insertPostInit(AggregateType* at, bool insertSuper) {
   return ret;
 }
 
-static std::set<AggregateType*> postInitCache;
+static std::set<AggregateType*> postinitCache;
 
 //
-// Inserts postInit methods and calls to super.postInit as needed.
+// Inserts postinit methods and calls to super.postinit as needed.
 //
-// If an ancestor of 'at' has a postInit, then every aggregate between 'at' and
-// that ancestor must have a postInit as well.
+// If an ancestor of 'at' has a postinit, then every aggregate between 'at' and
+// that ancestor must have a postinit as well.
 //
-// If postInits on a type have a where clause, insert a where-less postInit
+// If postinits on a type have a where clause, insert a where-less postinit
 // so the ancestors will always be called.
 //
 void preNormalizePostInit(AggregateType* at) {
   // Cache results to avoid extra work and to avoid looking for various forms
-  // of super.postInit.
-  if (postInitCache.find(at) != postInitCache.end()) {
+  // of super.postinit.
+  if (postinitCache.find(at) != postinitCache.end()) {
     return;
   }
 
@@ -1425,15 +1436,16 @@ void preNormalizePostInit(AggregateType* at) {
 
   int errors = 0;
   for_vector(AggregateType, cur, chain) {
-    if (postInitCache.find(cur) == postInitCache.end()) {
-      if (cur->hasInitializers() == false) {
-        cur->symbol->addFlag(FLAG_USE_DEFAULT_INIT);
-      }
+    if (postinitCache.find(cur) == postinitCache.end()) {
       // Don't insert a super.init for the highest ancestor
       bool insertSuper = cur != chain.front();
       errors += insertPostInit(cur, insertSuper);
-      postInitCache.insert(cur);
+      postinitCache.insert(cur);
     }
+  }
+
+  if (isRecord(at) && at->hasPostInitializer()) {
+    at->symbol->addFlag(FLAG_NOT_POD);
   }
 
   if (errors > 0) {

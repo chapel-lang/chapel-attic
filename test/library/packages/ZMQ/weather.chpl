@@ -61,7 +61,7 @@ proc Launcher(exec: string) {
 }
 
 proc Master(exec: string) {
-  var rand = new RandomStream(real,13); rand.getNext();
+  var rand = new borrowed RandomStream(real,13); rand.getNext();
   var ctxt: Context;
   var sock = ctxt.socket(ZMQ.PUB);
   sock.bind("tcp://*:5556");
@@ -85,7 +85,7 @@ proc Worker(exec: string) {
   var ctxt: Context;
   var sock = ctxt.socket(ZMQ.SUB);
   sock.connect("tcp://localhost:5556");
-  sock.setsockopt(ZMQ.SUBSCRIBE, zipcode);
+  sock.setSubscribe(zipcode);
 
   record WeatherData {
     var zipcode, temperature, humidity: int;

@@ -7,20 +7,18 @@ class C {
 
 class D : C {
   var y : real = 2.0;
-  proc print() {
+  override proc print() {
     writeln(this);
   }
 }
 
-proc foo(c : C) {
+proc foo(c : borrowed C) {
   c.print();
 }
 
-var c : C;
+var c : borrowed C?;
 
-c = new C();
-foo(c);
-delete c;
-c = new D();
-foo(c);
-delete c;
+c = new borrowed C();
+foo(c!);
+c = new borrowed D();
+foo(c!);

@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2018 Cray Inc.
+ * Copyright 2004-2019 Cray Inc.
  * Other additional copyright holders may be indicated within.
  *
  * The entirety of this work is licensed under the Apache License,
@@ -38,6 +38,7 @@ class ModuleSymbol;
 class Type;
 
 BlockStmt* buildPragmaStmt(Vec<const char*>*, BlockStmt*);
+DefExpr* buildPragmaDefExpr(Vec<const char*>*, DefExpr*);
 
 CallExpr* buildOneTuple(Expr* elem);
 CallExpr* buildTuple(CallExpr* call);
@@ -48,10 +49,11 @@ Expr* buildNamedActual(const char* name, Expr* expr);
 
 Expr* buildFormalArrayType(Expr* iterator, Expr* eltType, Expr* index = NULL);
 
-Expr* buildIntLiteral(const char* pch);
+Expr* buildIntLiteral(const char* pch, const char* file = NULL, int line = -1);
 Expr* buildRealLiteral(const char* pch);
 Expr* buildImagLiteral(const char* pch);
 Expr* buildStringLiteral(const char* pch);
+Expr* buildBytesLiteral(const char* pch);
 Expr* buildCStringLiteral(const char* pch);
 
 Expr* buildDotExpr(BaseAST* base, const char* member);
@@ -60,9 +62,11 @@ Expr* buildDotExpr(const char* base, const char* member);
 BlockStmt* buildChapelStmt(Expr* expr = NULL);
 BlockStmt* buildErrorStandin();
 
-BlockStmt* buildUseStmt(CallExpr* modules);
-BlockStmt* buildUseStmt(Expr* mod, std::vector<OnlyRename*>* names, bool except);
-bool processStringInRequireStmt(const char* str, bool parseTime);
+BlockStmt* buildUseStmt(CallExpr* modules, bool privateUse);
+BlockStmt* buildUseStmt(Expr* mod, std::vector<OnlyRename*>* names, bool except,
+                        bool privateUse);
+bool processStringInRequireStmt(const char* str, bool parseTime,
+                                const char* modFilename);
 BlockStmt* buildRequireStmt(CallExpr* args);
 BlockStmt* buildTupleVarDeclStmt(BlockStmt* tupleBlock, Expr* type, Expr* init);
 BlockStmt* buildLabelStmt(const char* name, Expr* stmt);
@@ -95,26 +99,18 @@ BlockStmt* buildCoforallLoopStmt(Expr* indices,
 BlockStmt* buildGotoStmt(GotoTag tag, const char* name);
 BlockStmt* buildPrimitiveStmt(PrimitiveTag tag, Expr* e1 = NULL, Expr* e2 = NULL);
 BlockStmt* buildDeleteStmt(CallExpr* exprlist);
-CallExpr* zipToTuple(CallExpr* zipExpr);
-BlockStmt* buildForallLoopStmt(Expr* indices,
-                               Expr* iterator,
-                               ForallIntents* forall_intents,
-                               BlockStmt* body,
-                               bool zippered = false,
-                               VarSymbol* useThisGlobalOp = NULL);
-CallExpr* buildForLoopExpr(Expr* indices,
-                           Expr* iterator,
-                           Expr* expr,
-                           Expr* cond = NULL,
-                           bool maybeArrayType = false,
-                           bool zippered = false);
-ForallExpr* buildForallLoopExpr(Expr* indices,
-                              Expr* iterator,
-                              Expr* expr,
-                              Expr* cond = NULL,
-                              bool maybeArrayType = false,
-                              bool zippered = false);
-void convertForallExpressions();
+Expr* buildForLoopExpr(Expr* indices,
+                       Expr* iterator,
+                       Expr* expr,
+                       Expr* cond = NULL,
+                       bool maybeArrayType = false,
+                       bool zippered = false);
+Expr* buildForallLoopExpr(Expr* indices,
+                          Expr* iterator,
+                          Expr* expr,
+                          Expr* cond = NULL,
+                          bool maybeArrayType = false,
+                          bool zippered = false);
 Expr* buildForallLoopExprFromArrayType(CallExpr* buildArrRTTypeCall,
                                            bool recursiveCall = false);
 BlockStmt* buildParamForLoopStmt(const char* index, Expr* range, BlockStmt* block);
@@ -128,7 +124,10 @@ CallExpr* buildReduceExpr(Expr* op, Expr* data, bool zippered = false);
 CallExpr* buildScanExpr(Expr* op, Expr* data, bool zippered = false);
 
 
-BlockStmt* buildVarDecls(BlockStmt* stmts, std::set<Flag> flags, const char* docs);
+std::set<Flag>* buildVarDeclFlags(Flag flag1 = FLAG_UNKNOWN,
+                                  Flag flag2 = FLAG_UNKNOWN);
+BlockStmt* buildVarDecls(BlockStmt* stmts, const char* docs = NULL,
+                         std::set<Flag>* flags = NULL, Expr* cnameExpr = NULL);
 
 DefExpr*  buildClassDefExpr(const char*   name,
                             const char*   cname,
@@ -144,6 +143,9 @@ DefExpr*  buildArgDefExpr(IntentTag tag, const char* ident, Expr* type, Expr* in
 DefExpr*  buildTupleArgDefExpr(IntentTag tag, BlockStmt* tuple, Expr* type, Expr* init);
 FnSymbol* buildFunctionFormal(FnSymbol* fn, DefExpr* def);
 FnSymbol* buildLambda(FnSymbol* fn);
+
+BlockStmt* buildExternExportFunctionDecl(Flag externOrExport, Expr* paramCNameExpr, BlockStmt* blockFnDef);
+
 FnSymbol* buildFunctionSymbol(FnSymbol*   fn,
                               const char* name,
                               IntentTag   thisTag,
@@ -153,6 +155,7 @@ BlockStmt* buildFunctionDecl(FnSymbol*   fn,
                              Expr*       optRetType,
                              bool        optThrowsError,
                              Expr*       optWhere,
+                             Expr*       optLifetimeConstraints,
                              BlockStmt*  optFnBody,
                              const char* docs);
 void applyPrivateToBlock(BlockStmt* block);
@@ -177,5 +180,10 @@ Expr* tryBangExpr(Expr*);
 // Intended to help issue better compile errors
 // Converts a misuse of 'if a=b' into 'if a==b' and warns.
 Expr* convertAssignmentAndWarn(Expr* a, const char* op, Expr* b);
+
+// Emits an error for an attempt to redefine an internal type.
+// The string name will be used in the error message.
+void redefiningReservedTypeError(const char* name);
+void redefiningReservedWordError(const char* name);
 
 #endif

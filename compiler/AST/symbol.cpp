@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2018 Cray Inc.
+ * Copyright 2004-2019 Cray Inc.
  * Other additional copyright holders may be indicated within.
  *
  * The entirety of this work is licensed under the Apache License,
@@ -42,15 +42,16 @@
 Symbol *gNil = NULL;
 Symbol *gUnknown = NULL;
 Symbol *gMethodToken = NULL;
+Symbol *gDummyRef = NULL;
 Symbol *gTypeDefaultToken = NULL;
 Symbol *gLeaderTag = NULL, *gFollowerTag = NULL, *gStandaloneTag = NULL;
 Symbol *gModuleToken = NULL;
 Symbol *gNoInit = NULL;
 Symbol *gVoid = NULL;
+Symbol *gNone = NULL;
 Symbol *gFile = NULL;
 Symbol *gStringC = NULL;
 Symbol *gStringCopy = NULL;
-Symbol *gCVoidPtr = NULL;
 Symbol *gOpaque = NULL;
 Symbol *gTimer = NULL;
 Symbol *gTaskID = NULL;
@@ -59,14 +60,21 @@ Symbol *gSingleVarAuxFields = NULL;
 
 VarSymbol *gTrue = NULL;
 VarSymbol *gFalse = NULL;
-VarSymbol *gTryToken = NULL;
 VarSymbol *gBoundsChecking = NULL;
 VarSymbol *gCastChecking = NULL;
+VarSymbol *gNilChecking = NULL;
+VarSymbol *gLegacyClasses = NULL;
+VarSymbol *gOverloadSetsChecks = NULL;
 VarSymbol *gDivZeroChecking = NULL;
 VarSymbol* gPrivatization = NULL;
 VarSymbol* gLocal = NULL;
+VarSymbol* gWarnUnstable = NULL;
+VarSymbol* gIteratorBreakToken = NULL;
 VarSymbol* gNodeID = NULL;
 VarSymbol *gModuleInitIndentLevel = NULL;
+VarSymbol *gInfinity = NULL;
+VarSymbol *gNan = NULL;
+VarSymbol *gUninstantiated = NULL;
 
 void verifyInTree(BaseAST* ast, const char* msg) {
   if (ast != NULL && ast->inTree() == false) {
@@ -164,6 +172,7 @@ static Qualifier qualifierForArgIntent(IntentTag intent)
 
     // no default to get compiler warning if other intents are added
   }
+  INT_FATAL("unknown intent");
   return QUAL_UNKNOWN;
 }
 
@@ -254,7 +263,8 @@ bool Symbol::hasEitherFlag(Flag aflag, Flag bflag) const {
 // Don't generate documentation for this symbol, either because it is private,
 // or because the symbol should not be documented independent of privacy
 bool Symbol::noDocGen() const {
-  return hasFlag(FLAG_NO_DOC) || hasFlag(FLAG_PRIVATE);
+  return hasFlag(FLAG_NO_DOC) || hasFlag(FLAG_PRIVATE) ||
+    hasFlag(FLAG_COMPILER_GENERATED);
 }
 
 
@@ -351,6 +361,16 @@ SymExpr* Symbol::getSingleDef() const {
   return ret;
 }
 
+SymExpr* Symbol::getSingleDefUnder(Symbol* parent) const {
+  SymExpr* ret = NULL;
+  for_SymbolDefs(def, this) {
+    if (ret != NULL) return NULL;
+    if (def->parentSymbol != parent) continue;
+    ret = def;
+  }
+  return ret;
+}
+
 
 Expr* Symbol::getInitialization() const {
   // In theory, this should be the first "def" for the symbol,
@@ -361,8 +381,18 @@ Expr* Symbol::getInitialization() const {
   FnSymbol* fn = toFnSymbol(defPoint->parentSymbol);
   ModuleSymbol* mod = toModuleSymbol(defPoint->parentSymbol);
   if (fn == NULL && mod != NULL ) {
-    // Global variables are initialized in their module init function
-    fn = mod->initFn;
+    // Global variables are initialized in their module init function, unless
+    // it's used in a loopexpr wrapper function for an array type.
+    //
+    // BHARSH 2018-10-03: A temporary at global scope whose first SymExpr
+    // is inside a loopexpr wrapper *should* have been initialized in that
+    // wrapper function.
+    if (firstSymExpr()->getFunction()->hasFlag(FLAG_MAYBE_ARRAY_TYPE) &&
+        this->hasFlag(FLAG_TEMP)) {
+      fn = firstSymExpr()->getFunction();
+    } else {
+      fn = mod->initFn;
+    }
   }
 
   Expr* stmt;
@@ -422,12 +452,12 @@ Expr* Symbol::getInitialization() const {
         }
       }
 
-      INT_ASSERT(handled); // did we encounter new AST pattern?
+      if (handled == false)
+        break;
     }
     stmt = stmt->next;
   }
 
-  INT_FATAL(defPoint, "couldn't find initialization");
   return NULL;
 }
 
@@ -440,6 +470,10 @@ bool isString(Symbol* symbol) {
   return isString(symbol->type);
 }
 
+bool isBytes(Symbol* symbol) {
+  return isBytes(symbol->type);
+}
+
 bool isUserDefinedRecord(Symbol* symbol) {
   return isUserDefinedRecord(symbol->type);
 }
@@ -447,7 +481,6 @@ bool isUserDefinedRecord(Symbol* symbol) {
 /******************************** | *********************************
 *                                                                   *
 * Common base class for ArgSymbol and VarSymbol.                    *
-* Also maintains a small amount of IPE specific state.              *
 *                                                                   *
 ********************************* | ********************************/
 
@@ -870,9 +903,8 @@ const char* ArgSymbol::intentDescrString() {
     case INTENT_PARAM: return "'param'";
     case INTENT_TYPE: return "'type'";
   }
-
   INT_FATAL(this, "unknown intent");
-  return "unknown intent";
+  return "<unknown intent>";
 }
 
 // describes the given intent (for use in an English sentence)
@@ -889,8 +921,9 @@ const char* intentDescrString(IntentTag intent) {
     case INTENT_REF:       return "'ref' intent";
     case INTENT_PARAM:     return "'param' intent";
     case INTENT_TYPE:      return "'type' intent";
-    default:               return "<unknown intent>";
   }
+  INT_FATAL("unknown intent");
+  return "<unknown intent>";
 }
 
 void ArgSymbol::accept(AstVisitor* visitor) {
@@ -918,14 +951,14 @@ void ArgSymbol::accept(AstVisitor* visitor) {
 
 ShadowVarSymbol::ShadowVarSymbol(ForallIntentTag iIntent,
                                  const char* name,
-                                 Expr* outerVar,
+                                 SymExpr* outerVar,
                                  Expr* spec):
   VarSymbol(E_ShadowVarSymbol, name, dtUnknown),
   intent(iIntent),
-  // For task-private variables, set 'outerVarRep' to NULL.
-  outerVarRep(outerVar),
+  outerVarSE(outerVar),
   specBlock(NULL),
-  reduceGlobalOp(NULL),
+  svInitBlock(new BlockStmt()),
+  svDeinitBlock(new BlockStmt()),
   pruneit(false)
 {
   if (intentsResolved)
@@ -943,17 +976,12 @@ void ShadowVarSymbol::verify() {
   Symbol::verify();
   if (astTag != E_ShadowVarSymbol)
     INT_FATAL(this, "Bad ShadowVarSymbol::astTag");
-  if (!iteratorsLowered && !isReduce())
-    INT_ASSERT(outerVarRep);
-  if (outerVarRep && outerVarRep->parentSymbol != this)
-    INT_FATAL(this, "Bad ShadowVarSymbol::outerVarRep::parentSymbol");
+
+  if (outerVarSE && outerVarSE->parentSymbol != this)
+    INT_FATAL(this, "Bad ShadowVarSymbol::outerVarSE::parentSymbol");
   if (specBlock && specBlock->parentSymbol != this)
     INT_FATAL(this, "Bad ShadowVarSymbol::specBlock::parentSymbol");
-  if (outerVarRep) {
-    verifyNotOnList(outerVarRep);
-    // this assert holds already after scopeResolve
-    INT_ASSERT(!normalized || isSymExpr(outerVarRep));
-  }
+  verifyNotOnList(outerVarSE);
   // for VarSymbol
   if (!type)
     INT_FATAL(this, "ShadowVarSymbol::type is NULL");
@@ -964,73 +992,114 @@ void ShadowVarSymbol::verify() {
     INT_ASSERT(pfs);
     INT_ASSERT(defPoint->list == &(pfs->shadowVariables()));
   }
-  INT_ASSERT(isReduce() == (intent == TFI_REDUCE));
-  if (!iteratorsLowered && specBlock != NULL)
-    INT_ASSERT(isReduce());
+  if (specBlock != NULL)
+    INT_ASSERT(intent == TFI_REDUCE || intent == TFI_REDUCE_OP);
+  INT_ASSERT(!iteratorsLowered); // should be gone at lowerIterators
 }
 
 void ShadowVarSymbol::accept(AstVisitor* visitor) {
   visitor->visitVarSym(this);
-  if (outerVarRep)
-    outerVarRep->accept(visitor);
+  if (outerVarSE)
+    outerVarSE->accept(visitor);
   if (specBlock)
     specBlock->accept(visitor);
 }
 
 ShadowVarSymbol* ShadowVarSymbol::copyInner(SymbolMap* map) {
   ShadowVarSymbol* ss = new ShadowVarSymbol(intent, name,
-                                            COPY_INT(outerVarRep), NULL);
+                                            COPY_INT(outerVarSE), NULL);
   ss->type = type;
   ss->qual = qual;
-  ss->specBlock   = COPY_INT(specBlock);
+  ss->specBlock     = COPY_INT(specBlock);
+  ss->svInitBlock   = COPY_INT(svInitBlock);
+  ss->svDeinitBlock = COPY_INT(svDeinitBlock);
+
   ss->copyFlags(this);
   ss->cname = cname;
   return ss;
 }
 
 void ShadowVarSymbol::replaceChild(BaseAST* oldAst, BaseAST* newAst) {
-  if (oldAst == outerVarRep)
-    outerVarRep = toSymExpr(newAst);
+  if (oldAst == outerVarSE)
+    outerVarSE = toSymExpr(newAst);
   else if (oldAst == specBlock)
     specBlock = toBlockStmt(newAst);
+  else if (oldAst == svInitBlock)
+    svInitBlock = toBlockStmt(newAst);
+  else if (oldAst == svDeinitBlock)
+    svDeinitBlock = toBlockStmt(newAst);
   else
     INT_FATAL(this, "Unexpected case in ShadowVarSymbol::replaceChild");
 }
 
 bool ShadowVarSymbol::isConstant() const {
-  switch (intent) {
+  switch (intent)
+  {
     case TFI_DEFAULT:
       return type->isDefaultIntentConst();
+
     case TFI_CONST:
     case TFI_CONST_IN:
     case TFI_CONST_REF:
+    case TFI_IN_PARENT:
       return true;
+
     case TFI_IN:
     case TFI_REF:
     case TFI_REDUCE:
+    case TFI_REDUCE_OP:
+    case TFI_REDUCE_PARENT_AS:
+    case TFI_REDUCE_PARENT_OP:
       return false;
+
+    case TFI_TASK_PRIVATE:
+      return VarSymbol::isConstant();
   }
   return false; // dummy
 }
 
 bool ShadowVarSymbol::isConstValWillNotChange() {
-  //
-  // This is written to only be called post resolveIntents
-  //
-  INT_ASSERT(intent != TFI_DEFAULT && intent != TFI_CONST);
-  return intent == TFI_CONST_IN;
+  switch (intent) {
+    case TFI_DEFAULT:
+    case TFI_CONST:
+      // Caller responsibility - no abstract intents please.
+      INT_ASSERT(false);
+      return false;
+
+    case TFI_CONST_IN:
+    case TFI_IN_PARENT: // should this be here?
+      return true;
+
+    case TFI_CONST_REF:
+    case TFI_IN:
+    case TFI_REF:
+    case TFI_REDUCE:
+    case TFI_REDUCE_OP:
+    case TFI_REDUCE_PARENT_AS:
+    case TFI_REDUCE_PARENT_OP:
+      return false;
+
+    case TFI_TASK_PRIVATE:
+      return VarSymbol::isConstValWillNotChange();
+  }
+  return false; // dummy
 }
 
 // describes the intent (for use in an English sentence)
 const char* ShadowVarSymbol::intentDescrString() const {
   switch (intent) {
-    case TFI_DEFAULT:   return "default intent";
-    case TFI_CONST:     return "'const' intent";
-    case TFI_IN:        return "'in' intent";
-    case TFI_CONST_IN:  return "'const in' intent";
-    case TFI_REF:       return "'ref' intent";
-    case TFI_CONST_REF: return "'const ref' intent";
-    case TFI_REDUCE:    return "'reduce' intent";
+    case TFI_DEFAULT:       return "default intent";
+    case TFI_CONST:         return "'const' intent";
+    case TFI_IN_PARENT:     return "parent-in intent";
+    case TFI_IN:            return "'in' intent";
+    case TFI_CONST_IN:      return "'const in' intent";
+    case TFI_REF:           return "'ref' intent";
+    case TFI_CONST_REF:     return "'const ref' intent";
+    case TFI_REDUCE:        return "'reduce' intent";
+    case TFI_REDUCE_OP:        return "reduce-Op intent";
+    case TFI_REDUCE_PARENT_AS: return "parent-reduce-AS intent";
+    case TFI_REDUCE_PARENT_OP: return "parent-reduce-Op intent";
+    case TFI_TASK_PRIVATE:  return "task-private intent";
   }
   INT_FATAL(this, "unknown intent");
   return "unknown intent"; //dummy
@@ -1047,14 +1116,64 @@ Expr* ShadowVarSymbol::reduceOpExpr() const {
   return specBlock->body.head;
 }
 
+ShadowVarSymbol* ShadowVarSymbol::ParentvarForIN() const {
+  const ShadowVarSymbol* SI = this;
+  DefExpr* soDef = toDefExpr(SI->defPoint->prev);
+  ShadowVarSymbol* SO = toShadowVarSymbol(soDef->sym);
+  INT_ASSERT(SO->intent == TFI_IN_PARENT);
+  return SO;
+}
+
+ShadowVarSymbol* ShadowVarSymbol::INforParentvar() const {
+  const ShadowVarSymbol* SO = this;
+  DefExpr* siDef = toDefExpr(SO->defPoint->next);
+  ShadowVarSymbol* SI = toShadowVarSymbol(siDef->sym);
+  INT_ASSERT(SI->intent == TFI_IN || SI->intent == TFI_CONST_IN);
+  return SI;
+}
+
+ShadowVarSymbol* ShadowVarSymbol::ReduceOpForAccumState() const {
+  const ShadowVarSymbol* AS = this;
+  DefExpr* rpDef = toDefExpr(AS->defPoint->prev);
+  ShadowVarSymbol* RP = toShadowVarSymbol(rpDef->sym);
+  INT_ASSERT(RP->intent == TFI_REDUCE_OP);
+  return RP;
+}
+
+ShadowVarSymbol* ShadowVarSymbol::AccumStateForReduceOp() const {
+  const ShadowVarSymbol* RP = this;
+  DefExpr* asDef = toDefExpr(RP->defPoint->next);
+  ShadowVarSymbol* AS = toShadowVarSymbol(asDef->sym);
+  INT_ASSERT(AS->intent == TFI_REDUCE);
+  return AS;
+}
+
+ShadowVarSymbol* ShadowVarSymbol::ReduceOpForParentRP() const {
+  const ShadowVarSymbol* PRP = this;
+  DefExpr* rpDef = toDefExpr(PRP->defPoint->next->next);
+  ShadowVarSymbol* RP = toShadowVarSymbol(rpDef->sym);
+  INT_ASSERT(RP->intent == TFI_REDUCE_OP);
+  return RP;
+}
+
+ShadowVarSymbol* ShadowVarSymbol::AccumStateForParentAS() const {
+  const ShadowVarSymbol* PAS = this;
+  DefExpr* asDef = toDefExpr(PAS->defPoint->next->next);
+  ShadowVarSymbol* AS = toShadowVarSymbol(asDef->sym);
+  INT_ASSERT(AS->intent == TFI_REDUCE);
+  return AS;
+}
+
 void ShadowVarSymbol::removeSupportingReferences() {
-  if (outerVarRep) outerVarRep->remove();
-  if (specBlock)   specBlock->remove();
+  if (outerVarSE)    outerVarSE->remove();
+  if (specBlock)     specBlock->remove();
+  if (svInitBlock)   svInitBlock->remove();
+  if (svDeinitBlock) svDeinitBlock->remove();
 }
 
 bool isOuterVarOfShadowVar(Expr* expr) {
   if (ShadowVarSymbol* ss = toShadowVarSymbol(expr->parentSymbol))
-    if (expr == ss->outerVarRep)
+    if (expr == ss->outerVarSE)
       return true;
   return false;
 }
@@ -1072,7 +1191,8 @@ TypeSymbol::TypeSymbol(const char* init_name, Type* init_type) :
     llvmTbaaAggTypeDescriptor(NULL),
     llvmTbaaStructCopyNode(NULL), llvmConstTbaaStructCopyNode(NULL),
     llvmDIType(NULL),
-    doc(NULL)
+    doc(NULL),
+    instantiationPoint(NULL)
 {
   addFlag(FLAG_TYPE_VARIABLE);
   if (!type)
@@ -1099,6 +1219,12 @@ TypeSymbol::copyInner(SymbolMap* map) {
   new_type->addSymbol(new_type_symbol);
   new_type_symbol->copyFlags(this);
   new_type_symbol->cname = cname;
+  new_type_symbol->instantiationPoint = instantiationPoint;
+  if (AggregateType* at = toAggregateType(new_type)) {
+    for_fields(field, at) {
+      insert_help(field->defPoint, NULL, new_type_symbol);
+    }
+  }
   return new_type_symbol;
 }
 
@@ -1115,111 +1241,6 @@ void TypeSymbol::accept(AstVisitor* visitor) {
 
     visitor->exitTypeSym(this);
   }
-}
-
-void TypeSymbol::renameInstantiatedMulti(SymbolMap& subs, FnSymbol* fn) {
-  renameInstantiatedStart();
-
-  bool notFirst = false;
-  for_formals(formal, fn) {
-    if (Symbol* value = subs.get(formal)) {
-      if (!notFirst) {
-        if (TypeSymbol* ts = toTypeSymbol(value)) {
-          if (this->hasFlag(FLAG_TUPLE)) {
-            if (this->hasFlag(FLAG_STAR_TUPLE)) {
-              this->name = astr(istr(fn->numFormals()-1), "*", ts->name);
-              this->cname = astr(this->cname, "star_", ts->cname);
-              return;
-            } else {
-              this->name = astr("(");
-            }
-          }
-        }
-        notFirst = true;
-      } else {
-        this->name = astr(this->name, ",");
-        this->cname = astr(this->cname, "_");
-      }
-      renameInstantiatedIndividual(value);
-    }
-  }
-
-  renameInstantiatedEnd();
-}
-
-void TypeSymbol::renameInstantiatedSingle(Symbol* sym) {
-  renameInstantiatedStart();
-  if (this->hasFlag(FLAG_TUPLE)) {
-    USR_FATAL(sym, "initializers don't handle tuples yet, sorry!");
-  } else {
-    renameInstantiatedIndividual(sym);
-  }
-  renameInstantiatedEnd();
-}
-
-void TypeSymbol::renameInstantiatedFromSuper(TypeSymbol* superSym) {
-  renameInstantiatedStart();
-  const char* afterParentName = std::find(superSym->name,
-                                          superSym->name+strlen(superSym->name),
-                                          '(');
-  const char* afterParentCname = std::find(superSym->cname,
-                                           superSym->cname+strlen(superSym->cname),
-                                           '_');
-  this->name  = astr(this->name , afterParentName+1);
-  this->cname = astr(this->cname, afterParentCname+1);
-  // Don't call renameInstantiatedEnd() because the parent name already has the
-  // end parenthesis.
-}
-
-void TypeSymbol::renameInstantiatedStart() {
-  if (this->name[strlen(this->name)-1] == ')') {
-    // avoid "strange" instantiated type names based on partial instantiation
-    //  instead of C(int,real)(imag) this results in C(int,real,imag)
-    char* buf = (char*)malloc(strlen(this->name) + 1);
-    memcpy(buf, this->name, strlen(this->name));
-    buf[strlen(this->name)-1] = '\0';
-    this->name = astr(buf, ",");
-    free(buf);
-  } else {
-    this->name = astr(this->name, "(");
-  }
-  this->cname = astr(this->cname, "_");
-}
-
-void TypeSymbol::renameInstantiatedIndividual(Symbol* sym) {
-  if (TypeSymbol* ts = toTypeSymbol(sym)) {
-    if (!this->hasFlag(FLAG_STAR_TUPLE)) {
-      this->name = astr(this->name, ts->name);
-      this->cname = astr(this->cname, ts->cname);
-    }
-  } else {
-    VarSymbol* var = toVarSymbol(sym);
-    if (var && var->immediate) {
-      Immediate* immediate = var->immediate;
-      if (var->type == dtString || var->type == dtStringC)
-        renameInstantiatedTypeString(this, var);
-      else if (immediate->const_kind == NUM_KIND_BOOL) {
-        // Handle boolean types specially.
-        const char* name4bool = immediate->bool_value() ? "true" : "false";
-        const char* cname4bool = immediate->bool_value() ? "T" : "F";
-        this->name = astr(this->name, name4bool);
-        this->cname = astr(this->cname, cname4bool);
-      } else {
-        const size_t bufSize = 128;
-        char imm[bufSize];
-        snprint_imm(imm, bufSize, *var->immediate);
-        this->name = astr(this->name, imm);
-        this->cname = astr(this->cname, imm);
-      }
-    } else {
-      this->name = astr(this->name, sym->cname);
-      this->cname = astr(this->cname, sym->cname);
-    }
-  }
-}
-
-void TypeSymbol::renameInstantiatedEnd() {
-  this->name = astr(this->name, ")");
 }
 
 /************************************* | **************************************
@@ -1443,25 +1464,10 @@ VarSymbol *new_StringSymbol(const char *str) {
   // also need to disable parts of normalize from running on literals inserted
   // at parse time.
 
-  VarSymbol* cptrTemp = newTemp("call_tmp");
-  cptrTemp->addFlag(FLAG_TYPE_VARIABLE);
-  CallExpr *cptrCall = new CallExpr(PRIM_MOVE,
-      cptrTemp,
-      new CallExpr("_type_construct_c_ptr", new SymExpr(dtUInt[INT_SIZE_8]->symbol)));
+  VarSymbol* cstrTemp = newTemp("call_tmp");
+  CallExpr *cstrMove = new CallExpr(PRIM_MOVE, cstrTemp, new_CStringSymbol(str));
 
-  VarSymbol* castTemp = newTemp("call_tmp");
-  CallExpr *castCall = new CallExpr(PRIM_MOVE,
-      castTemp,
-      createCast(new_CStringSymbol(str), cptrTemp));
-
-  int strLength = unescapeString(str, castCall).length();
-
-  CallExpr *ctor = new CallExpr("_construct_string",
-      castTemp,
-      new_IntSymbol(strLength),   // length
-      new_IntSymbol(strLength ? strLength+1 : 0), // size, empty string needs 0
-      gFalse);                    // owned = false
-  ctor->insertAtTail(gFalse);     // needToCopy = false
+  int strLength = unescapeString(str, cstrMove).length();
 
   s = new VarSymbol(astr("_str_literal_", istr(literal_id++)), dtString);
   s->addFlag(FLAG_NO_AUTO_DESTROY);
@@ -1473,7 +1479,11 @@ VarSymbol *new_StringSymbol(const char *str) {
   // DefExpr(s) always goes into the module scope to make it a global
   stringLiteralModule->block->insertAtTail(stringLitDef);
 
-  CallExpr* ctorCall = new CallExpr(PRIM_MOVE, new SymExpr(s), ctor);
+  CallExpr *initCall = new CallExpr(astr("createStringWithBorrowedBuffer"),
+                                    cstrTemp,
+                                    new_IntSymbol(strLength));
+
+  CallExpr* moveCall = new CallExpr(PRIM_MOVE, s, initCall);
 
   if (initStringLiterals == NULL) {
     createInitStringLiterals();
@@ -1482,11 +1492,66 @@ VarSymbol *new_StringSymbol(const char *str) {
 
   Expr* insertPt = initStringLiteralsEpilogue->defPoint;
 
-  insertPt->insertBefore(new DefExpr(cptrTemp));
-  insertPt->insertBefore(cptrCall);
-  insertPt->insertBefore(new DefExpr(castTemp));
-  insertPt->insertBefore(castCall);
-  insertPt->insertBefore(ctorCall);
+  insertPt->insertBefore(new DefExpr(cstrTemp));
+  insertPt->insertBefore(cstrMove);
+  insertPt->insertBefore(moveCall);
+
+  s->immediate = new Immediate;
+  *s->immediate = imm;
+  stringLiteralsHash.put(s->immediate, s);
+  return s;
+}
+
+VarSymbol *new_BytesSymbol(const char *str) {
+  Immediate imm;
+  imm.const_kind = CONST_KIND_STRING;
+  imm.string_kind = STRING_KIND_BYTES;
+  imm.v_string = astr(str);
+  VarSymbol *s = stringLiteralsHash.get(&imm);
+  if (s) {
+    return s;
+  }
+
+  if (resolved) {
+    INT_FATAL("new_BytesSymbol called after function resolution.");
+  }
+
+  // Bytes (as record) literals are inserted from the very beginning on the
+  // parser all the way through resolution (postFold). Since resolution happens
+  // after normalization we need to insert everything in normalized form. We
+  // also need to disable parts of normalize from running on literals inserted
+  // at parse time.
+  VarSymbol* bytesTemp = newTemp("call_tmp");
+  CallExpr *bytesMove = new CallExpr(PRIM_MOVE, bytesTemp, new_CStringSymbol(str));
+
+  int bytesLength = unescapeString(str, bytesMove).length();
+  s = new VarSymbol(astr("_bytes_literal_", istr(literal_id++)), dtBytes);
+  s->addFlag(FLAG_NO_AUTO_DESTROY);
+  s->addFlag(FLAG_CONST);
+  s->addFlag(FLAG_LOCALE_PRIVATE);
+  s->addFlag(FLAG_CHAPEL_BYTES_LITERAL);
+
+  DefExpr* bytesLitDef = new DefExpr(s);
+  // DefExpr(s) always goes into the module scope to make it a global
+  stringLiteralModule->block->insertAtTail(bytesLitDef);
+
+  CallExpr *initCall = new CallExpr(astr("createBytesWithBorrowedBuffer"),
+                                    bytesTemp,
+                                    new_IntSymbol(bytesLength));
+
+
+  CallExpr* moveCall = new CallExpr(PRIM_MOVE, s, initCall);
+
+  if (initStringLiterals == NULL) {
+    createInitStringLiterals();
+    initStringLiteralsEpilogue = initStringLiterals->getOrCreateEpilogueLabel();
+  }
+
+  Expr* insertPt = initStringLiteralsEpilogue->defPoint;
+
+  insertPt->insertBefore(new DefExpr(bytesTemp));
+  insertPt->insertBefore(bytesMove);
+  insertPt->insertBefore(moveCall);
 
   s->immediate = new Immediate;
   *s->immediate = imm;
@@ -1518,14 +1583,12 @@ VarSymbol* new_BoolSymbol(bool b, IF1_bool_type size) {
   default:
     INT_FATAL( "unknown BOOL_SIZE");
 
-  case BOOL_SIZE_1  :
   case BOOL_SIZE_SYS:
   case BOOL_SIZE_8  :
   case BOOL_SIZE_16 :
   case BOOL_SIZE_32 :
   case BOOL_SIZE_64 :
     break;
-    // case BOOL_SIZE_128: imm.v_bool = b; break;
   }
   imm.v_bool = b;
   imm.const_kind = NUM_KIND_BOOL;
@@ -1594,11 +1657,23 @@ VarSymbol *new_UIntSymbol(uint64_t b, IF1_int_type size) {
   return s;
 }
 
-static VarSymbol* new_FloatSymbol(const char* n,
+static VarSymbol* new_FloatSymbol(const char* num,
                                   IF1_float_type size, IF1_num_kind kind,
                                   Type* type) {
   Immediate imm;
+  int len = strlen(num);
   const char* normalized = NULL;
+  char* n = (char*)malloc(len+1);
+
+  /* Remove '_' separators from the number */
+  int j = 0;
+  for (int i=0; i<len; i++) {
+    if (num[i] != '_') {
+      n[j] = num[i];
+      j++;
+    }
+  }
+  n[j] = '\0';
 
   switch (size) {
     case FLOAT_SIZE_32:
@@ -1642,6 +1717,7 @@ static VarSymbol* new_FloatSymbol(const char* n,
   s->immediate = new Immediate;
   *s->immediate = imm;
   uniqueConstantsHash.put(s->immediate, s);
+  free(n);
   return s;
 }
 
@@ -1712,6 +1788,8 @@ immediate_type(Immediate *imm) {
         return dtString;
       } else if (imm->string_kind == STRING_KIND_C_STRING) {
         return dtStringC;
+      } else if (imm->string_kind == STRING_KIND_BYTES) {
+        return dtBytes;
       } else {
         INT_FATAL("unhandled string immediate type");
         break;
@@ -1775,6 +1853,37 @@ Immediate* getSymbolImmediate(Symbol* sym) {
 }
 
 
+// Return the expression PRIM_MOVE-ed into origSE->symbol().
+// Return NULL if the def is not found or is uncertain.
+Expr* getDefOfTemp(SymExpr* origSE)
+{
+  Symbol* origSym = origSE->symbol();
+  if (!origSym->hasFlag(FLAG_TEMP)) return NULL;  // only temps
+
+  SymExpr* otherSE = origSym->getSingleDef();
+
+
+  if (otherSE == NULL) {
+    // Sometimes the DefExpr for 'origSym' is hoisted to the module level -
+    // see static 'globalTemps' in normalize.cpp. Then, 'origSym' does not get
+    // cloned while instantiating the enclosing function, so we get two defs.
+    // We have to run getSingleDef() first because origSE may be not in tree.
+    // Tests:
+    //   arrays/deitz/runtime_types/test_array_type4.chpl
+    //   studies/kmeans/kmeans-blc.chpl
+    otherSE = origSym->getSingleDefUnder(origSE->parentSymbol);
+  }
+
+  if (CallExpr* def = toCallExpr(otherSE->parentExpr))
+    if (def->isPrimitive(PRIM_MOVE))
+      if (otherSE == def->get(1))
+        return def->get(2);
+
+  // uncertain situation
+  return NULL;
+}
+
+
 // enable locally-unique temp names?
 bool localTempNames = false;
 
@@ -1801,22 +1910,61 @@ FlagSet getRecordWrappedFlags(Symbol* s) {
 
 // cache some popular strings
 
+const char* astrSassign = NULL;
 const char* astrSdot = NULL;
-const char* astrSequals = NULL;
+const char* astrSeq = NULL;
+const char* astrSne = NULL;
+const char* astrSgt = NULL;
+const char* astrSgte = NULL;
+const char* astrSlt = NULL;
+const char* astrSlte = NULL;
+const char* astrSswap = NULL;
 const char* astr_cast = NULL;
+const char* astr_defaultOf = NULL;
 const char* astrInit = NULL;
+const char* astrInitEquals = NULL;
+const char* astrNew = NULL;
 const char* astrDeinit = NULL;
 const char* astrTag = NULL;
 const char* astrThis = NULL;
+const char* astr_chpl_cname = NULL;
+const char* astr_chpl_forward_tgt = NULL;
+const char* astr_chpl_manager = NULL;
+const char* astr_forallexpr = NULL;
+const char* astr_forexpr = NULL;
+const char* astr_loopexpr_iter = NULL;
+const char* astrPostfixBang = NULL;
+const char* astrBorrow = NULL;
 
 void initAstrConsts() {
+  astrSassign = astr("=");
   astrSdot    = astr(".");
-  astrSequals = astr("=");
+  astrSeq = astr("==");
+  astrSne = astr("!=");
+  astrSgt = astr(">");
+  astrSgte = astr(">=");
+  astrSlt = astr("<");
+  astrSlte = astr("<=");
+  astrSswap = astr("<=>");
   astr_cast   = astr("_cast");
+  astr_defaultOf = astr("_defaultOf");
   astrInit    = astr("init");
+  astrInitEquals = astr("init=");
+  astrNew     = astr("_new");
   astrDeinit  = astr("deinit");
   astrTag     = astr("tag");
   astrThis    = astr("this");
+  astr_chpl_cname = astr("_chpl_cname");
+  astr_chpl_forward_tgt = astr("_chpl_forward_tgt");
+  astr_chpl_manager = astr("_chpl_manager");
+
+  astr_forallexpr    = astr("chpl__forallexpr");
+  astr_forexpr       = astr("chpl__forexpr");
+  astr_loopexpr_iter = astr("chpl__loopexpr_iter");
+
+  astrPostfixBang = astr("postfix!");
+
+  astrBorrow = astr("borrow");
 }
 
 /************************************* | **************************************
@@ -1873,4 +2021,115 @@ VarSymbol* newTempConst(QualifiedType qt) {
   VarSymbol* result = newTemp(qt);
   result->addFlag(FLAG_CONST);
   return result;
+}
+
+const char* toString(ArgSymbol* arg) {
+  const char* intent = "";
+  switch (arg->intent) {
+    case INTENT_BLANK:           intent = "";           break;
+    case INTENT_IN:              intent = "in ";        break;
+    case INTENT_INOUT:           intent = "inout ";     break;
+    case INTENT_OUT:             intent = "out ";       break;
+    case INTENT_CONST:           intent = "const ";     break;
+    case INTENT_CONST_IN:        intent = "const in ";  break;
+    case INTENT_CONST_REF:       intent = "const ref "; break;
+    case INTENT_REF_MAYBE_CONST: intent = "";           break;
+    case INTENT_REF:             intent = "ref ";       break;
+    case INTENT_PARAM:           intent = "param ";     break;
+    case INTENT_TYPE:            intent = "type ";      break;
+  }
+
+  if (arg->getValType() == dtAny || arg->getValType() == dtUnknown)
+    return astr(intent, arg->name);
+  else
+    return astr(intent, arg->name, ": ", toString(arg->getValType()));
+}
+
+const char* toString(VarSymbol* var) {
+  // If it's a compiler temporary, find an assignment
+  //  * from a user variable or field
+  //  * to a user variable or field
+
+  if (var->hasFlag(FLAG_USER_VARIABLE_NAME) || !var->hasFlag(FLAG_TEMP))
+    return astr(var->name, ": ", toString(var->getValType()));
+
+  Symbol* sym = var;
+  // Compiler temporaries should have a single definition
+  while (sym->hasFlag(FLAG_TEMP) && !sym->hasFlag(FLAG_USER_VARIABLE_NAME)) {
+    SymExpr* singleDef = sym->getSingleDef();
+    if (singleDef != NULL) {
+      if (CallExpr* c = toCallExpr(singleDef->parentExpr)) {
+        if (c->isPrimitive(PRIM_MOVE) ||
+            c->isPrimitive(PRIM_ASSIGN)) {
+          SymExpr* dstSe = toSymExpr(c->get(1));
+          SymExpr* srcSe = toSymExpr(c->get(2));
+          if (dstSe && srcSe && dstSe->symbol() == sym) {
+            sym = singleDef->symbol();
+            continue;
+          }
+        }
+      }
+    }
+
+    // Give up
+    sym = NULL;
+    break;
+  }
+
+  const char* name = NULL;
+  if (sym != NULL) {
+    name = sym->name;
+  } else {
+    // Look for something using the temporary
+    // e.g. field initialization
+
+    sym = var;
+    while (sym->hasFlag(FLAG_TEMP) && !sym->hasFlag(FLAG_USER_VARIABLE_NAME)) {
+      Expr* cur = NULL;
+      name = NULL;
+      for (cur = sym->defPoint; cur; cur = cur->next) {
+        if (CallExpr* c = toCallExpr(cur)) {
+          if (c->isPrimitive(PRIM_MOVE) ||
+              c->isPrimitive(PRIM_ASSIGN)) {
+            SymExpr* dstSe = toSymExpr(c->get(1));
+            SymExpr* srcSe = toSymExpr(c->get(2));
+            if (dstSe && srcSe && srcSe->symbol() == sym) {
+              sym = dstSe->symbol();
+              name = sym->name;
+              break;
+            }
+          }
+          if (c->isPrimitive(PRIM_SET_MEMBER) ||
+              c->isPrimitive(PRIM_SET_SVEC_MEMBER)) {
+            SymExpr* fieldSe = toSymExpr(c->get(2));
+            SymExpr* valueSe = toSymExpr(c->get(3));
+            if (fieldSe && valueSe && valueSe->symbol() == sym) {
+              sym = fieldSe->symbol();
+              name = NULL;
+              // Field access might be by name
+              if (VarSymbol* v = toVarSymbol(sym))
+                if (v->immediate)
+                  if (v->immediate->const_kind == CONST_KIND_STRING)
+                    name = astr("field ", v->immediate->v_string);
+
+              if (name == NULL)
+                name = astr("field ", sym->name);
+
+              break;
+            }
+          }
+        }
+      }
+      // Stop looking if the above code didn't find anything
+      if (name == NULL)
+        break;
+    }
+  }
+
+  if (ArgSymbol* arg = toArgSymbol(sym))
+    return toString(arg);
+  else if (name != NULL)
+    return astr(name, ": ", toString(var->getValType()));
+
+  return astr("<temporary>");
 }

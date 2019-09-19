@@ -1,7 +1,6 @@
 
 record R {
   var x : int;
-  proc R() { }
 }
 
 class Base {
@@ -18,7 +17,7 @@ class Lower : Base {
 }
 
 class Replicate : Base {
-  var low : Lower;
+  var low : unmanaged Lower;
 
   proc replicate(valToReplicate) {
     coforall i in low do on Locales[i] {
@@ -27,7 +26,7 @@ class Replicate : Base {
     }
   }
 
-  proc myDestroy() {
+  override proc myDestroy() {
     coforall i in low do on Locales[i] {
       writeln("Destroying ", here);
     }
@@ -35,8 +34,8 @@ class Replicate : Base {
 }
 
 proc main() {
-  var low = new Lower();
-  var repl = new Replicate(low);
+  var low = new unmanaged Lower();
+  var repl = new unmanaged Replicate(low);
 
   var r = new R();
   repl.replicate(r);

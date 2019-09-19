@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2018 Cray Inc.
+ * Copyright 2004-2019 Cray Inc.
  * Other additional copyright holders may be indicated within.
  *
  * The entirety of this work is licensed under the Apache License,
@@ -37,6 +37,10 @@ class Expr;
 
 // return vec of CallExprs of FnSymbols (no primitives)
 void collectFnCalls(BaseAST* ast, std::vector<CallExpr*>& calls);
+// specialized helper for IBBs
+void collectTreeBoundGotosAndIteratorBreakBlocks(BaseAST* ast,
+                                                 std::vector<GotoStmt*>& GOTOs,
+                                                 std::vector<CondStmt*>& IBBs);
 
 // collect Stmts and Exprs in the AST and return them in vectors
 // Versions ending in 'STL' use the C++ std::vector class
@@ -61,6 +65,7 @@ void reset_ast_loc(BaseAST* destNode, astlocT astloc);
 void reset_ast_loc(BaseAST* destNode, BaseAST* sourceNode);
 
 // compute call sites FnSymbol::calls
+void compute_fn_call_sites(FnSymbol* fn, bool allowVirtual = true);
 void compute_call_sites();
 
 //

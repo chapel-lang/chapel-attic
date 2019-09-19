@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2018 Cray Inc.
+ * Copyright 2004-2019 Cray Inc.
  * Other additional copyright holders may be indicated within.
  * 
  * The entirety of this work is licensed under the Apache License,
@@ -23,6 +23,11 @@
 #include "chpltypes.h"
 #include "error.h"
 
+#ifdef LAUNCHER
+#include "chpllaunch.h"
+#endif
+
+#include <ctype.h>
 #include <inttypes.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -43,7 +48,8 @@ const char* chpl_env_rt_get(const char* evs, const char* dflt) {
 }
 
 
-chpl_bool chpl_env_str_to_bool(const char* evVal, chpl_bool dflt) {
+chpl_bool chpl_env_str_to_bool(const char* evName, const char* evVal,
+                               chpl_bool dflt) {
   if (evVal == NULL)
     return dflt;
   if (strchr("0fFnN", evVal[0]) != NULL)
@@ -51,14 +57,22 @@ chpl_bool chpl_env_str_to_bool(const char* evVal, chpl_bool dflt) {
   if (strchr("1tTyY", evVal[0]) != NULL)
     return true;
 
-  chpl_msg(1,
-           "warning: env var unknown bool value \"%s\", assuming %c\n",
-           evVal, (dflt ? 'T' : 'F'));
+  if (evName == NULL) {
+    chpl_msg(1,
+             "warning: env var improper bool value \"%s\", assuming %c\n",
+             evVal, (dflt ? 'T' : 'F'));
+  } else {
+    chpl_msg(1,
+             "warning: CHPL_RT_%s improper bool value \"%s\", assuming %c\n",
+             evName, evVal, (dflt ? 'T' : 'F'));
+  }
+
   return dflt;
 }
 
 
-int64_t chpl_env_str_to_int(const char* evVal, int64_t dflt) {
+int64_t chpl_env_str_to_int(const char* evName, const char* evVal,
+                            int64_t dflt) {
   int64_t val;
 
   if (evVal == NULL)
@@ -67,35 +81,116 @@ int64_t chpl_env_str_to_int(const char* evVal, int64_t dflt) {
   if (sscanf(evVal, "%" SCNi64, &val) == 1)
     return val;
 
-  chpl_msg(1,
-           "warning: unknown env var int value \"%s\", assuming %" PRId64 "\n",
-           evVal, dflt);
+  if (evName == NULL) {
+    chpl_msg(1,
+             "warning: env var improper int value \"%s\", assuming "
+             "%" PRId64 "\n",
+             evVal, dflt);
+  } else {
+    chpl_msg(1,
+             "warning: CHPL_RT_%s improper int value \"%s\", assuming "
+             "%" PRId64 "\n",
+             evName, evVal, dflt);
+  }
+
   return dflt;
 }
 
 
-size_t chpl_env_str_to_size(const char* evVal, size_t dflt) {
-  size_t val;
+int chpl_env_str_to_int_pct(const char* evName, const char* evVal,
+                            int dflt, chpl_bool doWarn) {
+  int val;
+  int evIdx;
+
+  if (evVal == NULL)
+    return dflt;
+
+  if (sscanf(evVal, "%d%n", &val, &evIdx) == 1
+      && val > 0
+      && evVal[evIdx] == '%') {
+    return val;
+  }
+
+  if (doWarn) {
+    if (evName == NULL) {
+      chpl_msg(1,
+               "warning: env var improper int percentage \"%s\", assuming "
+               "%d\n",
+               evVal, dflt);
+    } else {
+      chpl_msg(1,
+               "warning: CHPL_RT_%s improper int percentage \"%s\", assuming "
+               "%d\n",
+               evName, evVal, dflt);
+    }
+  }
+
+  return dflt;
+}
+
+
+size_t chpl_env_str_to_size(const char* evName, const char* evVal,
+                            size_t dflt) {
+  chpl_bool okay;
   int scnCnt;
+  size_t val;
   char units;
 
   if (evVal == NULL)
     return dflt;
 
-  if ((scnCnt = sscanf(evVal, "%zi%c", &val, &units)) != 1) {
+  //
+  // Try to collect a strictly unsigned decimal, octal, or hexadecimal
+  // number, with an optional following units character.
+  //
+  okay = false;
+  if (isdigit(evVal[0])
+      && (scnCnt = sscanf(evVal, "%zi%c", &val, &units)) > 0) {
+    okay = true;
     if (scnCnt == 2 && strchr("kKmMgG", units) != NULL) {
       switch (units) {
       case 'k' : case 'K': val <<= 10; break;
       case 'm' : case 'M': val <<= 20; break;
       case 'g' : case 'G': val <<= 30; break;
       }
-    } else {
-      chpl_msg(1,
-               "warning: unknown env var size value \"%s\", assuming %zd\n",
-               evVal, dflt);
-      return dflt;
     }
   }
 
+  if (!okay) {
+    if (evName == NULL) {
+      chpl_msg(1,
+               "warning: env var improper size value \"%s\", assuming %zd\n",
+               evVal, dflt);
+    } else {
+      chpl_msg(1,
+               "warning: CHPL_RT_%s improper size value \"%s\", assuming "
+               "%zd\n",
+               evName, evVal, dflt);
+    }
+
+    return dflt;
+  }
+
   return val;
+}
+
+
+void chpl_env_set(const char* evName, const char* evVal, int overwrite) {
+#ifdef LAUNCHER
+  if (overwrite || getenv(evName) == NULL) {
+    chpl_launcher_record_env_var(evName, evVal);
+  }
+#endif
+  if (setenv(evName, evVal, overwrite) != 0) {
+    char buf[200];
+    snprintf(buf, sizeof(buf), "cannot setenv %s=\"%s\"", evName, evVal);
+    chpl_error(buf, 0, 0);
+  }
+}
+
+
+void chpl_env_set_uint(const char* evName, uint64_t evVal, int overwrite) {
+  char buf[21]; // big enough for 64-bit unsigned, plus trailing '\0'
+  snprintf(buf, sizeof(buf), "%" PRIu64, evVal);
+  chpl_env_set(evName, buf, overwrite);
 }

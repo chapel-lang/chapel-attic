@@ -35,8 +35,6 @@ module CGMakeA {
       size *= ratio;
     }
 
-    delete randStr;
-
     for i in 1..n {
       yield ((i, i), rcond - shift);
     }
@@ -66,7 +64,7 @@ module CGMakeA {
     //  writeln("IndArr is: ", IndArr);
 
     // sort indices
-    quickSort(IndArr);
+    sort(IndArr);
 
     //  writeln("After sort, IndArr is: ", IndArr);
     
@@ -91,7 +89,7 @@ module CGMakeA {
       do {
         vecelt = randStr.getNext();
         ind = (randStr.getNext() * nn1):int + 1;
-      } while (ind > n || indices.member(ind));
+      } while (ind > n || indices.contains(ind));
 
       v(nzv) = vecelt;
       iv(nzv) = ind;

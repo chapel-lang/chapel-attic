@@ -8,15 +8,13 @@ proc getRealRandoms(method:int) {
   var A:[1..100] real;
 
   if method == 0 {
-    var R = new RandomStream(real);
+    var R = new owned RandomStream(real);
 
     if debug then
       writeln("method 0, seed ", R.seed);
 
     for a in A do
       a = R.getNext();
-
-    delete R;
   }
 
   if method == 1 {
@@ -27,8 +25,6 @@ proc getRealRandoms(method:int) {
 
     for a in A do
       a = R.getNext();
-
-    delete R;
   }
 
 
@@ -40,20 +36,16 @@ proc getRealRandoms(method:int) {
 
     for a in A do
       a = R.getNext();
-
-    delete R;
   }
 
   if method == 3 {
-    var R = new NPBRandomStream(real);
+    var R = new owned NPBRandomStream(real);
 
     if debug then
       writeln("method ", method, ", seed ", R.seed);
 
     for a in A do
       a = R.getNext();
-
-    delete R;
   }
 
   if method == 4 {
@@ -64,8 +56,6 @@ proc getRealRandoms(method:int) {
 
     for a in A do
       a = R.getNext();
-
-    delete R;
   }
 
   return A;
@@ -75,15 +65,13 @@ proc getUintRandoms(method:int) {
   var A:[1..100] uint;
 
   if method == 0 {
-    var R = new RandomStream(uint);
+    var R = new owned RandomStream(uint);
 
     if debug then
       writeln("method ", method, ", seed ", R.seed);
 
     for a in A do
       a = R.getNext();
-
-    delete R;
   }
 
   if method == 1 {
@@ -94,8 +82,6 @@ proc getUintRandoms(method:int) {
 
     for a in A do
       a = R.getNext();
-
-    delete R;
   }
 
   if method == 2 {
@@ -106,8 +92,6 @@ proc getUintRandoms(method:int) {
 
     for a in A do
       a = R.getNext();
-
-    delete R;
   }
 
   return A;

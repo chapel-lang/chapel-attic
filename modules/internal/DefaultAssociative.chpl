@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2018 Cray Inc.
+ * Copyright 2004-2019 Cray Inc.
  * Other additional copyright holders may be indicated within.
  * 
  * The entirety of this work is licensed under the Apache License,
@@ -19,9 +19,12 @@
 
 // DefaultAssociative.chpl
 //
+pragma "unsafe" // workaround for trying to default-initialize nil objects
 module DefaultAssociative {
 
   use DSIUtil;
+  private use ChapelDistribution, ChapelRange, SysBasic, ChapelArray;
+  private use ChapelBase, ChapelLocks, IO;
   config param debugDefaultAssoc = false;
   config param debugAssocDataPar = false;
 
@@ -55,25 +58,25 @@ module DefaultAssociative {
     type idxType;
     param parSafe: bool;
   
-    var dist: DefaultDist;
+    var dist: unmanaged DefaultDist;
   
     // The guts of the associative domain
   
     // We explicitly use processor atomics here since this is not
     // by design a distributed data structure
-    var numEntries: atomic_int64;
-    var tableLock: atomicbool; // do not access directly, use function below
+    var numEntries: chpl__processorAtomicType(int);
+    var tableLock: if parSafe then chpl_LocalSpinlock else nothing;
     var tableSizeNum = 1;
-    var tableSize = chpl__primes(tableSizeNum);
+    var tableSize : int;
     var tableDom = {0..tableSize-1};
     var table: [tableDom] chpl_TableEntry(idxType);
   
     inline proc lockTable() {
-      while tableLock.testAndSet() do chpl_task_yield();
+      if parSafe then tableLock.lock();
     }
   
     inline proc unlockTable() {
-      tableLock.clear();
+      if parSafe then tableLock.unlock();
     }
   
     // TODO: An ugly [0..-1] domain appears several times in the code --
@@ -81,36 +84,105 @@ module DefaultAssociative {
     var postponeResize = false;
   
     proc linksDistribution() param return false;
-    proc dsiLinksDistribution()     return false;
+    override proc dsiLinksDistribution() return false;
   
-    proc DefaultAssociativeDom(type idxType,
-                               param parSafe: bool,
-                               dist: DefaultDist) {
+    proc init(type idxType,
+              param parSafe: bool,
+              dist: unmanaged DefaultDist) {
       if !chpl__validDefaultAssocDomIdxType(idxType) then
         compilerError("Default Associative domains with idxType=",
                       idxType:string, " are not allowed", 2);
+
+      this.idxType = idxType;
+      this.parSafe = parSafe;
       this.dist = dist;
+      this.tableSize = chpl__primes(tableSizeNum);
     }
   
     //
     // Standard Internal Domain Interface
     //
     proc dsiBuildArray(type eltType) {
-      return new DefaultAssociativeArr(eltType=eltType, idxType=idxType,
-                                       parSafeDom=parSafe, dom=this);
+      return new unmanaged DefaultAssociativeArr(eltType=eltType, idxType=idxType,
+                                       parSafeDom=parSafe, dom=_to_unmanaged(this));
     }
   
     proc dsiSerialReadWrite(f /*: Reader or Writer*/) {
-      var first = true;
-      f <~> new ioLiteral("{");
-      for idx in this {
-        if first then 
-          first = false; 
-        else 
-          f <~> new ioLiteral(", ");
-        f <~> idx;
+
+      var binary = f.binary();
+
+      if f.writing {
+        if binary {
+          var numIndices: int = dsiNumIndices;
+          f <~> numIndices;
+          for idx in this {
+            f <~> idx;
+          }
+        } else {
+          var first = true;
+          f <~> new ioLiteral("{");
+          for idx in this {
+            if first then 
+              first = false; 
+            else 
+              f <~> new ioLiteral(", ");
+            f <~> idx;
+          }
+          f <~> new ioLiteral("}");
+        }
+      } else {
+        // Clear the domain so it only contains indices read in.
+        dsiClear();
+
+        if binary {
+          var numIndices: int;
+          f <~> numIndices;
+          for i in 1..numIndices {
+            var idx: idxType;
+            f <~> idx;
+            dsiAdd(idx);
+          }
+        } else {
+          f <~> new ioLiteral("{");
+
+          var first = true;
+          var comma = new ioLiteral(",", true);
+          var end = new ioLiteral("}");
+
+          while true {
+            // Try reading an end curly
+            f <~> end;
+            if f.error() == EFORMAT {
+              // didn't find a curly, OK
+              f.clearError();
+            } else {
+              // Stop reading if we got to the end
+              // or if there was another error.
+              break;
+            }
+
+            // Try reading a comma
+            if !first {
+              f <~> comma;
+              if f.error() {
+                // break out of the loop if we didn't read
+                // a comma and were expecting one
+                break;
+              }
+            }
+            first = false;
+
+            // Read an index
+            var idx: idxType;
+            f <~> idx;
+            if f.error() {
+              // Stop reading if we got an error
+              break;
+            }
+            dsiAdd(idx);
+          }
+        }
       }
-      f <~> new ioLiteral("}");
     }
     proc dsiSerialWrite(f) { this.dsiSerialReadWrite(f); }
     proc dsiSerialRead(f) { this.dsiSerialReadWrite(f); }
@@ -134,27 +206,18 @@ module DefaultAssociative {
       on this {
         postponeResize = false;
         if (numEntries.read()*8 < tableSize && tableSizeNum > 1) {
-          if parSafe then lockTable();
+          lockTable();
           if (numEntries.read()*8 < tableSize && tableSizeNum > 1) {
             _resize(grow=false);
           }
-          if parSafe then unlockTable();
+          unlockTable();
         }
       }
     }
 
     iter these() {
-      if !isEnumType(idxType) {
-        for slot in _fullSlots() {
-          yield table[slot].idx;
-        }
-      } else {
-        for val in chpl_enumerate(idxType) {
-          var (match, slot) = _findFilledSlot(val);
-          if match then
-            yield table[slot].idx;
-        }
-      }
+      for slot in _fullSlots() do
+        yield table[slot].idx;
     }
  
     iter these(param tag: iterKind) where tag == iterKind.standalone {
@@ -266,18 +329,18 @@ module DefaultAssociative {
     //
     // Associative Domain Interface
     //
-    proc dsiMyDist() : BaseDist {
+    override proc dsiMyDist() : unmanaged BaseDist {
       return dist;
     }
 
-    proc dsiClear() {
+    override proc dsiClear() {
       on this {
-        if parSafe then lockTable();
+        lockTable();
         for slot in tableDom {
           table[slot].status = chpl__hash_status.empty;
         }
         numEntries.write(0);
-        if parSafe then unlockTable();
+        unlockTable();
       }
     }
   
@@ -285,7 +348,7 @@ module DefaultAssociative {
       return _findFilledSlot(idx)(1);
     }
   
-    proc dsiAdd(idx) {
+    override proc dsiAdd(idx) {
       // add helpers will return a tuple like (slotNum, numIndicesAdded);
 
       // these two seemingly redundant lines were necessary to work around a
@@ -309,9 +372,8 @@ module DefaultAssociative {
       const inSlot = slotNum;
       var retVal = 0;
       on this {
-        const shouldLock = needLock && parSafe;
-        if shouldLock then lockTable();
-        var findAgain = shouldLock;
+        if parSafe && needLock then lockTable();
+        var findAgain = parSafe && needLock;
         if ((numEntries.read()+1)*2 > tableSize) {
           _resize(grow=true);
           findAgain = true;
@@ -320,7 +382,7 @@ module DefaultAssociative {
           (slotNum, retVal) = _add(idx, -1);
         else
           (_, retVal) = _add(idx, inSlot);
-        if shouldLock then unlockTable();
+        if parSafe && needLock then unlockTable();
       }
       return (slotNum, retVal);
     }
@@ -330,6 +392,8 @@ module DefaultAssociative {
     //
     // NOTE: Calls to this routine assume that the tableLock has been acquired.
     //
+
+    pragma "unsafe" // see issue #11666
     proc _add(idx: idxType, in slotNum : index(tableDom) = -1) {
       var foundSlot : bool = (slotNum != -1);
       if !foundSlot then
@@ -356,7 +420,7 @@ module DefaultAssociative {
     proc dsiRemove(idx: idxType) {
       var retval = 1;
       on this {
-        if parSafe then lockTable();
+        lockTable();
         const (foundSlot, slotNum) = _findFilledSlot(idx, needLock=!parSafe);
         if (foundSlot) {
           for a in _arrs do
@@ -369,7 +433,7 @@ module DefaultAssociative {
         if (numEntries.read()*8 < tableSize && tableSizeNum > 1) {
           _resize(grow=false);
         }
-        if parSafe then unlockTable();
+        unlockTable();
       }
       return retval;
     }
@@ -403,7 +467,7 @@ module DefaultAssociative {
         var prime = chpl__primes(primeLoc);
 
         //Changing underlying structure, time for locking
-        if parSafe then lockTable();
+        lockTable();
         if entries > 0 {
           // Slow path: back up required
           _backupArrays();
@@ -436,11 +500,10 @@ module DefaultAssociative {
           tableDom = {0..tableSize-1};
         }
 
-        //Unlock the table
-        if parSafe then unlockTable();
+        unlockTable();
       } else if entries > numKeys {
-        warning("Requested capacity (" + numKeys + ") " +
-                "is less than current size (" + entries + ")");
+        warning("Requested capacity (", numKeys, ") ",
+                "is less than current size (", entries, ")");
       }
     }
   
@@ -554,13 +617,24 @@ module DefaultAssociative {
           yield slot;
       }
     }
+
+    proc dsiHasSingleLocalSubdomain() param return true;
+
+    proc dsiLocalSubdomain(loc: locale) {
+      if this.locale == loc {
+        return _getDomain(_to_unmanaged(this));
+      } else {
+        var a: domain(idxType, parSafe=parSafe);
+        return a;
+      }
+    }
+
   }
   
-  class DefaultAssociativeArr: BaseArr {
-    type eltType;
+  class DefaultAssociativeArr: AbsBaseArr {
     type idxType;
     param parSafeDom: bool;
-    var dom : DefaultAssociativeDom(idxType, parSafe=parSafeDom);
+    var dom : unmanaged DefaultAssociativeDom(idxType, parSafe=parSafeDom);
   
     var data : [dom.tableDom] eltType;
   
@@ -571,10 +645,10 @@ module DefaultAssociative {
     // Standard internal array interface
     // 
   
-    proc dsiGetBaseDom() return dom;
+    override proc dsiGetBaseDom() return dom;
   
-    proc clearEntry(idx: idxType) {
-      const initval: eltType;
+    override proc clearEntry(idx: idxType) {
+      var initval: eltType;
       dsiAccess(idx) = initval;
     }
 
@@ -603,6 +677,7 @@ module DefaultAssociative {
           return data(0);
         } else {
           // grow the table
+          warning("growing associative domains by assigning to an array is deprecated");
           const (newSlot, _) = dom._addWrapper(idx, slotNum, needLock=false);
 
           // and return the element
@@ -636,7 +711,19 @@ module DefaultAssociative {
         return data(0);
       }
     }
-  
+
+    inline proc dsiLocalAccess(i) ref
+      return dsiAccess(i);
+
+    inline proc dsiLocalAccess(i)
+    where shouldReturnRvalueByValue(eltType)
+      return dsiAccess(i);
+
+    inline proc dsiLocalAccess(i) const ref
+    where shouldReturnRvalueByConstRef(eltType)
+      return dsiAccess(i);
+
+
     iter these() ref {
       for slot in dom {
         yield dsiAccess(slot);
@@ -703,30 +790,96 @@ module DefaultAssociative {
         }
       }
     }
-  
-    proc dsiSerialReadWrite(f /*: Reader or Writer*/) {
-      var first = true;
-      for val in this {
-        if (first) then
-          first = false;
-        else
-          f <~> new ioLiteral(" ");
-        f <~> val;
+
+    proc dsiSerialReadWrite(f /*: channel*/) {
+      var binary = f.binary();
+      var arrayStyle = f.styleElement(QIO_STYLE_ELEMENT_ARRAY);
+      var isspace = arrayStyle == QIO_ARRAY_FORMAT_SPACE && !binary;
+      var isjson = arrayStyle == QIO_ARRAY_FORMAT_JSON && !binary;
+      var ischpl = arrayStyle == QIO_ARRAY_FORMAT_CHPL && !binary;
+
+      if !f.writing && ischpl {
+        this.readChapelStyleAssocArray(f);
+      } else {
+        if isjson || ischpl {
+          f <~> new ioLiteral("[");
+        }
+
+        var first = true;
+
+        for (key, val) in zip(this.dom, this) {
+          if first then first = false;
+          else if isspace then f <~> new ioLiteral(" ");
+          else if isjson || ischpl then f <~> new ioLiteral(", ");
+
+          if f.writing && ischpl {
+            f <~> key;
+            f <~> new ioLiteral(" => ");
+          }
+
+          f <~> val;
+        }
+      }
+      if isjson || ischpl {
+        f <~> new ioLiteral("]");
       }
     }
+
+    proc readChapelStyleAssocArray(f) {
+      var first = true;
+      var read_end = false;
+
+      f <~> new ioLiteral("[");
+
+      while ! f.error() {
+        if first {
+          first = false;
+          // but check for a ]
+          f <~> new ioLiteral("]");
+          if f.error() == EFORMAT {
+            f.clearError();
+          } else {
+            read_end = true;
+            break;
+          }
+        } else {
+          // read a comma or a space.
+          f <~> new ioLiteral(",");
+
+          if f.error() == EFORMAT {
+            f.clearError();
+            // No comma.
+            break;
+          }
+        }
+
+        // Read a key
+        var key: idxType;
+        f <~> key;
+        // Read =>
+        f <~> new ioLiteral("=>");
+        // Read the value
+        f <~> dsiAccess(key);
+      }
+
+      if ! read_end {
+        f <~> new ioLiteral("]");
+      }
+    }
+
     proc dsiSerialWrite(f) { this.dsiSerialReadWrite(f); }
     proc dsiSerialRead(f) { this.dsiSerialReadWrite(f); }
-  
+
     //
     // Associative array interface
     //
-  
+
     iter dsiSorted(comparator) {
       use Sort;
       var tableCopy: [0..dom.dsiNumIndices-1] eltType;
       for (copy, slot) in zip(tableCopy.domain, dom._fullSlots()) do
         tableCopy(copy) = data(slot);
-  
+
       sort(tableCopy, comparator=comparator);
   
       for elem in tableCopy do
@@ -738,30 +891,35 @@ module DefaultAssociative {
     // Internal associative array interface
     //
   
-    proc _backupArray() {
+    override proc _backupArray() {
       tmpDom = dom.tableDom;
       tmpTable = data;
     }
   
-    proc _removeArrayBackup() {
+    override proc _removeArrayBackup() {
       tmpDom = {0..(-1:chpl_table_index_type)};
     }
   
-    proc _preserveArrayElement(oldslot, newslot) {
+    override proc _preserveArrayElement(oldslot, newslot) {
       data(newslot) = tmpTable[oldslot];
     }
 
     proc dsiTargetLocales() {
-      compilerError("targetLocales is unsupported by associative domains");
+      return [this.locale, ];
     }
 
     proc dsiHasSingleLocalSubdomain() param return true;
 
-    proc dsiLocalSubdomain() {
-      return _newDomain(dom);
+    proc dsiLocalSubdomain(loc: locale) {
+      if this.locale == loc {
+        return _getDomain(dom);
+      } else {
+        var a: domain(dom.idxType, parSafe=dom.parSafe);
+        return a;
+      }
     }
 
-    proc dsiDestroyArr() {
+    override proc dsiDestroyArr() {
       //
       // BHARSH 2017-09-08: Workaround to avoid recursive iterator generation.
       //
@@ -822,6 +980,10 @@ module DefaultAssociative {
   inline proc chpl__defaultHash(u: uint(64)): uint {
     return _gen_key(u);
   }
+
+  inline proc chpl__defaultHash(e) where isEnum(e) {
+    return _gen_key(chpl__enumToOrder(e));
+  }
   
   inline proc chpl__defaultHash(f: real): uint {
     return _gen_key(__primitive( "real2int", f));
@@ -849,7 +1011,7 @@ module DefaultAssociative {
     return hash;
   }
   
-  inline proc chpl__defaultHash(o: object): uint {
+  inline proc chpl__defaultHash(o: borrowed object): uint {
     return _gen_key(__primitive( "object2int", o));
   }
 
@@ -863,7 +1025,7 @@ module DefaultAssociative {
     for param i in 1..numFields(r.type) {
       if isParam(getField(r, i)) == false &&
          isType(getField(r, i)) == false &&
-         isVoidType(getField(r, i).type) == false {
+         isNothingType(getField(r, i).type) == false {
         const ref field = getField(r, i);
         const fieldHash = chpl__defaultHash(field);
         if i == 1 then

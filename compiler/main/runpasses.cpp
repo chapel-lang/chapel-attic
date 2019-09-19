@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2018 Cray Inc.
+ * Copyright 2004-2019 Cray Inc.
  * Other additional copyright holders may be indicated within.
  *
  * The entirety of this work is licensed under the Apache License,
@@ -174,6 +174,11 @@ void runPasses(PhaseTracker& tracker, bool isChpldoc) {
 
     // Break early if this is a parse-only run
     if (fParseOnly ==  true && strcmp(sPassList[i].name, "checkParsed") == 0) {
+      break;
+    }
+
+    // Breaks early if the user specified to stop after this pass
+    if (stopAfterPass[0] != '\0' && strcmp(sPassList[i].name, stopAfterPass) == 0) {
       break;
     }
 

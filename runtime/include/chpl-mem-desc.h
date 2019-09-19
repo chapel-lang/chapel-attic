@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2018 Cray Inc.
+ * Copyright 2004-2019 Cray Inc.
  * Other additional copyright holders may be indicated within.
  * 
  * The entirety of this work is licensed under the Apache License,
@@ -58,6 +58,7 @@
   m(COMM_PER_LOC_INFO,    "comm layer per-locale information",        false), \
   m(COMM_PRV_OBJ_ARRAY,   "comm layer private objects array",         false), \
   m(COMM_PRV_BCAST_DATA,  "comm layer private broadcast data",        false), \
+  m(MEM_HEAP_SPACE,       "mem layer heap expansion space",           false), \
   m(GLOM_STRINGS_DATA,    "glom strings data",                        true ), \
   m(STR_COPY_DATA,        "string copy data",                         true ), \
   m(STR_COPY_REMOTE,      "remote string copy",                       true ), \
@@ -76,6 +77,7 @@
   m(TASK_POOL_DESC,       "task pool descriptor",                     false), \
   m(TASK_ARG_AND_POOL_DESC, "task body argument and pool descriptor", false), \
   m(TASK_LIST_DESC,       "task list descriptor",                     false), \
+  m(TASK_LAYER_UNSPEC,    "tasking layer unspecified data",           false), \
   m(THREAD_PRV_DATA,      "thread private data",                      false), \
   m(THREAD_LIST_DESC,     "thread list descriptor",                   false), \
   m(THREAD_STACK_DESC,    "thread stack descriptor",                  false), \
@@ -83,7 +85,6 @@
   m(OS_LAYER_TMP_DATA,    "OS layer temporary data",                  true ), \
   m(GMP,                  "gmp data",                                 true ), \
   m(GETS_PUTS_STRIDES,    "put_strd/get_strd array of strides",       true ), \
-  m(QSBR,                 "quiescent state-based reclamation data",   false), \
   m(NUM,                  "*** this must be the last entry ***",      true )
 
 

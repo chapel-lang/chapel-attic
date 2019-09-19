@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2018 Cray Inc.
+ * Copyright 2004-2019 Cray Inc.
  * Other additional copyright holders may be indicated within.
  *
  * The entirety of this work is licensed under the Apache License,
@@ -45,6 +45,10 @@ Type* typeForTypeSpecifier(Expr* expr, bool fatalOK) {
                     int size = typeSize(var);
 
                     switch (size) {
+                    case BOOL_SYS_WIDTH:
+                      retval = dtBools[BOOL_SIZE_SYS];
+                      break;
+
                     case 8:
                       retval = dtBools[BOOL_SIZE_8];
                       break;

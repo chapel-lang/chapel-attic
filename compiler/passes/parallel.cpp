@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2018 Cray Inc.
+ * Copyright 2004-2019 Cray Inc.
  * Other additional copyright holders may be indicated within.
  *
  * The entirety of this work is licensed under the Apache License,
@@ -66,8 +66,6 @@
 // Heap allocation for remote access is done:
 // - for globals - in IWR, if:
 //    requireWideReferences()
-// - for a local - in MHA, if:
-//    needHeapVars() && the local can be passed to an 'on'
 //
 // Change acces to variable -> access to its ._value
 // - for globals - in MHA, if:
@@ -107,9 +105,7 @@ static void insertEndCounts();
 static void passArgsToNestedFns();
 static void create_block_fn_wrapper(FnSymbol* fn, CallExpr* fcall, BundleArgsFnData &baData);
 static void call_block_fn_wrapper(FnSymbol* fn, CallExpr* fcall, VarSymbol* args_buf, VarSymbol* args_buf_len, VarSymbol* tempc, FnSymbol *wrap_fn, Symbol* taskList, Symbol* taskListNode);
-static void findBlockRefActuals(Vec<Symbol*>& refSet, Vec<Symbol*>& refVec);
 static void findHeapVarsAndRefs(Map<Symbol*,Vec<SymExpr*>*>& defMap,
-                                Vec<Symbol*>& refSet, Vec<Symbol*>& refVec,
                                 Vec<Symbol*>& varSet, Vec<Symbol*>& varVec);
 static bool needsAutoCopyAutoDestroyForArg(ArgSymbol* formal, Expr* arg, FnSymbol* fn);
 
@@ -204,8 +200,18 @@ static void create_arg_bundle_class(FnSymbol* fn, CallExpr* fcall, ModuleSymbol*
     // If we needed to auto-copy it, it should be stored by value
     else if (autoCopy)
       field->qual = QUAL_VAL; // this is a no-op
-    // If the actual is a reference, store a reference
-    else if (var->isRef())
+    // If the actual or the formal is a reference, store a reference
+    else if (var->isRef() ||
+             // 2018-06: for a record or tuple, if the default intent is used,
+             // the formal's type is non-ref and we have been using QUAL_VAL.
+             // Whereas with a const ref intent, the formal's type is ref and
+             // and we have been setting field->qual = QUAL_REF.
+             // TODO: make the behavior consistent in both cases.
+             (formal->isRef() && formal->type->isRef()
+              // For a coforall index variable, pass by ref only
+              // if it is a ref iterator, as indicated by ref-ness of 'var'.
+              && !var->hasFlag(FLAG_COFORALL_INDEX_VAR))
+            )
       field->qual = QUAL_REF;
     // BHARSH TODO: This really belongs in RVF. Note the sync/single comment
     // in 'needsAutoCopyAutoDestroyForArg'
@@ -348,7 +354,6 @@ static Symbol* insertAutoCopyForTaskArg
     fcall->insertBefore(new DefExpr(valTmp));
     CallExpr* autoCopyCall = new CallExpr(autoCopyFn, var);
     fcall->insertBefore(new CallExpr(PRIM_MOVE, valTmp, autoCopyCall));
-    insertReferenceTemps(autoCopyCall);
     var = valTmp;
   }
 
@@ -376,7 +381,6 @@ static void insertAutoDestroyForVar(Symbol *arg, FnSymbol* wrap_fn)
 
   CallExpr* autoDestroyCall = new CallExpr(autoDestroyFn, arg);
   wrap_fn->insertAtTail(autoDestroyCall);
-  insertReferenceTemps(autoDestroyCall);
 }
 
 static void
@@ -466,7 +470,8 @@ bundleArgs(CallExpr* fcall, BundleArgsFnData &baData) {
                              dtInt[INT_SIZE_DEFAULT]);
   fcall->insertBefore(new DefExpr(tmpsz));
   fcall->insertBefore(new CallExpr(PRIM_MOVE, tmpsz,
-                                   new CallExpr(PRIM_SIZEOF, ctype->symbol)));
+                                   new CallExpr(PRIM_SIZEOF_BUNDLE,
+                                                ctype->symbol)));
 
   // Find the _EndCount argument so we can pass that explicitly as the
   // first argument to a task launch function.
@@ -981,209 +986,10 @@ buildHeapType(Type* type) {
 }
 
 
-static void
-freeHeapAllocatedVars(Vec<Symbol*> heapAllocatedVars) {
-  Vec<FnSymbol*> fnsContainingTaskll;
-
-  // start with functions created by begin statements
-  forv_Vec(FnSymbol, fn, gFnSymbols) {
-    if (fn->hasFlag(FLAG_BEGIN))
-      fnsContainingTaskll.add(fn);
-  }
-  // add any functions that call the functions added so far
-  forv_Vec(FnSymbol, fn, fnsContainingTaskll) {
-    forv_Vec(CallExpr, call, *fn->calledBy) {
-      if (call->parentSymbol) {
-        FnSymbol* caller = toFnSymbol(call->parentSymbol);
-        INT_ASSERT(caller);
-        fnsContainingTaskll.add_exclusive(caller);
-      }
-    }
-  }
-
-  Vec<Symbol*> symSet;
-  std::vector<BaseAST*> asts;
-  collect_asts(rootModule, asts);
-  for_vector(BaseAST, ast, asts) {
-    if (DefExpr* def = toDefExpr(ast)) {
-      if (def->parentSymbol) {
-        if (isLcnSymbol(def->sym)) {
-          symSet.set_add(def->sym);
-        }
-      }
-    }
-  }
-  Map<Symbol*,Vec<SymExpr*>*> defMap;
-  Map<Symbol*,Vec<SymExpr*>*> useMap;
-  buildDefUseMaps(symSet, defMap, useMap);
-
-  forv_Vec(Symbol, var, heapAllocatedVars) {
-    // find out if a variable that was put on the heap could be passed in as an
-    // argument to a function created by a begin statement; if not, free the
-    // heap memory just allocated at the end of the block
-    Vec<SymExpr*>* defs = defMap.get(var);
-    if (defs == NULL) {
-      INT_FATAL(var, "Symbol is never defined.");
-    }
-    if (defs->n == 1) {
-      bool freeVar = true;
-      Vec<Symbol*> varsToTrack;
-      varsToTrack.add(var);
-      forv_Vec(Symbol, v, varsToTrack) {
-        if (useMap.get(v)) {
-          forv_Vec(SymExpr, se, *useMap.get(v)) {
-            if (CallExpr* call = toCallExpr(se->parentExpr)) {
-              if (call->isPrimitive(PRIM_ADDR_OF) ||
-                  call->isPrimitive(PRIM_SET_REFERENCE) ||
-                  call->isPrimitive(PRIM_GET_MEMBER) ||
-                  call->isPrimitive(PRIM_GET_MEMBER_VALUE) ||
-                  call->isPrimitive(PRIM_GET_SVEC_MEMBER) ||
-                  // TODO - should this handle PRIM_GET_SVEC_MEMBER_VALUE?
-                  call->isPrimitive(PRIM_WIDE_GET_LOCALE) ||
-                  call->isPrimitive(PRIM_WIDE_GET_NODE)) {
-                // Treat the use of these primitives as a use of their arguments.
-                call = toCallExpr(call->parentExpr);
-              }
-              if (call->isPrimitive(PRIM_MOVE) || call->isPrimitive(PRIM_ASSIGN)) {
-                Symbol* toAdd = toSymExpr(call->get(1))->symbol();
-                // BHARSH TODO: we really want something like a set that we can
-                // modify while iterating over it.
-                if (!varsToTrack.in(toAdd)) {
-                  varsToTrack.add(toAdd);
-                }
-              }
-              else if (fnsContainingTaskll.in(call->resolvedFunction())) {
-                freeVar = false;
-                break;
-              }
-            }
-          }
-          if (!freeVar) break;
-        }
-      }
-      if (freeVar) {
-        CallExpr* move = toCallExpr(defs->v[0]->parentExpr);
-        INT_ASSERT(move && move->isPrimitive(PRIM_MOVE));
-        Expr* innermostBlock = NULL;
-        // find the innermost block that contains all uses of var
-        INT_ASSERT(useMap.get(var));
-        forv_Vec(SymExpr, se, *useMap.get(var)) {
-          bool useInInnermostBlock = false;
-          BlockStmt* curInnermostBlock = toBlockStmt(se->parentExpr);
-          INT_ASSERT(!curInnermostBlock); // assumed to be NULL at this point
-          for (Expr* block = se->parentExpr->parentExpr;
-               block && !useInInnermostBlock;
-               block = block->parentExpr) {
-            if (!curInnermostBlock)
-              curInnermostBlock = toBlockStmt(block);
-            if (!innermostBlock) {
-              innermostBlock = toBlockStmt(block);
-              if (innermostBlock)
-                useInInnermostBlock = true;
-            } else if (block == innermostBlock)
-              useInInnermostBlock = true;
-          }
-          if (!useInInnermostBlock) {
-            // the current use is not contained within innermostBlock,
-            // so find out if the innermost block that contains the current use
-            // also contains innermostBlock
-            Expr* block = innermostBlock;
-            while (block && block != curInnermostBlock)
-              block = block->parentExpr;
-            if (block)
-              innermostBlock = curInnermostBlock;
-            else {
-              // the innermost block that contains the current use is disjoint
-              // from the innermost block that contains previously encountered use(s)
-              INT_ASSERT(innermostBlock && !block);
-              while ((innermostBlock = innermostBlock->parentExpr)) {
-                for (block = curInnermostBlock->parentExpr; block && block != innermostBlock;
-                     block = block->parentExpr)
-                  /* do nothing */;
-                if (block) break;
-              }
-              if (!innermostBlock)
-                INT_FATAL(move, "cannot find a block that contains all uses of var\n");
-            }
-          }
-        }
-        FnSymbol* fn = toFnSymbol(move->parentSymbol);
-        SET_LINENO(var);
-        if (fn && innermostBlock == fn->body)
-          fn->insertIntoEpilogue(callChplHereFree(move->get(1)->copy()));
-        else {
-          BlockStmt* block = toBlockStmt(innermostBlock);
-          INT_ASSERT(block);
-          block->insertAtTailBeforeFlow(callChplHereFree(move->get(1)->copy()));
-        }
-      }
-    }
-    // else ...
-    // TODO: After the new constructor story is implemented, every declaration
-    // should have exactly one definition associated with it, so the
-    // (defs-> == 1) test above can be replaced by an assertion.
-  }
-}
-
-// Returns false if
-//  fLocal == true
-// or
-//  CHPL_COMM == "ugni"
-// or
-//  CHPL_COMM == "gasnet" && CHPL_GASNET_SEGMENT == "everything";
-// or
-//  CHPL_STACK_CHECKS == 0 && CHPL_TASKS == "fifo"
-// or
-//  CHPL_TASKS == "qthreads"
-//
-// true otherwise.
-//
-// The tasking layer matters because qthreads and fifo allocate task stacks
-// from the communication registered heap (fifo can only do so if stack checks
-// are turned off.)
-static bool
-needHeapVars() {
-  if (fLocal) return false;
-
-  if (!strcmp(CHPL_COMM, "ugni") ||
-      (!strcmp(CHPL_COMM, "gasnet") &&
-       !strcmp(CHPL_GASNET_SEGMENT, "everything")))
-    return false;
-
-  if (fNoStackChecks && (0 == strcmp(CHPL_TASKS, "fifo")))
-    return false;
-
-  if (0 == strcmp(CHPL_TASKS, "qthreads"))
-    return false;
-
-  return true;
-}
-
 //
 // In the following, through makeHeapAllocations():
-//   refSet, refVec - symbols whose referencees need to be heap-allocated
 //   varSet, varVec - symbols that themselves need to be heap-allocated
 //
-
-// Traverses all 'on' task functions flagged as needing heap
-// allocation (for its formals), as determined by the comm layer
-// and/or --local setting..
-// Traverses all ref formals of these functions and adds them to the refSet and
-// refVec.
-static void findBlockRefActuals(Vec<Symbol*>& refSet, Vec<Symbol*>& refVec)
-{
-  forv_Vec(FnSymbol, fn, gFnSymbols) {
-    if (fn->hasFlag(FLAG_ON) && !fn->hasFlag(FLAG_LOCAL_ON) && needHeapVars()) {
-      for_formals(formal, fn) {
-        if (formal->isRef()) {
-          refSet.set_add(formal);
-          refVec.add(formal);
-        }
-      }
-    }
-  }
-}
-
 
 // Traverses all DefExprs.
 //  If the symbol is not of primitive type or other undesired cases,
@@ -1196,10 +1002,7 @@ static void findBlockRefActuals(Vec<Symbol*>& refSet, Vec<Symbol*>& refVec)
 //    Add it to varSet and varVec, so it will be put on the heap.
 static void findHeapVarsAndRefs(Map<Symbol*, Vec<SymExpr*>*>& defMap,
 
-                                Vec<Symbol*>&                 refSet,
-                                Vec<Symbol*>&                 refVec,
-
-                                Vec<Symbol*>&                 varSet,
+                                Vec<Symbol*>& varSet,
                                 Vec<Symbol*>& varVec)
 {
   forv_Vec(DefExpr, def, gDefExprs) {
@@ -1210,6 +1013,7 @@ static void findHeapVarsAndRefs(Map<Symbol*, Vec<SymExpr*>*>& defMap,
         isModuleSymbol(def->parentSymbol)       &&
         def->parentSymbol != rootModule         &&
         isVarSymbol(def->sym)                   &&
+        !def->sym->hasFlag(FLAG_TEMP)           &&
         !def->sym->hasFlag(FLAG_LOCALE_PRIVATE) &&
         !def->sym->hasFlag(FLAG_EXTERN)) {
       if (def->sym->hasFlag(FLAG_CONST) &&
@@ -1260,8 +1064,6 @@ static void findHeapVarsAndRefs(Map<Symbol*, Vec<SymExpr*>*>& defMap,
 
 static void
 makeHeapAllocations() {
-  Vec<Symbol*> refSet;
-  Vec<Symbol*> refVec;
   Vec<Symbol*> varSet;
   Vec<Symbol*> varVec;
 
@@ -1269,114 +1071,7 @@ makeHeapAllocations() {
   Map<Symbol*,Vec<SymExpr*>*> useMap;
   buildDefUseMaps(defMap, useMap);
 
-  findBlockRefActuals(refSet, refVec);
-  findHeapVarsAndRefs(defMap, refSet, refVec, varSet, varVec);
-
-  forv_Vec(Symbol, ref, refVec) {
-    if (ArgSymbol* arg = toArgSymbol(ref)) {
-      FnSymbol* fn = toFnSymbol(arg->defPoint->parentSymbol);
-      forv_Vec(CallExpr, call, *fn->calledBy) {
-        SymExpr* se = NULL;
-        for_formals_actuals(formal, actual, call) {
-          if (formal == arg)
-            se = toSymExpr(actual);
-        }
-        INT_ASSERT(se);
-        // Previous passes mean that we should always get a formal SymExpr
-        // to match the ArgSymbol.  And that formal should have the
-        // ref flag, since we obtained it through the refVec.
-        //
-        // BHARSH TODO: This INT_ASSERT existed before the switch to qualified
-        // types. After the switch it's now possible to pass a non-ref actual
-        // to a ref formal, and codegen will just take care of it.  With that
-        // in mind, do we need to do something here if the actual is not a ref,
-        // or can we just skip that case?
-        //INT_ASSERT(se->symbol()->isRef());
-        if (se->symbol()->isRef() && !refSet.set_in(se->symbol())) {
-          refSet.set_add(se->symbol());
-          refVec.add(se->symbol());
-        }
-        // BHARSH TODO: Need to add to varVec here?
-      }
-    } else if (VarSymbol* var = toVarSymbol(ref)) {
-      //      INT_ASSERT(defMap.get(var)->n == 1);
-      for_defs(def, defMap, var) {
-        INT_ASSERT(def);
-        if (CallExpr* call = toCallExpr(def->parentExpr)) {
-          if (call->isPrimitive(PRIM_MOVE)) {
-            if (CallExpr* rhs = toCallExpr(call->get(2))) {
-              if (rhs->isPrimitive(PRIM_ADDR_OF) ||
-                  rhs->isPrimitive(PRIM_SET_REFERENCE)) {
-                SymExpr* se = toSymExpr(rhs->get(1));
-                INT_ASSERT(se);
-                if (!se->isRef() && !varSet.set_in(se->symbol())) {
-                  varSet.set_add(se->symbol());
-                  varVec.add(se->symbol());
-                }
-                // BHARSH TODO: Need to add to refVec here?
-              } else if (rhs->isPrimitive(PRIM_GET_MEMBER) ||
-                         rhs->isPrimitive(PRIM_GET_MEMBER_VALUE) ||
-                         rhs->isPrimitive(PRIM_GET_SVEC_MEMBER) ||
-                         rhs->isPrimitive(PRIM_GET_SVEC_MEMBER_VALUE)) {
-                SymExpr* se = toSymExpr(rhs->get(1));
-                INT_ASSERT(se);
-                if (se->symbol()->isRef()) {
-                  if (!refSet.set_in(se->symbol())) {
-                    refSet.set_add(se->symbol());
-                    refVec.add(se->symbol());
-                  }
-                } else if (!varSet.set_in(se->symbol())) {
-                  varSet.set_add(se->symbol());
-                  varVec.add(se->symbol());
-                }
-              }
-              //
-              // Otherwise assume reference is to something that is
-              // already on the heap!  This is concerning...  SJD:
-              // Build a future that returns a reference in an
-              // iterator to something that is not on the heap
-              // (including not in an array).
-              //
-              // The alternative to making this assumption is to
-              // follow the returned reference (assuming this is a
-              // function call) through the function and make sure
-              // that whatever it returns is on the heap.  Then if we
-              // eventually see a GET_ARRAY primitive, we know it is
-              // already on the heap.
-              //
-              // To debug this case, add an else INT_FATAL here.
-              //
-            } else if (SymExpr* rhs = toSymExpr(call->get(2))) {
-              INT_ASSERT(rhs->symbol()->isRef());
-              if (!refSet.set_in(rhs->symbol())) {
-                refSet.set_add(rhs->symbol());
-                refVec.add(rhs->symbol());
-              }
-            } else
-              INT_FATAL(ref, "unexpected case");
-          } else { // !call->isPrimitive(PRIM_MOVE)
-            // This definition is created by passing the variable to a function
-            // by ref, out or inout intent.  We then assume that the function
-            // updates the reference.
-
-            // If the definition of the ref var does not appear in this
-            // function, then most likely it was established in an calling
-            // routine.
-            // We may need to distinguish between definition of the reference
-            // var itself (i.e. the establishment of an alias) as compared to
-            // when the variable being referenced is updated....
-            // In any case, it is safe to ignore this case, because either the
-            // value of the ref variable was established elsewhere, or it will
-            // appear in another def associated with the ref var.
-//            INT_FATAL(ref, "unexpected case");
-          }
-        } else
-          INT_FATAL(ref, "unexpected case");
-      }
-    }
-  }
-
-  Vec<Symbol*> heapAllocatedVars;
+  findHeapVarsAndRefs(defMap, varSet, varVec);
 
   forv_Vec(Symbol, var, varVec) {
     // MPF: I'm disabling the below assert because PR #5692
@@ -1408,39 +1103,7 @@ makeHeapAllocations() {
 
     SET_LINENO(var);
 
-    if (ArgSymbol* arg = toArgSymbol(var)) {
-      VarSymbol* tmp = newTemp(var->type);
-      varSet.set_add(tmp);
-      varVec.add(tmp);
-      SymExpr* firstDef = new SymExpr(tmp);
-      arg->getFunction()->insertAtHead(new CallExpr(PRIM_MOVE, firstDef, arg));
-      addDef(defMap, firstDef);
-      arg->getFunction()->insertAtHead(new DefExpr(tmp));
-      for_defs(def, defMap, arg) {
-        def->setSymbol(tmp);
-        addDef(defMap, def);
-      }
-      for_uses(use, useMap, arg) {
-        use->setSymbol(tmp);
-        addUse(useMap, use);
-      }
-      continue;
-    }
     AggregateType* heapType = buildHeapType(var->type);
-
-    //
-    // allocate local variables on the heap; global variables are put
-    // on the heap during program startup
-    //
-    if (!isModuleSymbol(var->defPoint->parentSymbol) &&
-        ((useMap.get(var) && useMap.get(var)->n > 0) ||
-         (defMap.get(var) && defMap.get(var)->n > 0))) {
-      SET_LINENO(var->defPoint);
-      insertChplHereAlloc(var->defPoint->getStmtExpr(),
-                          true /*insertAfter*/,var, heapType,
-                          newMemDesc("local heap-converted data"));
-      heapAllocatedVars.add(var);
-    }
 
     for_defs(def, defMap, var) {
       if (CallExpr* call = toCallExpr(def->parentExpr)) {
@@ -1531,7 +1194,11 @@ makeHeapAllocations() {
                    call->get(1) == use) {
           VarSymbol* tmp = newTemp(var->qualType().toRef());
           call->getStmtExpr()->insertBefore(new DefExpr(tmp));
-          call->getStmtExpr()->insertBefore(new CallExpr(PRIM_MOVE, tmp, new CallExpr(PRIM_GET_MEMBER, use->symbol(), heapType->getField(1))));
+          PrimitiveTag op = PRIM_GET_MEMBER;
+          if (heapType->getField(1)->isRef()) {
+            op = PRIM_GET_MEMBER_VALUE;
+          }
+          call->getStmtExpr()->insertBefore(new CallExpr(PRIM_MOVE, tmp, new CallExpr(op, use->symbol(), heapType->getField(1))));
           use->replace(new SymExpr(tmp));
         } else {
           VarSymbol* tmp = newTemp(var->type);
@@ -1546,75 +1213,8 @@ makeHeapAllocations() {
     var->type = heapType;
     var->qual = QUAL_VAL;
   }
-
-  freeHeapAllocatedVars(heapAllocatedVars);
 }
 
-
-//
-// re-privatize privatized object fields in iterator classes
-//
-static void
-reprivatizeIterators() {
-  if (fLocal)
-    return; // no need for privatization
-
-  std::vector<Symbol*> privatizedFields;
-
-  forv_Vec(AggregateType, ct, gAggregateTypes) {
-    for_fields(field, ct) {
-      if (ct->symbol->hasFlag(FLAG_ITERATOR_CLASS) &&
-          field->type->symbol->hasFlag(FLAG_PRIVATIZED_CLASS)) {
-        privatizedFields.push_back(field);
-      }
-    }
-  }
-
-
-  for_vector(Symbol, sym, privatizedFields) {
-    for_SymbolSymExprs(se, sym) {
-      SET_LINENO(se);
-      if (CallExpr* call = toCallExpr(se->parentExpr)) {
-        if (call->isPrimitive(PRIM_GET_MEMBER_VALUE)) {
-          CallExpr* move = toCallExpr(call->parentExpr);
-          INT_ASSERT(move->isPrimitive(PRIM_MOVE));
-          SymExpr* lhs = toSymExpr(move->get(1));
-          AggregateType* ct = toAggregateType(se->symbol()->type);
-          VarSymbol* tmp = newTemp(ct->getField("pid")->type);
-          move->insertBefore(new DefExpr(tmp));
-          lhs->replace(new SymExpr(tmp));
-          move->insertAfter(new CallExpr(PRIM_MOVE, lhs->symbol(), new CallExpr(PRIM_GET_PRIV_CLASS, lhs->symbol()->type->symbol, tmp)));
-        } else if (call->isPrimitive(PRIM_GET_MEMBER)) {
-          CallExpr* move = toCallExpr(call->parentExpr);
-          INT_ASSERT(move->isPrimitive(PRIM_MOVE));
-          SymExpr* lhs = toSymExpr(move->get(1));
-          AggregateType* ct = toAggregateType(se->symbol()->type);
-          VarSymbol* tmp = newTemp(ct->getField("pid")->type);
-          move->insertBefore(new DefExpr(tmp));
-          lhs->replace(new SymExpr(tmp));
-          call->primitive = primitives[PRIM_GET_MEMBER_VALUE];
-          VarSymbol* valTmp = newTemp(lhs->getValType());
-          move->insertBefore(new DefExpr(valTmp));
-          move->insertAfter(new CallExpr(PRIM_MOVE, lhs, new CallExpr(PRIM_SET_REFERENCE, valTmp)));
-          move->insertAfter(new CallExpr(PRIM_MOVE, valTmp, new CallExpr(PRIM_GET_PRIV_CLASS, lhs->getValType()->symbol, tmp)));
-        } else if (call->isPrimitive(PRIM_SET_MEMBER)) {
-          AggregateType* ct = toAggregateType(se->symbol()->type);
-          VarSymbol* tmp = newTemp(ct->getField("pid")->type);
-          call->insertBefore(new DefExpr(tmp));
-          call->insertBefore(new CallExpr(PRIM_MOVE, tmp, new CallExpr(PRIM_GET_MEMBER_VALUE, call->get(3)->remove(), ct->getField("pid"))));
-          call->insertAtTail(new SymExpr(tmp));
-        } else
-          INT_FATAL(se, "unexpected case in re-privatization in iterator");
-      } else
-        INT_FATAL(se, "unexpected case in re-privatization in iterator");
-    }
-  }
-
-  for_vector(Symbol, sym, privatizedFields) {
-    if (sym)
-      sym->type = dtInt[INT_SIZE_DEFAULT];
-  }
-}
 
 //
 // A helper function for replaceRecordWrappedRefs that updates the type and
@@ -1740,8 +1340,6 @@ void parallel() {
   replaceRecordWrappedRefs();
 
   remoteValueForwarding();
-
-  reprivatizeIterators();
 
   if (requireOutlinedOn()) {
     makeHeapAllocations();

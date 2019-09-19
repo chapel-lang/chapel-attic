@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2018 Cray Inc.
+ * Copyright 2004-2019 Cray Inc.
  * Other additional copyright holders may be indicated within.
  *
  * The entirety of this work is licensed under the Apache License,
@@ -30,8 +30,8 @@
    :proc:`~Barriers.Barrier.reset()` method can be used change how many tasks
    per locale will participate in each barrier.
 
-   Use of this barrier is similar to :proc:`shmem_barrier_all()` or
-   :proc:`MPI_Barrier(MPI_COMM_WORLD)`, except that it's possible for multiple
+   Use of this barrier is similar to ``shmem_barrier_all()`` or
+   ``MPI_Barrier(MPI_COMM_WORLD)``, except that it's possible for multiple
    tasks on the same locale to barrier. In the following examples all tasks
    will print "Before barrier" before any print "After barrier"
 
@@ -70,17 +70,17 @@ module AllLocalesBarriers {
   class AllLocalesBarrier: BarrierBaseType {
 
     const BarrierSpace = LocaleSpace dmapped Block(LocaleSpace);
-    var globalBarrier: [BarrierSpace] aBarrier(reusable=true, hackIntoCommBarrier=true);
+    var globalBarrier: [BarrierSpace] unmanaged aBarrier(reusable=true, procAtomics=true, hackIntoCommBarrier=true);
 
     proc init(numTasksPerLocale: int) {
-      globalBarrier = [b in BarrierSpace] new aBarrier(numTasksPerLocale, reusable=true, hackIntoCommBarrier=true);
+      globalBarrier = [b in BarrierSpace] new unmanaged aBarrier(numTasksPerLocale, reusable=true, procAtomics=true, hackIntoCommBarrier=true);
     }
 
     proc deinit() {
       [b in globalBarrier] delete b;
     }
 
-    proc barrier() {
+    override proc barrier() {
       globalBarrier.localAccess[here.id].barrier();
     }
 
@@ -89,12 +89,5 @@ module AllLocalesBarriers {
     }
   }
 
-  var allLocalesBarrier: AllLocalesBarrier;
-
-  allLocalesBarrier = new AllLocalesBarrier(1);
-
-  pragma "no doc"
-  proc deinit() {
-    delete allLocalesBarrier;
-  }
+  const allLocalesBarrier: AllLocalesBarrier = new AllLocalesBarrier(1);
 }

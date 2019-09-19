@@ -1,4 +1,4 @@
-# Copyright 2004-2018 Cray Inc.
+# Copyright 2004-2019 Cray Inc.
 # Other additional copyright holders may be indicated within.
 #
 # The entirety of this work is licensed under the Apache License,
@@ -23,13 +23,13 @@ endif
 
 include $(CHPL_MAKE_HOME)/make/Makefile.base
 
-unexport CHPL_MAKE_SETTINGS_NO_NEWLINES
+unexport CHPL_MAKE_CHPLENV_CACHE
 
 bdir=$(CHPL_BIN_DIR)
 link=../../tools/mason/mason
 linkFile=$(bdir)/mason
 
-MASON_SOURCES=MasonBuild.chpl MasonEnv.chpl MasonHelp.chpl MasonNew.chpl MasonSearch.chpl MasonUpdate.chpl MasonUtils.chpl mason.chpl
+MASON_SOURCES=*.chpl
 
 all: mason
 

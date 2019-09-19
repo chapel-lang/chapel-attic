@@ -1,5 +1,5 @@
 /*
- * Copyright © 2010-2018 Inria.  All rights reserved.
+ * Copyright © 2010-2019 Inria.  All rights reserved.
  * Copyright © 2010-2013 Université Bordeaux
  * Copyright © 2010-2011 Cisco Systems, Inc.  All rights reserved.
  * See COPYING in top-level directory.
@@ -57,6 +57,7 @@ struct procinfo {
   unsigned max_nbcores;
   unsigned max_nbthreads;
   unsigned packageid;
+  unsigned dieid;
   unsigned nodeid;
   unsigned unitid;
   unsigned logprocid;
@@ -77,6 +78,7 @@ enum cpuid_type {
   intel,
   amd,
   zhaoxin,
+  hygon,
   unknown
 };
 
@@ -130,6 +132,69 @@ static void fill_amd_cache(struct procinfo *infos, unsigned level, int type, uns
   hwloc_debug("cache L%u t%u linesize %u ways %d size %luKB\n", cache->level, cache->nbthreads_sharing, cache->linesize, cache->ways, cache->size >> 10);
 }
 
+static void look_exttopoenum(struct procinfo *infos, unsigned leaf)
+{
+  unsigned level, apic_nextshift, apic_number, apic_type, apic_id = 0, apic_shift = 0, id;
+  unsigned threadid __hwloc_attribute_unused = 0; /* shut-up compiler */
+  unsigned eax, ebx, ecx = 0, edx;
+  int apic_packageshift = 0;
+
+  for (level = 0; ; level++) {
+    ecx = level;
+    eax = leaf;
+    hwloc_x86_cpuid(&eax, &ebx, &ecx, &edx);
+    if (!eax && !ebx)
+      break;
+    apic_packageshift = eax & 0x1f;
+  }
+
+  if (level) {
+    infos->otherids = malloc(level * sizeof(*infos->otherids));
+    if (infos->otherids) {
+      infos->levels = level;
+      for (level = 0; ; level++) {
+	ecx = level;
+	eax = leaf;
+	hwloc_x86_cpuid(&eax, &ebx, &ecx, &edx);
+	if (!eax && !ebx)
+	  break;
+	apic_nextshift = eax & 0x1f;
+	apic_number = ebx & 0xffff;
+	apic_type = (ecx & 0xff00) >> 8;
+	apic_id = edx;
+	id = (apic_id >> apic_shift) & ((1 << (apic_packageshift - apic_shift)) 
+- 1);
+	hwloc_debug("x2APIC %08x %u: nextshift %u num %2u type %u id %2u\n", apic_id, level, apic_nextshift, apic_number, apic_type, id);
+	infos->apicid = apic_id;
+	infos->otherids[level] = UINT_MAX;
+	switch (apic_type) {
+	case 1:
+	  infos->threadid = id;
+	  /* apic_number is the actual number of threads per core */
+	  break;
+	case 2:
+	  infos->coreid = id;
+	  /* apic_number is the actual number of threads per module */
+	  break;
+	case 5:
+	  infos->dieid = id;
+	  /* apic_number is the actual number of threads per package */
+	  break;
+	default:
+	  hwloc_debug("x2APIC %u: unknown type %u\n", level, apic_type);
+	  infos->otherids[level] = apic_id >> apic_shift;
+	  break;
+	}
+	apic_shift = apic_nextshift;
+      }
+      infos->apicid = apic_id;
+      infos->packageid = apic_id >> apic_shift;
+      hwloc_debug("x2APIC remainder: %u\n", infos->packageid);
+      hwloc_debug("this is thread %u of core %u\n", infos->threadid, infos->coreid);
+    }
+  }
+}
+
 /* Fetch information from the processor itself thanks to cpuid and store it in
  * infos for summarize to analyze them globally */
 static void look_proc(struct hwloc_backend *backend, struct procinfo *infos, unsigned highest_cpuid, unsigned highest_ext_cpuid, unsigned *features, enum cpuid_type cpuid_type)
@@ -171,13 +236,13 @@ static void look_proc(struct hwloc_backend *backend, struct procinfo *infos, uns
   _extendedmodel  = (eax>>16) & 0xf;
   _family         = (eax>>8) & 0xf;
   _extendedfamily = (eax>>20) & 0xff;
-  if ((cpuid_type == intel || cpuid_type == amd) && _family == 0xf) {
+  if ((cpuid_type == intel || cpuid_type == amd || cpuid_type == hygon) && _family == 0xf) {
     infos->cpufamilynumber = _family + _extendedfamily;
   } else {
     infos->cpufamilynumber = _family;
   }
   if ((cpuid_type == intel && (_family == 0x6 || _family == 0xf))
-      || (cpuid_type == amd && _family == 0xf)
+      || ((cpuid_type == amd || cpuid_type == hygon) && _family == 0xf)
       || (cpuid_type == zhaoxin && (_family == 0x6 || _family == 0x7))) {
     infos->cpumodelnumber = _model + (_extendedmodel << 4);
   } else {
@@ -262,12 +327,13 @@ static void look_proc(struct hwloc_backend *backend, struct procinfo *infos, uns
       node_id = 0;
       nodes_per_proc = 1;
     } else {
+      /* AMD other families or Hygon family 18h */
       node_id = ecx & 0xff;
       nodes_per_proc = ((ecx >> 8) & 7) + 1;
     }
     infos->nodeid = node_id;
     if ((infos->cpufamilynumber == 0x15 && nodes_per_proc > 2)
-	|| (infos->cpufamilynumber == 0x17 && nodes_per_proc > 4)) {
+	|| ((infos->cpufamilynumber == 0x17 || infos->cpufamilynumber == 0x18) && nodes_per_proc > 4)) {
       hwloc_debug("warning: undefined nodes_per_proc value %u, assuming it means %u\n", nodes_per_proc, nodes_per_proc);
     }
 
@@ -361,7 +427,7 @@ static void look_proc(struct hwloc_backend *backend, struct procinfo *infos, uns
   /* Get thread/core + cache information from cpuid 0x04
    * (not supported on AMD)
    */
-  if (cpuid_type != amd && highest_cpuid >= 0x04) {
+  if ((cpuid_type != amd && cpuid_type != hygon) && highest_cpuid >= 0x04) {
     unsigned level;
     struct cacheinfo *tmpcaches;
     unsigned oldnumcaches = infos->numcaches; /* in case we got caches above */
@@ -396,7 +462,9 @@ static void look_proc(struct hwloc_backend *backend, struct procinfo *infos, uns
     }
 
     tmpcaches = realloc(infos->cache, infos->numcaches * sizeof(*infos->cache));
-    if (tmpcaches) {
+    if (!tmpcaches) {
+     infos->numcaches = oldnumcaches;
+    } else {
      infos->cache = tmpcaches;
      cache = &infos->cache[oldnumcaches];
 
@@ -439,56 +507,17 @@ static void look_proc(struct hwloc_backend *backend, struct procinfo *infos, uns
     }
   }
 
-  /* Get package/core/thread information from cpuid 0x0b
-   * (Intel x2APIC)
-   */
-  if ((cpuid_type == intel || cpuid_type == zhaoxin) && highest_cpuid >= 0x0b && has_x2apic(features)) {
-    unsigned level, apic_nextshift, apic_number, apic_type, apic_id = 0, apic_shift = 0, id;
-    for (level = 0; ; level++) {
-      ecx = level;
-      eax = 0x0b;
-      hwloc_x86_cpuid(&eax, &ebx, &ecx, &edx);
-      if (!eax && !ebx)
-        break;
-    }
-    if (level) {
-      infos->otherids = malloc(level * sizeof(*infos->otherids));
-      if (infos->otherids) {
-       infos->levels = level;
-       for (level = 0; ; level++) {
-	ecx = level;
-	eax = 0x0b;
-	hwloc_x86_cpuid(&eax, &ebx, &ecx, &edx);
-	if (!eax && !ebx)
-	  break;
-	apic_nextshift = eax & 0x1f;
-	apic_number = ebx & 0xffff;
-	apic_type = (ecx & 0xff00) >> 8;
-	apic_id = edx;
-	id = (apic_id >> apic_shift) & ((1 << (apic_nextshift - apic_shift)) - 1);
-	hwloc_debug("x2APIC %08x %u: nextshift %u num %2u type %u id %2u\n", apic_id, level, apic_nextshift, apic_number, apic_type, id);
-	infos->apicid = apic_id;
-	infos->otherids[level] = UINT_MAX;
-	switch (apic_type) {
-	case 1:
-	  infos->threadid = id;
-	  break;
-	case 2:
-	  infos->coreid = id;
-	  break;
-	default:
-	  hwloc_debug("x2APIC %u: unknown type %u\n", level, apic_type);
-	  infos->otherids[level] = apic_id >> apic_shift;
-	  break;
-	}
-	apic_shift = apic_nextshift;
-      }
-      infos->apicid = apic_id;
-      infos->packageid = apic_id >> apic_shift;
-      hwloc_debug("x2APIC remainder: %u\n", infos->packageid);
-      hwloc_debug("this is thread %u of core %u\n", infos->threadid, infos->coreid);
-     }
-    }
+  if ((cpuid_type == intel) && highest_cpuid >= 0x1f) {
+    /* Get package/die/module/tile/core/thread information from cpuid 0x1f
+     * (Intel v2 Extended Topology Enumeration)
+     */
+    look_exttopoenum(infos, 0x1f);
+
+  } else if ((cpuid_type == intel || cpuid_type == zhaoxin) && highest_cpuid >= 0x0b && has_x2apic(features)) {
+    /* Get package/core/thread information from cpuid 0x0b
+     * (Intel v1 Extended Topology Enumeration)
+     */
+    look_exttopoenum(infos, 0x0b);
   }
 
   /* Now that we have all info, compute cacheids and apply quirks */
@@ -537,6 +566,15 @@ static void look_proc(struct hwloc_backend *backend, struct procinfo *infos, uns
 	 */
 	cache->cacheid = (infos->apicid % infos->max_log_proc) / cache->nbthreads_sharing /* cacheid within the package */
 	  + 2 * (infos->apicid / infos->max_log_proc); /* add 2 cache per previous package */
+      }
+    } else if (cpuid_type == hygon) {
+      if (infos->cpufamilynumber == 0x18
+	  && cache->level == 3 && cache->nbthreads_sharing == 6) {
+        /* Hygon family 0x18 always shares L3 between 8 APIC ids,
+         * even when only 6 APIC ids are enabled and reported in nbthreads_sharing
+         * (on 24-core CPUs).
+         */
+        cache->cacheid = infos->apicid / 8;
       }
     }
   }
@@ -668,7 +706,7 @@ static int summarize(struct hwloc_backend *backend, struct procinfo *infos, int 
   }
 
   /* Look for Numa nodes inside packages */
-  if (fulldiscovery) {
+  if (fulldiscovery && getenv("HWLOC_X86_TOPOEXT_NUMANODES")) {
     hwloc_bitmap_t node_cpuset;
     hwloc_obj_t node;
 
@@ -704,11 +742,13 @@ static int summarize(struct hwloc_backend *backend, struct procinfo *infos, int 
     }
   }
 
-  /* Look for Compute units inside packages */
   if (fulldiscovery) {
-    hwloc_bitmap_t unit_cpuset;
-    hwloc_obj_t unit;
+    hwloc_bitmap_t unit_cpuset, die_cpuset;
+    hwloc_obj_t unit, die;
+    char *env;
+    int dont_merge;
 
+    /* Look for Compute units inside packages */
     hwloc_bitmap_copy(remaining_cpuset, complete_cpuset);
     while ((i = hwloc_bitmap_first(remaining_cpuset)) != (unsigned) -1) {
       unsigned packageid = infos[i].packageid;
@@ -738,10 +778,43 @@ static int summarize(struct hwloc_backend *backend, struct procinfo *infos, int 
           unitid, unit_cpuset);
       hwloc_insert_object_by_cpuset(topology, unit);
     }
-  }
 
-  /* Look for unknown objects */
-  if (infos[one].otherids) {
+    /* Look for Dies inside packages */
+    env = getenv("HWLOC_DONT_MERGE_DIE_GROUPS");
+    dont_merge = env && atoi(env);
+    hwloc_bitmap_copy(remaining_cpuset, complete_cpuset);
+    while ((i = hwloc_bitmap_first(remaining_cpuset)) != (unsigned) -1) {
+      unsigned packageid = infos[i].packageid;
+      unsigned dieid = infos[i].dieid;
+
+      if (dieid == (unsigned)-1) {
+        hwloc_bitmap_clr(remaining_cpuset, i);
+	continue;
+      }
+
+      die_cpuset = hwloc_bitmap_alloc();
+      for (j = i; j < nbprocs; j++) {
+	if (infos[j].dieid == (unsigned) -1) {
+	  hwloc_bitmap_clr(remaining_cpuset, j);
+	  continue;
+	}
+
+        if (infos[j].packageid == packageid && infos[j].dieid == dieid) {
+          hwloc_bitmap_set(die_cpuset, j);
+          hwloc_bitmap_clr(remaining_cpuset, j);
+        }
+      }
+      die = hwloc_alloc_setup_object(HWLOC_OBJ_GROUP, dieid);
+      die->cpuset = die_cpuset;
+      hwloc_obj_add_info(die, "Type", "Die");
+      die->attr->group.dont_merge = dont_merge;
+      hwloc_debug_1arg_bitmap("os die %u has cpuset %s\n",
+          dieid, die_cpuset);
+      hwloc_insert_object_by_cpuset(topology, die);
+    }
+
+   /* Look for unknown objects */
+   if (infos[one].otherids) {
     for (level = infos[one].levels-1; level <= infos[one].levels-1; level--) {
       if (infos[one].otherids[level] != UINT_MAX) {
 	hwloc_bitmap_t unknown_cpuset;
@@ -770,6 +843,7 @@ static int summarize(struct hwloc_backend *backend, struct procinfo *infos, int 
 	}
       }
     }
+   }
   }
 
   /* Look for cores */
@@ -995,6 +1069,12 @@ static void hwloc_x86_os_state_restore(hwloc_x86_os_state_t *state __hwloc_attri
 #define AMD_EDX ('e' | ('n'<<8) | ('t'<<16) | ('i'<<24))
 #define AMD_ECX ('c' | ('A'<<8) | ('M'<<16) | ('D'<<24))
 
+/* HYGON "HygonGenuine" */
+#define HYGON_EBX ('H' | ('y'<<8) | ('g'<<16) | ('o'<<24))
+#define HYGON_EDX ('n' | ('G'<<8) | ('e'<<16) | ('n'<<24))
+#define HYGON_ECX ('u' | ('i'<<8) | ('n'<<16) | ('e'<<24))
+
+/* (Zhaoxin) CentaurHauls */
 #define ZX_EBX ('C' | ('e'<<8) | ('n'<<16) | ('t'<<24))
 #define ZX_EDX ('a' | ('u'<<8) | ('r'<<16) | ('H'<<24))
 #define ZX_ECX ('a' | ('u'<<8) | ('l'<<16) | ('s'<<24))
@@ -1065,6 +1145,7 @@ int hwloc_look_x86(struct hwloc_backend *backend, int fulldiscovery)
   for (i = 0; i < nbprocs; i++) {
     infos[i].nodeid = (unsigned) -1;
     infos[i].packageid = (unsigned) -1;
+    infos[i].dieid = (unsigned) -1;
     infos[i].unitid = (unsigned) -1;
     infos[i].coreid = (unsigned) -1;
     infos[i].threadid = (unsigned) -1;
@@ -1082,6 +1163,8 @@ int hwloc_look_x86(struct hwloc_backend *backend, int fulldiscovery)
     cpuid_type = zhaoxin;
   if (ebx == SH_EBX && ecx == SH_ECX && edx == SH_EDX)
     cpuid_type = zhaoxin;
+  else if (ebx == HYGON_EBX && ecx == HYGON_ECX && edx == HYGON_EDX)
+    cpuid_type = hygon;
 
   hwloc_debug("highest cpuid %x, cpuid type %u\n", highest_cpuid, cpuid_type);
   if (highest_cpuid < 0x01) {

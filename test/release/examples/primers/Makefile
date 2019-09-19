@@ -16,23 +16,28 @@ TARGETS = \
 	fileIO \
 	genericClasses \
 	iterators \
+	learnChapelInYMinutes \
+	listOps \
 	locales \
 	modules \
+	nothingVariables \
 	opaque-domains \
 	parIters \
 	procedures \
 	randomNumbers \
 	ranges \
+	records \
 	reductions \
 	replicated \
 	slices \
 	sparse \
+	specialMethods \
 	syncsingle \
 	taskParallel \
 	timers \
+	tuples \
 	varargs \
 	variables \
-	voidVariables \
 
 #
 # Only make FFTW if FFTW_DIR is set or we can find the fftw library
@@ -44,7 +49,7 @@ endif
 
 ifdef CRAY_LIBSCI_PREFIX_DIR
 	TARGETS += LAPACKlib LinearAlgebralib
-	LAPACK_OPTS = -I$(CRAY_LIBSCI_PREFIX_DIR)/include -lgfortran -lsci_gnu -L$(CRAY_LIBSCI_PREFIX_DIR)/lib
+	LAPACK_OPTS = -lgfortran -lsci_gnu
 endif
 
 REALS = $(TARGETS:%=%_real)

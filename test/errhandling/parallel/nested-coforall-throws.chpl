@@ -2,13 +2,13 @@ use ExampleErrors;
 
 config const option = 2;
 
-proc printErrors(errors: TaskErrors, depth:int)
+proc printErrors(errors: borrowed TaskErrors, depth:int)
 {
   for e in errors { 
-    var g = e:TaskErrors;
+    var g = e:borrowed TaskErrors?;
     if g {
       writeln(" "*depth, "TaskErrors");
-      printErrors(g, depth + 1);
+      printErrors(g!, depth + 1);
     } else
       writeln(" "*depth, "err:", e.message());
   }
@@ -22,7 +22,7 @@ proc test() {
       coforall j in 1..2 {
         coforall k in 1..2 {
           if k <= option then
-            throw new StringError("test error");
+            throw new owned StringError("test error");
         }
       }
     }

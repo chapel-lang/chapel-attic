@@ -132,6 +132,12 @@ config const recvBuffFactor = 2.0,
 config const numBurnInRuns = 1,
              numTrials = 1;
 
+// Horrible hack to help https://github.com/chapel-lang/chapel/issues/9414
+record TimerArr {
+  var A: [1..numTrials] real;
+  proc this(i) ref { return A[i]; }
+  iter these() ref { for a in A do yield a; }
+}
 
 if printConfig then
   printConfiguration();
@@ -145,7 +151,7 @@ var allBucketKeys: [DistTaskSpace] [0..#recvBuffSize] keyType;
 var recvOffset: [DistTaskSpace] atomic int;
 var totalTime, inputTime, bucketCountTime, bucketOffsetTime, bucketizeTime,
     exchangeKeysTime, exchangeKeysOnlyTime, exchangeKeysBarrierTime,
-    countKeysTime: [DistTaskSpace] [1..numTrials] real;
+    countKeysTime: [DistTaskSpace] TimerArr;
 var verifyKeyCount: atomic int;
 
 allLocalesBarrier.reset(perBucketMultiply);
@@ -332,8 +338,8 @@ proc verifyResults(taskID, myBucketSize, myLocalKeyCounts) {
   ref myBucket = allBucketKeys[taskID];
   for i in 0..#myBucketSize {
     const key = myBucket[i];
-    if !myKeys.member(key) then
-      halt("got key value outside my range: "+key + " not in " + myKeys:string);
+    if !myKeys.contains(key) then
+      halt("got key value outside my range: ", key, " not in ", myKeys);
   }
 
   //
@@ -341,7 +347,7 @@ proc verifyResults(taskID, myBucketSize, myLocalKeyCounts) {
   //
   const myTotalLocalKeys = + reduce myLocalKeyCounts;
   if myTotalLocalKeys != myBucketSize then
-    halt("local key count mismatch:" + myTotalLocalKeys + " != " + myBucketSize);
+    halt("local key count mismatch:", myTotalLocalKeys, " != ", myBucketSize);
 
   //
   //
@@ -349,7 +355,7 @@ proc verifyResults(taskID, myBucketSize, myLocalKeyCounts) {
   verifyKeyCount.add(myBucketSize);
   allLocalesBarrier.barrier();
   if verifyKeyCount.read() != totalKeys then
-    halt("total key count mismatch: " + verifyKeyCount.read() + " != " + totalKeys);
+    halt("total key count mismatch: ", verifyKeyCount.read(), " != ", totalKeys);
 
   if (!quiet && taskID == 0) then
     writeln("\nVerification successful!");

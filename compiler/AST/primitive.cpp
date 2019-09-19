@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2018 Cray Inc.
+ * Copyright 2004-2019 Cray Inc.
  * Other additional copyright holders may be indicated within.
  *
  * The entirety of this work is licensed under the Apache License,
@@ -19,6 +19,7 @@
 
 #include "primitive.h"
 
+#include "DecoratedClassType.h"
 #include "expr.h"
 #include "iterator.h"
 #include "stringutil.h"
@@ -178,6 +179,22 @@ returnInfoScalarPromotionType(CallExpr* call) {
   return QualifiedType(type, QUAL_VAL);
 }
 
+static QualifiedType
+returnInfoStaticFieldType(CallExpr* call) {
+  // The code below is not very general. It can be extended as needed.
+  // The first argument is the variable or the type whose field is queried.
+  Type* type = call->get(1)->getValType();
+  INT_ASSERT(! type->symbol->hasFlag(FLAG_TUPLE)); // not implemented
+  AggregateType* at = toAggregateType(canonicalDecoratedClassType(type));
+  INT_ASSERT(at); // caller's responsibility
+  // The second argument is the name of the field.
+  VarSymbol* nameSym = toVarSymbol(toSymExpr(call->get(2))->symbol());
+  // caller's responsibility
+  INT_ASSERT(nameSym->immediate->const_kind == CONST_KIND_STRING);
+  Symbol* field = at->getField(nameSym->immediate->v_string, true);
+  return field->qualType().toVal();
+}
+
 
 static QualifiedType
 returnInfoCast(CallExpr* call) {
@@ -251,13 +268,14 @@ returnInfoNumericUp(CallExpr* call) {
 
 static QualifiedType
 returnInfoArrayIndexValue(CallExpr* call) {
-  Type* type = call->get(1)->typeInfo();
+  Type* type = call->get(1)->getValType();
   if (type->symbol->hasFlag(FLAG_WIDE_CLASS))
     type = type->getField("addr")->type;
   if (!type->substitutions.n)
     INT_FATAL(call, "bad primitive");
   // Is this conditional necessary?  Can just assume condition is true?
-  if (type->symbol->hasFlag(FLAG_DATA_CLASS)) {
+  if (type->symbol->hasFlag(FLAG_DATA_CLASS) ||
+      type->symbol->hasFlag(FLAG_C_ARRAY)) {
     return QualifiedType(toTypeSymbol(getDataClassType(type->symbol))->type, QUAL_VAL);
   }
   else {
@@ -329,7 +347,8 @@ returnInfoGetTupleMemberRef(CallExpr* call) {
 
 static QualifiedType
 returnInfoGetMemberRef(CallExpr* call) {
-  AggregateType* ct = toAggregateType(call->get(1)->getValType());
+  Type* t = canonicalDecoratedClassType(call->get(1)->getValType());
+  AggregateType* ct = toAggregateType(t);
   INT_ASSERT(ct);
   SymExpr* se = toSymExpr(call->get(2));
   INT_ASSERT(se);
@@ -358,8 +377,10 @@ returnInfoGetMemberRef(CallExpr* call) {
       }
     }
     INT_ASSERT(field);
+    makeRefType(field->type);
     retType = field->type->refType ? field->type->refType : field->type;
   } else {
+    makeRefType(var->type);
     retType = var->type->refType ? var->type->refType : var->type;
   }
   Qualifier q = QUAL_REF;
@@ -389,6 +410,16 @@ returnInfoEndCount(CallExpr* call) {
 }
 
 static QualifiedType
+returnInfoError(CallExpr* call) {
+  AggregateType* at = toAggregateType(dtError);
+  INT_ASSERT(isClass(at));
+  Type* unmanaged =
+    at->getDecoratedClass(CLASS_TYPE_UNMANAGED); // TODO: nilable
+  INT_ASSERT(unmanaged);
+  return QualifiedType(unmanaged, QUAL_VAL);
+}
+
+static QualifiedType
 returnInfoVirtualMethodCall(CallExpr* call) {
   SymExpr* se = toSymExpr(call->get(1));
   INT_ASSERT(se);
@@ -398,9 +429,19 @@ returnInfoVirtualMethodCall(CallExpr* call) {
 }
 
 static QualifiedType
-returnInfoSecondType(CallExpr* call) {
-  QualifiedType t = call->get(2)->qualType();
-  return t;
+returnInfoCoerce(CallExpr* call) {
+  Type* t = call->get(2)->getValType();
+
+  if (t->symbol->hasFlag(FLAG_GENERIC)) {
+    // Try to figure out what instantiation type we would use
+    // and return that type.
+    SymExpr* actualOne = toSymExpr(call->get(1));
+    SymExpr* actualTwo = toSymExpr(call->get(2));
+    t = getInstantiationType(call->get(1)->getValType(), actualOne->symbol(),
+                             t, actualTwo->symbol(), call);
+  }
+
+  return QualifiedType(t, QUAL_VAL);
 }
 
 static QualifiedType
@@ -408,6 +449,122 @@ returnInfoIteratorRecordFieldValueByFormal(CallExpr* call) {
   QualifiedType t = call->get(2)->qualType();
   return t;
 }
+
+static QualifiedType
+returnInfoToUnmanaged(CallExpr* call) {
+  Type* t = call->get(1)->getValType();
+
+  ClassTypeDecorator decorator = CLASS_TYPE_UNMANAGED;
+  if (isNilableClassType(t))
+    decorator = CLASS_TYPE_UNMANAGED_NILABLE;
+  else if (isNonNilableClassType(t))
+    decorator = CLASS_TYPE_UNMANAGED_NONNIL;
+
+  if (AggregateType* at = toAggregateType(canonicalClassType(t))) {
+    if (isClass(at)) {
+      t = at->getDecoratedClass(decorator);
+    }
+  }
+  return QualifiedType(t, QUAL_VAL);
+}
+
+static QualifiedType
+returnInfoToBorrowed(CallExpr* call) {
+  Type* t = call->get(1)->getValType();
+
+  ClassTypeDecorator decorator = CLASS_TYPE_BORROWED;
+  if (isNilableClassType(t))
+    decorator = CLASS_TYPE_BORROWED_NILABLE;
+  else if (isNonNilableClassType(t))
+    decorator = CLASS_TYPE_BORROWED_NONNIL;
+
+  if (AggregateType* at = toAggregateType(canonicalClassType(t)))
+    if (isClass(at))
+      t = at->getDecoratedClass(decorator);
+
+  return QualifiedType(t, QUAL_VAL);
+}
+
+static QualifiedType
+returnInfoToUndecorated(CallExpr* call) {
+  Type* t = call->get(1)->getValType();
+
+  ClassTypeDecorator decorator = CLASS_TYPE_GENERIC;
+  if (isNilableClassType(t))
+    decorator = CLASS_TYPE_GENERIC_NILABLE;
+  else if (isNonNilableClassType(t))
+    decorator = CLASS_TYPE_GENERIC_NONNIL;
+
+  if (AggregateType* at = toAggregateType(canonicalClassType(t)))
+    if (isClass(at))
+      t = at->getDecoratedClass(decorator);
+
+  return QualifiedType(t, QUAL_VAL);
+}
+
+
+static QualifiedType
+returnInfoToNilable(CallExpr* call) {
+  Type* t = call->get(1)->getValType();
+
+  if (isClassLikeOrManaged(t)) {
+    ClassTypeDecorator decorator = classTypeDecorator(t);
+    decorator = addNilableToDecorator(decorator);
+
+    if (isManagedPtrType(t)) {
+      AggregateType* manager = getManagedPtrManagerType(t);
+      AggregateType* at = toAggregateType(canonicalClassType(t));
+      if (at == NULL) {
+        // e.g. _to_nonnil(owned)
+        t = getDecoratedClass(manager, decorator);
+      } else {
+        // e.g. _to_nonnil(owned C)
+        t = computeDecoratedManagedType(at, decorator, manager, call);
+      }
+    } else {
+      if (AggregateType* at = toAggregateType(canonicalClassType(t)))
+        if (isClass(at))
+          t = at->getDecoratedClass(decorator);
+    }
+  }
+
+  return QualifiedType(t, QUAL_VAL);
+}
+
+static QualifiedType
+returnInfoToNonNilable(CallExpr* call) {
+  Type* t = call->get(1)->getValType();
+
+  if (isClassLikeOrManaged(t)) {
+    ClassTypeDecorator decorator = classTypeDecorator(t);
+    decorator = addNonNilToDecorator(decorator);
+
+    if (isManagedPtrType(t)) {
+      AggregateType* manager = getManagedPtrManagerType(t);
+      AggregateType* at = toAggregateType(canonicalClassType(t));
+      if (at == NULL) {
+        // e.g. _to_nonnil(owned)
+        t = getDecoratedClass(manager, decorator);
+      } else {
+        // e.g. _to_nonnil(owned C)
+        t = computeDecoratedManagedType(at, decorator, manager, call);
+      }
+    } else {
+      if (AggregateType* at = toAggregateType(canonicalClassType(t)))
+        if (isClass(at))
+          t = at->getDecoratedClass(decorator);
+    }
+  }
+
+  return QualifiedType(t, QUAL_VAL);
+}
+
+static QualifiedType
+returnInfoRuntimeTypeField(CallExpr* call) {
+  return call->get(1)->qualType();
+}
+
+
 
 // print the number of each type of primitive present in the AST
 void printPrimitiveCounts(const char* passName) {
@@ -488,19 +645,29 @@ prim_def(const char* name, QualifiedType (*returnInfo)(CallExpr*),
 
 void
 initPrimitive() {
+  // use for any primitives not in this list
   primitives[PRIM_UNKNOWN] = NULL;
 
   prim_def(PRIM_ACTUALS_LIST, "actuals list", returnInfoVoid);
   prim_def(PRIM_NOOP, "noop", returnInfoVoid);
   // dst, src. PRIM_MOVE can set a reference.
-  prim_def(PRIM_MOVE, "move", returnInfoVoid, false, true);
+  prim_def(PRIM_MOVE, "move", returnInfoVoid, false);
 
-  prim_def(PRIM_INIT,       "init",       returnInfoFirstDeref);
-  prim_def(PRIM_INIT_FIELD, "init field", returnInfoVoid, false, true);
-  prim_def(PRIM_INIT_MAYBE_SYNC_SINGLE_FIELD, "init maybe sync/single field",
-           returnInfoVoid, false, true);
+  // dst, aggregate name, field name, type to default-init, value to init from
+  prim_def(PRIM_DEFAULT_INIT_FIELD, "default init field", returnInfoVoid);
+
+  // dst, type to default-init
+  prim_def(PRIM_DEFAULT_INIT_VAR, "default init var", returnInfoVoid);
+
+  // fn->_this, the name of the field, value/type, optional declared type
+  prim_def(PRIM_INIT_FIELD, "init field", returnInfoVoid, false);
+
+  // dst, init-expr, optional declared type
   prim_def(PRIM_INIT_VAR,   "init var",   returnInfoVoid);
-  prim_def(PRIM_NO_INIT,    "no init",    returnInfoFirstDeref);
+
+  // Used in a context where only a type is needed.
+  // Establishes the type of the result without
+  // generating code.
   prim_def(PRIM_TYPE_INIT,  "type init",  returnInfoFirstDeref);
 
   prim_def(PRIM_REF_TO_STRING, "ref to string", returnInfoStringC);
@@ -509,6 +676,12 @@ initPrimitive() {
   prim_def(PRIM_TRY_EXPR, "try-expr", returnInfoFirst);
   prim_def(PRIM_TRYBANG_EXPR, "try!-expr", returnInfoFirst);
   prim_def(PRIM_YIELD, "yield", returnInfoFirst, true);
+
+  // Represents a Chapel reduce expression "OP reduce DATA".
+  // Args: (OP, DATA, is zippered (gTrue/gFalse)).
+  // Lowered during resolution.
+  prim_def(PRIM_REDUCE, "reduce", returnInfoVoid, true);
+
   prim_def(PRIM_UNARY_MINUS, "u-", returnInfoFirstDeref);
   prim_def(PRIM_UNARY_PLUS, "u+", returnInfoFirstDeref);
   prim_def(PRIM_UNARY_NOT, "u~", returnInfoFirstDeref);
@@ -533,6 +706,9 @@ initPrimitive() {
 
   // dst, src. PRIM_ASSIGN with reference dst sets *dst
   prim_def(PRIM_ASSIGN, "=", returnInfoVoid, true);
+  // like PRIM_ASSIGN but the operation can be put off until end of
+  // the enclosing task or forall.
+  prim_def(PRIM_UNORDERED_ASSIGN, "unordered=", returnInfoVoid, true, true);
   prim_def(PRIM_ADD_ASSIGN, "+=", returnInfoVoid, true);
   prim_def(PRIM_SUBTRACT_ASSIGN, "-=", returnInfoVoid, true);
   prim_def(PRIM_MULT_ASSIGN, "*=", returnInfoVoid, true);
@@ -548,11 +724,11 @@ initPrimitive() {
   prim_def(PRIM_MIN, "_min", returnInfoFirst);
   prim_def(PRIM_MAX, "_max", returnInfoFirst);
 
-  prim_def(PRIM_SETCID, "setcid", returnInfoVoid, true, true);
-  prim_def(PRIM_TESTCID, "testcid", returnInfoBool, false, true);
-  prim_def(PRIM_GETCID, "getcid", returnInfoInt32, false, true);
-  prim_def(PRIM_SET_UNION_ID, "set_union_id", returnInfoVoid, true, true);
-  prim_def(PRIM_GET_UNION_ID, "get_union_id", returnInfoDefaultInt, false, true);
+  prim_def(PRIM_SETCID, "setcid", returnInfoVoid, true);
+  prim_def(PRIM_TESTCID, "testcid", returnInfoBool, false);
+  prim_def(PRIM_GETCID, "getcid", returnInfoInt32, false);
+  prim_def(PRIM_SET_UNION_ID, "set_union_id", returnInfoVoid, true);
+  prim_def(PRIM_GET_UNION_ID, "get_union_id", returnInfoDefaultInt, false);
 
   // PRIM_GET_MEMBER(_VALUE): aggregate, field
   // if the field is a ref:
@@ -562,32 +738,42 @@ initPrimitive() {
   //   GET_MEMBER returns a reference to the field
   //   GET_MEMBER_VALUE returns the field value
   prim_def(PRIM_GET_MEMBER, ".", returnInfoGetMemberRef);
-  prim_def(PRIM_GET_MEMBER_VALUE, ".v", returnInfoGetMember, false, true);
+  prim_def(PRIM_GET_MEMBER_VALUE, ".v", returnInfoGetMember, false);
 
   // PRIM_SET_MEMBER: base, field, value
   // if the field is a ref, and the value is a ref, sets the ptr.
   // if the field is a ref, and the value is a not ref, invalid AST
   // if the field is not ref, and the value is a ref, derefs value first
   // if neither are references, sets the field
-  prim_def(PRIM_SET_MEMBER, ".=", returnInfoVoid, true, true);
+  prim_def(PRIM_SET_MEMBER, ".=", returnInfoVoid, true);
 
   prim_def(PRIM_CHECK_NIL, "_check_nil", returnInfoVoid, true, true);
+
+  // new keyword
   prim_def(PRIM_NEW, "new", returnInfoFirst);
+  // get complex real component
   prim_def(PRIM_GET_REAL, "complex_get_real", returnInfoComplexField);
+  // get complex imag component
   prim_def(PRIM_GET_IMAG, "complex_get_imag", returnInfoComplexField);
+  // query expression primitive
   prim_def(PRIM_QUERY, "query", returnInfoUnknown);
   prim_def(PRIM_QUERY_PARAM_FIELD, "query param field", returnInfoGetMemberRef);
   prim_def(PRIM_QUERY_TYPE_FIELD, "query type field", returnInfoGetMember);
 
+  // get a reference to a value
   prim_def(PRIM_ADDR_OF, "addr of", returnInfoRef);
-  prim_def(PRIM_DEREF,   "deref",   returnInfoVal, false, true);
+  // dereference a reference
+  prim_def(PRIM_DEREF,   "deref",   returnInfoVal, false);
   // If the argument is a reference, simply return it. Otherwise, return a
   // ref to the arg. The result is always a reference.
   prim_def(PRIM_SET_REFERENCE, "set reference", returnInfoAsRef);
 
   // local block primitives
+  // assert that a wide ref is on this locale
   prim_def(PRIM_LOCAL_CHECK, "local_check", returnInfoVoid, true, true);
 
+  // get/set end count for 'begin' -
+  // manipulates task-local storage
   prim_def(PRIM_GET_END_COUNT, "get end count", returnInfoEndCount);
   prim_def(PRIM_SET_END_COUNT, "set end count", returnInfoVoid, true);
 
@@ -596,56 +782,93 @@ initPrimitive() {
 
 
   // task primitives
+  // get serial state
   prim_def(PRIM_GET_SERIAL, "task_get_serial", returnInfoBool);
+  // set serial state to true or false
   prim_def(PRIM_SET_SERIAL, "task_set_serial", returnInfoVoid, true);
 
-  // These are used for task-aware allocation.
-  prim_def(PRIM_SIZEOF, "sizeof", returnInfoSizeType);
+  // These are used for task bundles and for allocating class instances.
+  prim_def(PRIM_SIZEOF_BUNDLE, "sizeof_bundle", returnInfoSizeType);
 
+  // sizeof(_ddata.eltType)
+  prim_def(PRIM_SIZEOF_DDATA_ELEMENT, "sizeof_ddata_element", returnInfoSizeType);
+
+  // initialize fields of a temporary record
   prim_def(PRIM_INIT_FIELDS, "chpl_init_record", returnInfoVoid, true);
   prim_def(PRIM_PTR_EQUAL, "ptr_eq", returnInfoBool);
   prim_def(PRIM_PTR_NOTEQUAL, "ptr_neq", returnInfoBool);
   // PRIM_IS_SUBTYPE arguments are (parent, sub) and it checks
   // if sub is a sub-type of parent.
   prim_def(PRIM_IS_SUBTYPE, "is_subtype", returnInfoBool);
+  // same as above but can apply to non-type
+  // this variant can be removed if normalization of type queries is updated
+  prim_def(PRIM_IS_SUBTYPE_ALLOW_VALUES, "is_subtype_allow_values", returnInfoBool);
+  // same as above but excludes same type
+  prim_def(PRIM_IS_PROPER_SUBTYPE, "is_proper_subtype", returnInfoBool);
+  // accepts two arguments: A class/record type expression and a param string for the field name
+  prim_def(PRIM_IS_BOUND, "is bound", returnInfoBool);
+  // PRIM_IS_COERCIBLE arguments are (source type, target type)
+  prim_def(PRIM_IS_COERCIBLE, "is_coercible", returnInfoBool);
   // PRIM_CAST arguments are (type to cast to, value to cast)
   prim_def(PRIM_CAST, "cast", returnInfoCast, false, true);
-  prim_def(PRIM_DYNAMIC_CAST, "dynamic_cast", returnInfoCast, false, true);
+  prim_def(PRIM_DYNAMIC_CAST, "dynamic_cast", returnInfoCast, false);
+
+  // PRIM_LIFETIME_OF represents a query of a lifetime to inform the lifetime
+  // checker.
+  prim_def(PRIM_LIFETIME_OF, "lifetime_of", returnInfoInt64);
 
   // PRIM_TYPEOF of an array returns a runtime type (containing its domain)
   // For values without a runtime type component, it works the same as
   // PRIM_STATIC_TYPEOF
   prim_def(PRIM_TYPEOF, "typeof", returnInfoFirstDeref);
 
+
   // Return the compile-time component of a type (ignoring runtime types)
   // For an array, returns the compile-time type only.
-  // (there might be uninitialized memory if the run-time type is used).
+  // There might be uninitialized memory if the run-time type is used.
   prim_def(PRIM_STATIC_TYPEOF, "static typeof", returnInfoFirstDeref);
 
   // As with PRIM_STATIC_TYPEOF, returns a compile-time component of
   // a type only. Returns the scalar promotion type (i.e. the type of the
   // elements that iterating over it would yield)
+  // There might be uninitialized memory if the run-time type is used.
   prim_def(PRIM_SCALAR_PROMOTION_TYPE, "scalar promotion type", returnInfoScalarPromotionType);
+
+  // As with PRIM_STATIC_TYPEOF, returns a compile-time component of
+  // the type of the field.
+  // There might be uninitialized memory if the run-time type is used.
+  prim_def(PRIM_STATIC_FIELD_TYPE, "static field type", returnInfoStaticFieldType);
+
+  // used modules in BlockStmt::modUses
   prim_def(PRIM_USED_MODULES_LIST, "used modules list", returnInfoVoid);
   prim_def(PRIM_TUPLE_EXPAND, "expand_tuple", returnInfoVoid);
-  prim_def(PRIM_TUPLE_AND_EXPAND, "and_expand_tuple", returnInfoVoid);
 
+  // Direct calls to the Chapel comm layer
   prim_def(PRIM_CHPL_COMM_GET, "chpl_comm_get", returnInfoVoid, true, true);
   prim_def(PRIM_CHPL_COMM_PUT, "chpl_comm_put", returnInfoVoid, true, true);
   prim_def(PRIM_CHPL_COMM_ARRAY_GET, "chpl_comm_array_get", returnInfoVoid, true, true);
   prim_def(PRIM_CHPL_COMM_ARRAY_PUT, "chpl_comm_array_put", returnInfoVoid, true, true);
   prim_def(PRIM_CHPL_COMM_REMOTE_PREFETCH, "chpl_comm_remote_prefetch", returnInfoVoid, true, true);
+  // Direct calls to the Chapel comm layer for strided comm
   prim_def(PRIM_CHPL_COMM_GET_STRD, "chpl_comm_get_strd", returnInfoVoid, true, true);
   prim_def(PRIM_CHPL_COMM_PUT_STRD, "chpl_comm_put_strd", returnInfoVoid, true, true);
 
-  prim_def(PRIM_ARRAY_SHIFT_BASE_POINTER, "shift_base_pointer", returnInfoVoid, true, true);
-  prim_def(PRIM_ARRAY_ALLOC, "array_alloc", returnInfoVoid, true, true);
-  prim_def(PRIM_ARRAY_FREE, "array_free", returnInfoVoid, true, true);
-  prim_def(PRIM_ARRAY_GET, "array_get", returnInfoArrayIndex, false, true);
-  prim_def(PRIM_ARRAY_GET_VALUE, "array_get_value", returnInfoArrayIndexValue, false, true);
+  prim_def(PRIM_ARRAY_SHIFT_BASE_POINTER, "shift_base_pointer", returnInfoVoid, true);
+
+  // PRIM_ARRAY_GET{_VALUE} arguments
+  //  base pointer
+  //  index
+  //  no alias set
+  // This is similar to A[i] in C
+  prim_def(PRIM_ARRAY_GET, "array_get", returnInfoArrayIndex, false);
+  prim_def(PRIM_ARRAY_GET_VALUE, "array_get_value", returnInfoArrayIndexValue, false);
   // PRIM_ARRAY_SET is unused by compiler, runtime, modules
-  prim_def(PRIM_ARRAY_SET, "array_set", returnInfoVoid, true, true);
-  prim_def(PRIM_ARRAY_SET_FIRST, "array_set_first", returnInfoVoid, true, true);
+  // PRIM_ARRAY_SET / PRIM_ARRAY_SET_FIRST have these arguments
+  //   base pointer
+  //   index
+  //   value
+  prim_def(PRIM_ARRAY_SET, "array_set", returnInfoVoid, true);
+  prim_def(PRIM_ARRAY_SET_FIRST, "array_set_first", returnInfoVoid, true);
 
   prim_def(PRIM_ERROR, "error", returnInfoVoid, true);
   prim_def(PRIM_WARNING, "warning", returnInfoVoid, true);
@@ -653,44 +876,74 @@ initPrimitive() {
   prim_def(PRIM_TYPE_TO_STRING, "typeToString", returnInfoString);
 
   // These are the block info primitives.
+  // BlockStmt::blockInfo - param for loop (index, low, high, stride)
   prim_def(PRIM_BLOCK_PARAM_LOOP, "param loop", returnInfoVoid);
+  // BlockStmt::blockInfo - while do loop (cond)
   prim_def(PRIM_BLOCK_WHILEDO_LOOP, "while...do loop", returnInfoVoid);
+  // BlockStmt::blockInfo - do while loop (cond)
   prim_def(PRIM_BLOCK_DOWHILE_LOOP, "do...while loop", returnInfoVoid);
+  // BlockStmt::blockInfo - for loop (index, iterator)
   prim_def(PRIM_BLOCK_FOR_LOOP, "for loop", returnInfoVoid);
+  // BlockStmt::blockInfo - C for loop (initExpr, testExpr, incrExpr)
   prim_def(PRIM_BLOCK_C_FOR_LOOP, "C for loop", returnInfoVoid);
+  // BlockStmt::blockInfo - begin block
   prim_def(PRIM_BLOCK_BEGIN, "begin block", returnInfoVoid);
+  // BlockStmt::blockInfo - cobegin block
   prim_def(PRIM_BLOCK_COBEGIN, "cobegin block", returnInfoVoid);
+  // BlockStmt::blockInfo - coforall block
   prim_def(PRIM_BLOCK_COFORALL, "coforall loop", returnInfoVoid);
+  // BlockStmt::blockInfo - on block
   prim_def(PRIM_BLOCK_ON, "on block", returnInfoVoid);
+  // BlockStmt::blockInfo - begin on block
   prim_def(PRIM_BLOCK_BEGIN_ON, "begin on block", returnInfoVoid);
+  // BlockStmt::blockInfo - cobegin on block
   prim_def(PRIM_BLOCK_COBEGIN_ON, "cobegin on block", returnInfoVoid);
+  // BlockStmt::blockInfo - coforall on block
   prim_def(PRIM_BLOCK_COFORALL_ON, "coforall on block", returnInfoVoid);
+  // BlockStmt::blockInfo - local block
   prim_def(PRIM_BLOCK_LOCAL, "local block", returnInfoVoid);
+  // BlockStmt::blockInfo - unlocal local block
   prim_def(PRIM_BLOCK_UNLOCAL, "unlocal block", returnInfoVoid);
+
+  // The arg is an iterator record (or iterator class) temp or iterator call.
+  // Indicates whether the iterator has the corresponding leader iterator.
+  prim_def(PRIM_HAS_LEADER, "has leader", returnInfoBool);
 
   prim_def(PRIM_TO_LEADER, "to leader", returnInfoVoid);
   prim_def(PRIM_TO_FOLLOWER, "to follower", returnInfoVoid);
   prim_def(PRIM_TO_STANDALONE, "to standalone", returnInfoVoid);
 
+  // call destructor on type (do not free)
   prim_def(PRIM_CALL_DESTRUCTOR, "call destructor", returnInfoVoid, true);
 
+  // Help fold logical && and ||
   prim_def(PRIM_LOGICAL_FOLDER, "_paramFoldLogical", returnInfoBool);
 
-  prim_def(PRIM_WIDE_MAKE, "_wide_make", returnInfoWideMake, false, true);
-  prim_def(PRIM_WIDE_GET_LOCALE, "_wide_get_locale", returnInfoLocaleID, false, true);
+  // create a wide pointer from (type, localeID, addr)
+  prim_def(PRIM_WIDE_MAKE, "_wide_make", returnInfoWideMake, false);
+  // Returns the "locale" portion of a wide pointer.
+  prim_def(PRIM_WIDE_GET_LOCALE, "_wide_get_locale", returnInfoLocaleID, false);
   // MPF - 10/9/2015 - neither _wide_get_node nor _wide_get_addr
   // is used in the module or test code. insertWideReferences uses
   // PRIM_WIDE_GET_NODE. It might make sense to keep both of these
   // functions for debugging.
-  prim_def(PRIM_WIDE_GET_NODE, "_wide_get_node", returnInfoNodeID, false, true);
-  prim_def(PRIM_WIDE_GET_ADDR, "_wide_get_addr", returnInfoCVoidPtr, false, true);
+  // Get just the node portion of a wide pointer.
+  prim_def(PRIM_WIDE_GET_NODE, "_wide_get_node", returnInfoNodeID, false);
+  // Get just the address portion of a wide pointer.
+  prim_def(PRIM_WIDE_GET_ADDR, "_wide_get_addr", returnInfoCVoidPtr, false);
+  // Returns true if the symbol is represented by a wide pointer.
   prim_def(PRIM_IS_WIDE_PTR, "is wide pointer", returnInfoBool);
 
+  // specify a particular localeID for an on clause.
   prim_def(PRIM_ON_LOCALE_NUM, "chpl_on_locale_num", returnInfoLocaleID);
 
-  prim_def(PRIM_HEAP_REGISTER_GLOBAL_VAR, "_heap_register_global_var", returnInfoVoid, true, true);
-  prim_def(PRIM_HEAP_BROADCAST_GLOBAL_VARS, "_heap_broadcast_global_vars", returnInfoVoid, true, true);
-  prim_def(PRIM_PRIVATE_BROADCAST, "_private_broadcast", returnInfoVoid, true, true);
+  prim_def(PRIM_REGISTER_GLOBAL_VAR, "_register_global_var", returnInfoVoid, true, true);
+  prim_def(PRIM_BROADCAST_GLOBAL_VARS, "_broadcast_global_vars", returnInfoVoid, true, true);
+  // ('_private_broadcast' sym)
+  // Later, a structure index is inserted ahead
+  // of the symbol, so it ends up as
+  // ('_private_broadcast' index sym).
+  prim_def(PRIM_PRIVATE_BROADCAST, "_private_broadcast", returnInfoVoid, true);
 
   prim_def(PRIM_INT_ERROR, "_internal_error", returnInfoVoid, true);
 
@@ -701,10 +954,12 @@ initPrimitive() {
   prim_def("string_compare", returnInfoDefaultInt, true);
   prim_def("string_contains", returnInfoBool, true);
   prim_def("string_concat", returnInfoStringC, true, true);
-  prim_def("string_length", returnInfoDefaultInt);
+  prim_def("string_length_bytes", returnInfoDefaultInt);
+  prim_def("string_length_codepoints", returnInfoDefaultInt);
   prim_def("ascii", returnInfoUInt8);
   prim_def("string_index", returnInfoStringC, true, true);
   prim_def(PRIM_STRING_COPY, "string_copy", returnInfoStringC, false, true);
+  // Cast the object argument to void*.
   prim_def(PRIM_CAST_TO_VOID_STAR, "cast_to_void_star", returnInfoCVoidPtr, true, false);
   prim_def("string_select", returnInfoStringC, true, true);
   prim_def("sleep", returnInfoVoid, true);
@@ -715,8 +970,7 @@ initPrimitive() {
   prim_def(PRIM_RT_ERROR, "chpl_error", returnInfoVoid, true, true);
   prim_def(PRIM_RT_WARNING, "chpl_warning", returnInfoVoid, true, true);
 
-  prim_def(PRIM_NEW_PRIV_CLASS, "chpl_newPrivatizedClass", returnInfoVoid, true);
-  prim_def(PRIM_GET_PRIV_CLASS, "chpl_getPrivatizedClass",  returnInfoFirst);
+  prim_def(PRIM_NEW_PRIV_CLASS, "chpl_newPrivatizedClass", returnInfoVoid);
 
   prim_def(PRIM_GET_USER_LINE, "_get_user_line", returnInfoDefaultInt, true, true);
   prim_def(PRIM_GET_USER_FILE, "_get_user_file", returnInfoInt32, true, true);
@@ -726,11 +980,11 @@ initPrimitive() {
   prim_def(PRIM_IS_TUPLE_TYPE, "is tuple type", returnInfoBool);
   prim_def(PRIM_IS_STAR_TUPLE_TYPE, "is star tuple type", returnInfoBool);
   // base, index, value
-  prim_def(PRIM_SET_SVEC_MEMBER, "set svec member", returnInfoVoid, true, true);
+  prim_def(PRIM_SET_SVEC_MEMBER, "set svec member", returnInfoVoid, true);
   prim_def(PRIM_GET_SVEC_MEMBER, "get svec member", returnInfoGetTupleMemberRef);
-  prim_def(PRIM_GET_SVEC_MEMBER_VALUE, "get svec member value", returnInfoGetTupleMember, false, true);
+  prim_def(PRIM_GET_SVEC_MEMBER_VALUE, "get svec member value", returnInfoGetTupleMember, false);
 
-  prim_def(PRIM_VIRTUAL_METHOD_CALL, "virtual method call", returnInfoVirtualMethodCall, true, true);
+  prim_def(PRIM_VIRTUAL_METHOD_CALL, "virtual method call", returnInfoVirtualMethodCall, true);
 
   prim_def(PRIM_NUM_FIELDS, "num fields", returnInfoInt32);
   prim_def(PRIM_FIELD_NUM_TO_NAME, "field num to name", returnInfoString);
@@ -739,11 +993,17 @@ initPrimitive() {
   prim_def(PRIM_CLASS_NAME_BY_ID, "class name by id", returnInfoStringC);
 
   prim_def(PRIM_ITERATOR_RECORD_FIELD_VALUE_BY_FORMAL, "iterator record field value by formal", returnInfoIteratorRecordFieldValueByFormal);
-  prim_def(PRIM_IS_EXTERN_CLASS_TYPE, "is extern class type", returnInfoBool);
+  prim_def(PRIM_ITERATOR_RECORD_SET_SHAPE, "iterator record set shape", returnInfoVoid);
+  prim_def(PRIM_IS_GENERIC_TYPE, "is generic type", returnInfoBool);
+  prim_def(PRIM_IS_CLASS_TYPE, "is class type", returnInfoBool);
+  prim_def(PRIM_IS_NILABLE_CLASS_TYPE, "is nilable class type", returnInfoBool);
+  prim_def(PRIM_IS_NON_NILABLE_CLASS_TYPE, "is non nilable class type", returnInfoBool);
   prim_def(PRIM_IS_RECORD_TYPE, "is record type", returnInfoBool);
   prim_def(PRIM_IS_UNION_TYPE, "is union type", returnInfoBool);
   prim_def(PRIM_IS_ATOMIC_TYPE, "is atomic type", returnInfoBool);
   prim_def(PRIM_IS_REF_ITER_TYPE, "is ref iter type", returnInfoBool);
+  prim_def(PRIM_IS_EXTERN_TYPE, "is extern type", returnInfoBool);
+  prim_def(PRIM_IS_ABS_ENUM_TYPE, "is abstract enum type", returnInfoBool);
 
   prim_def(PRIM_IS_POD, "is pod type", returnInfoBool);
 
@@ -752,17 +1012,15 @@ initPrimitive() {
   // the declared return type is not really known until function
   // resolution.
   // It coerces its first argument to the type stored in the second argument.
-  prim_def(PRIM_COERCE, "coerce", returnInfoSecondType);
+  prim_def(PRIM_COERCE, "coerce", returnInfoCoerce);
 
   prim_def(PRIM_CALL_RESOLVES, "call resolves", returnInfoBool);
   prim_def(PRIM_METHOD_CALL_RESOLVES, "method call resolves", returnInfoBool);
 
-  prim_def(PRIM_ENUM_MIN_BITS, "enum min bits", returnInfoInt32);
-  prim_def(PRIM_ENUM_IS_SIGNED, "enum is signed", returnInfoBool);
-
   prim_def(PRIM_START_RMEM_FENCE, "chpl_rmem_consist_acquire", returnInfoVoid, true, true);
   prim_def(PRIM_FINISH_RMEM_FENCE, "chpl_rmem_consist_release", returnInfoVoid, true, true);
 
+  // Given an index, get a given filename (c_string)
   prim_def(PRIM_LOOKUP_FILENAME, "chpl_lookupFilename", returnInfoStringC, false, false);
 
   prim_def(PRIM_GET_COMPILER_VAR, "get compiler variable", returnInfoString);
@@ -773,7 +1031,62 @@ initPrimitive() {
   prim_def(PRIM_ZIP, "zip", returnInfoVoid, false, false);
   prim_def(PRIM_REQUIRE, "require", returnInfoVoid, false, false);
 
+  // used in error-handling conditional. args: error variable
   prim_def(PRIM_CHECK_ERROR, "check error", returnInfoVoid, false, false);
+  // used before error handling is lowered to represent the current error
+  prim_def(PRIM_CURRENT_ERROR, "current error", returnInfoError, false, false);
+
+  // return the unmanaged class variant, error if decorated
+  prim_def(PRIM_TO_UNMANAGED_CLASS_CHECKED, "to unmanaged class from unknown", returnInfoToUnmanaged, false, false);
+  // return the borrowed class variant, error if decorated
+  prim_def(PRIM_TO_BORROWED_CLASS_CHECKED, "to borrowed class from unknown", returnInfoToBorrowed, false, false);
+  // return the nilable class variant, error if argument is not a type
+  prim_def(PRIM_TO_NILABLE_CLASS_CHECKED, "to nilable class from type", returnInfoToNilable, false, false);
+
+  // These return the (non-nil) class variant
+  prim_def(PRIM_TO_UNMANAGED_CLASS, "to unmanaged class", returnInfoToUnmanaged, false, false);
+  // borrowed class type currently == canonical class type
+  prim_def(PRIM_TO_BORROWED_CLASS, "to borrowed class", returnInfoToBorrowed, false, false);
+  // return the undecorated class type
+  prim_def(PRIM_TO_UNDECORATED_CLASS, "to undecorated class", returnInfoToUndecorated, false, false);
+  // Returns the nilable class type
+  prim_def(PRIM_TO_NILABLE_CLASS, "to nilable class", returnInfoToNilable, false, false);
+  prim_def(PRIM_TO_NON_NILABLE_CLASS, "to non nilable class", returnInfoToNonNilable, false, false);
+
+  prim_def(PRIM_NEEDS_AUTO_DESTROY, "needs auto destroy", returnInfoBool, false, false);
+  prim_def(PRIM_AUTO_DESTROY_RUNTIME_TYPE, "auto destroy runtime type", returnInfoVoid, false, false);
+
+  // Accepts 3 arguments:
+  // 1) type variable representing static type of field in _RuntimeTypeInfo
+  // 2) type variable that will become the _RuntimeTypeInfo
+  // 3) param-string name of the field in the _RuntimeTypeInfo
+  prim_def(PRIM_GET_RUNTIME_TYPE_FIELD, "get runtime type field", returnInfoRuntimeTypeField, false, false);
+
+  // Corresponds to LLVM's invariant start
+  // takes in a pointer/reference argument that is the invariant thing
+  prim_def(PRIM_INVARIANT_START, "invariant start", returnInfoVoid, false, false);
+
+  // variable number of arguments
+  // 1st argument is a SymExpr referring to a Symbol indicating which
+  //  alias set this is (e.g. the owning array).
+  // Remaining arguments are SymExprs referring to Symbols that this one
+  // does not alias.
+  // Translates to llvm alias.scope and noalias metadata:
+  //    - alias.scope with metadata corresponding to the 1st symbol
+  //    - noalias with metadata corresponding to the remaining symbols
+  prim_def(PRIM_NO_ALIAS_SET, "no alias set", returnInfoUnknown, false, false);
+  // 1st argument is symbol to set alias set
+  // 2nd argument is symbol to base it on
+  prim_def(PRIM_COPIES_NO_ALIAS_SET, "copies no alias set", returnInfoUnknown, false, false);
+
+  // Argument is a symbol and we attach flags to that symbol to
+  // indicate optimization information.
+  // That symbol includes OPT_INFO_... flags.
+  prim_def(PRIM_OPTIMIZATION_INFO, "optimization info", returnInfoVoid, true, false);
+
+  prim_def(PRIM_GATHER_TESTS, "gather tests", returnInfoDefaultInt);
+  prim_def(PRIM_GET_TEST_BY_NAME, "get test by name", returnInfoVoid);
+  prim_def(PRIM_GET_TEST_BY_INDEX, "get test by index", returnInfoVoid);
 }
 
 static Map<const char*, VarSymbol*> memDescsMap;
@@ -818,4 +1131,14 @@ bool getSettingPrimitiveDstSrc(CallExpr* call, Expr** dest, Expr** src)
   }
 
   return false;
+}
+
+void registerPrimitiveCodegen(PrimitiveTag tag, void (*fn)(CallExpr*, GenRet&)) {
+  for (int i = 0; i < NUM_KNOWN_PRIMS; i++ ) {
+    if (primitives[i] && primitives[i]->tag == tag) {
+      primitives[i]->codegenFn = fn;
+      return;
+    }
+  }
+  INT_FATAL("failed to find primitive");
 }

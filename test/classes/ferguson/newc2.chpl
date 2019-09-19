@@ -3,10 +3,10 @@ class C {
 }
 
 proc getC() type {
-  return C;
+  return unmanaged C;
 }
 
-var x = new C(10);
+var x = new unmanaged C(10);
 writeln(x);
 
 var y = new getC()(10);

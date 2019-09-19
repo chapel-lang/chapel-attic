@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2018 Cray Inc.
+ * Copyright 2004-2019 Cray Inc.
  * Other additional copyright holders may be indicated within.
  * 
  * The entirety of this work is licensed under the Apache License,
@@ -24,6 +24,7 @@ extern bool printSystemCommands;
 
 int mysystem(const char* command, 
              const char* description, 
-             bool        ignorestatus = false);
+             bool        ignorestatus = false,
+             bool        quiet = false);
 
 #endif

@@ -1,0 +1,16 @@
+.. default-domain:: chpl
+
+.. module:: queried.doc
+
+queried.doc
+===========
+**Usage**
+
+.. code-block:: chapel
+
+   use queried.doc;
+
+.. function:: proc queried(x: ?t)
+
+   This proc queries the type of its argument 
+

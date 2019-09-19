@@ -10,36 +10,37 @@ config const readSize = 16 * 1024;
 
 proc main(args: [] string) {
   const stdin = openfd(0);
-  var input = stdin.reader(iokind.native, locking=false);
+  var input = stdin.reader(iokind.native, locking=false,
+                           hints=QIO_HINT_PARALLEL);
   var len = stdin.length();
   var data : [0..#len] uint(8);
   
   sync { // wait for all process() tasks to complete before continuing
 
     while true {
-      const descOffset = input._offset();
+      const descOffset = input.offset();
       var nextDescOffset = descOffset;
       var seqOffset = descOffset;
       var eof = false;
 
       // Mark where we start scanning (keep bytes in I/O buffer in input)
-      input._mark();
+      input.mark();
 
       // Scan forward until we get to the \n (end of description)
-      input.advancePastByte(ascii("\n"));
-      seqOffset = input._offset();
+      input.advancePastByte("\n".toByte());
+      seqOffset = input.offset();
 
       try {
         // Scan forward until we get to the > (end of sequence)
-        input.advancePastByte(ascii(">"));
-        nextDescOffset = input._offset();
+        input.advancePastByte(">".toByte());
+        nextDescOffset = input.offset();
       } catch e:EOFError {
         eof = true;
         nextDescOffset = len;
       }
 
       // Go back to the point we marked
-      input._revert();
+      input.revert();
 
       // Read until nextDescOffset into the data array.
       input.readBytes(c_ptrTo(data[descOffset]),
@@ -65,7 +66,7 @@ proc main(args: [] string) {
 proc process(data, in start, in end) {
 
   proc advance(ref cursor, dir) {
-    do { cursor += dir; } while data[cursor] == ascii("\n");
+    do { cursor += dir; } while data[cursor] == "\n".toByte();
   }
   while start <= end {
     ref d1 = data[start], d2 = data[end];
@@ -78,10 +79,10 @@ proc process(data, in start, in end) {
 proc initTable(pairs) {
   var table: [1..128] uint(8);
 
-  for i in 1..pairs.length by 2 {
-    table[ascii(pairs[i])] = ascii(pairs[i+1]);
-    if pairs[i] != "\n" then
-      table[ascii(pairs[i].toLower())] = ascii(pairs[i+1]);
+  for i in 1..pairs.numBytes by 2 {
+    table[pairs.byte(i)] = pairs.byte(i+1);
+    if pairs.byte(i) != "\n".toByte() then
+      table[pairs[i:byteIndex].toLower().toByte()] = pairs.byte(i+1);
   }
 
   return table;

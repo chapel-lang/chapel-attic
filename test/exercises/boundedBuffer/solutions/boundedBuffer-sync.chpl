@@ -26,7 +26,7 @@ config const numProducers = 5,     // the number of producers to create
 
 proc main() {
   // a shared bounded buffer with the requested capacity
-  var buffer = new BoundedBuffer(capacity=bufferSize);
+  var buffer = new owned BoundedBuffer(capacity=bufferSize);
 
   // per-producer/consumer counts of the number of items they processed
   var prodCounts: [1..numProducers] int,
@@ -72,8 +72,6 @@ proc main() {
                   consTot, numItems);
   else
     stderr.writef("Producers/consumers processed %i items total.\n", numItems);
-
-  delete buffer;
 }
 
 
@@ -123,7 +121,7 @@ class BoundedBuffer {
   var buff$: [0..#capacity] sync eltType,  // the sync values, empty by default
       head$, tail$: sync int = 0;      // the cursor positions, full by default
 
-  var rng = new RandomStream(real);
+  var rng = new owned RandomStream(real);
 
   //
   // Place an item at the head position of the buffer, assuming
@@ -168,12 +166,5 @@ class BoundedBuffer {
     pos$ = (prevPos + 1) % capacity;;
 
     return prevPos;
-  }
-
-  //
-  // Clean up after ourselves
-  //
-  proc deinit() {
-    delete rng;
   }
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2018 Cray Inc.
+ * Copyright 2004-2019 Cray Inc.
  * Other additional copyright holders may be indicated within.
  *
  * The entirety of this work is licensed under the Apache License,
@@ -30,7 +30,6 @@ AstCount::AstCount() {
 
   // Initialize other member variables for AST types
   // not handled by the baseAST macro.
-  numForallIntents = 0;
   numWhileDoStmt = 0;
   numDoWhileStmt = 0;
   numCForLoop = 0;
@@ -50,7 +49,6 @@ foreach_ast(count_members);
 #undef count_members
 
   // and then add those not covered by the baseAST macro
-  sum += numForallIntents;
   sum += numWhileDoStmt;
   sum += numDoWhileStmt;
   sum += numCForLoop;
@@ -59,6 +57,15 @@ foreach_ast(count_members);
 
   return sum;
 }
+
+bool AstCount::enterDecoratedClassType(DecoratedClassType* node) {
+  numDecoratedClassType++;
+  return true;
+}
+
+void AstCount::exitDecoratedClassType(DecoratedClassType* node) {
+}
+
 
 bool AstCount::enterAggrType(AggregateType* node) {
   numAggregateType++;
@@ -156,12 +163,28 @@ bool AstCount::enterNamedExpr(NamedExpr* node) {
 void AstCount::exitNamedExpr(NamedExpr* node) {
 }
 
+bool AstCount::enterIfExpr(IfExpr* node) {
+  numIfExpr++;
+  return true;
+}
+
+void AstCount::exitIfExpr(IfExpr* node) {
+}
+
 void AstCount::visitSymExpr(SymExpr* node) {
   numSymExpr++;
 }
 
 void AstCount::visitUsymExpr(UnresolvedSymExpr* node) {
   numUnresolvedSymExpr++;
+}
+
+bool AstCount::enterLoopExpr(LoopExpr* node) {
+  numLoopExpr++;
+  return true;
+}
+
+void AstCount::exitLoopExpr(LoopExpr* node) {
 }
 
 void AstCount::visitUseStmt(UseStmt* node) {
@@ -174,10 +197,6 @@ bool AstCount::enterBlockStmt(BlockStmt* node) {
 }
 
 void AstCount::exitBlockStmt(BlockStmt* node) {
-}
-
-void AstCount::visitForallIntents(ForallIntents* clause) {
-  numForallIntents++;
 }
 
 bool AstCount::enterForallStmt(ForallStmt* node)

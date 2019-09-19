@@ -10,37 +10,33 @@ class RefCount {
 }
 
 record R {
-  var refcnt = new RefCount();
+  var refcnt:unmanaged RefCount? = new unmanaged RefCount();
   proc retain() {
-    refcnt.count += 1;
+    refcnt!.count += 1;
   }
   proc release() {
-    refcnt.count -= 1;
-    if refcnt.count == 0 {
+    refcnt!.count -= 1;
+    if refcnt!.count == 0 {
       delete refcnt;
       refcnt = nil;
     }
   }
   proc deinit() {
-    writeln("In ~R() ", refcnt.count);
+    writeln("In ~R() ", refcnt!.count);
     this.release();
   }
 
 }
 
-pragma "init copy fn"
-proc chpl__initCopy(x: R) {
-  writeln("In R initCopy ", x.refcnt);
-  x.retain();
-  return x;
+proc R.init() {
 }
-/*
-proc chpl__autoCopy(x: R) {
-  writeln("In R autoCopy ", x.refcnt);
-  x.retain();
-  return x;
+
+proc R.init=(x: R) {
+  writeln("In R.init=(R) ", x.refcnt);
+  this.refcnt = x.refcnt;
+  this.complete();
+  this.retain();
 }
-*/
 
 
 proc =(ref ret:R, x:R) {

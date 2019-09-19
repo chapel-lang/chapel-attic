@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 """
-LinearAlgebra requires BLAS and LAPACK modules
+Require BLAS and LAPACK modules
 
 Testing BLAS and LAPACK modules requires cray-libsci for compiling. The
 following flags are implicitly passed via the back-end 'cc' wrapper:
@@ -18,7 +18,7 @@ and non-llvm configurations.
 from os import getenv, path
 
 # Make sure we're not on a whitebox
-isRealCray = path.exists('/etc/opt/cray/release') or path.exists('/etc/opt/cray/release/CLEinfo')
+isRealCray = path.exists('/etc/opt/cray/release/CLEinfo') or path.exists('/etc/opt/cray/release/cle-release')
 
 # Make sure we're on an XC
 isRealXC = isRealCray and getenv('CHPL_TARGET_PLATFORM') == 'cray-xc'

@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2018 Cray Inc.
+ * Copyright 2004-2019 Cray Inc.
  * Other additional copyright holders may be indicated within.
  *
  * The entirety of this work is licensed under the Apache License,
@@ -27,14 +27,19 @@
 AggregateType* dtArray;
 AggregateType* dtBaseArr;
 AggregateType* dtBaseDom;
+AggregateType* dtCFI_cdesc_t;
 AggregateType* dtDist;
 AggregateType* dtError;
-AggregateType* dtLocale;
+AggregateType* dtExternalArray;
 AggregateType* dtLocaleID;
 AggregateType* dtMainArgument;
 AggregateType* dtOnBundleRecord;
+AggregateType* dtOpaqueArray;
+AggregateType* dtOwned;
+AggregateType* dtShared;
 AggregateType* dtTaskBundleRecord;
 AggregateType* dtTuple;
+AggregateType* dtRef;
 
 
 // The well-known functions
@@ -55,6 +60,8 @@ FnSymbol *gChplUncaughtError;
 FnSymbol *gChplPropagateError;
 FnSymbol *gChplSaveTaskError;
 FnSymbol *gChplForallError;
+FnSymbol *gAtomicFenceFn;
+FnSymbol *gChplAfterForallFence;
 
 /************************************* | **************************************
 *                                                                             *
@@ -88,7 +95,7 @@ void gatherIteratorTags() {
 }
 
 // This structure and the following array provide a list of types that must be
-// defined in module code.  At this point, they are all classes.
+// defined in module code.
 struct WellKnownType
 {
   const char*     name;
@@ -102,12 +109,17 @@ static WellKnownType sWellKnownTypes[] = {
   { "BaseArr",               &dtBaseArr,          true  },
   { "BaseDom",               &dtBaseDom,          true  },
   { "BaseDist",              &dtDist,             true  },
-  { "locale",                &dtLocale,           true  },
+  { "CFI_cdesc_t",           &dtCFI_cdesc_t,      false },
+  { "chpl_external_array",   &dtExternalArray,    false },
   { "chpl_localeID_t",       &dtLocaleID,         false },
   { "chpl_main_argument",    &dtMainArgument,     false },
   { "chpl_comm_on_bundle_t", &dtOnBundleRecord,   false },
+  { "chpl_opaque_array",     &dtOpaqueArray,      false },
+  { "_owned",                &dtOwned,            false },
+  { "_shared",               &dtShared,           false },
   { "chpl_task_bundle_t",    &dtTaskBundleRecord, false },
   { "_tuple",                &dtTuple,            false },
+  { "_ref",                  &dtRef,              true  },
   { "Error",                 &dtError,            true  }
 };
 
@@ -149,22 +161,51 @@ void gatherWellKnownTypes() {
       WellKnownType& wkt = sWellKnownTypes[i];
 
       if (*wkt.type_ == NULL) {
-        USR_FATAL_CONT("Type '%s' must be defined in the "
-                       "Chapel internal modules.",
-                       wkt.name);
+        if (wkt.type_ == &dtCFI_cdesc_t && !fLibraryFortran) {
+          // This should only be defined when --library-fortran is used
+        } else {
+          USR_FATAL_CONT("Type '%s' must be defined in the "
+                         "Chapel internal modules.",
+                         wkt.name);
+        }
       }
     }
 
     USR_STOP();
 
   } else {
-    if (dtString->symbol == NULL) {
+    if (dtString->symbol == NULL || dtString->symbol->defPoint == NULL) {
       // This means there was no declaration of the string type.
+      if (dtString->symbol)
+        gTypeSymbols.remove(gTypeSymbols.index(dtString->symbol));
+
       gAggregateTypes.remove(gAggregateTypes.index(dtString));
 
       delete dtString;
 
       dtString = NULL;
+    }
+    if (dtBytes->symbol == NULL || dtBytes->symbol->defPoint == NULL) {
+      // This means there was no declaration of the bytes type.
+      if (dtBytes->symbol)
+        gTypeSymbols.remove(gTypeSymbols.index(dtBytes->symbol));
+
+      gAggregateTypes.remove(gAggregateTypes.index(dtBytes));
+
+      delete dtBytes;
+
+      dtBytes = NULL;
+    }
+    if (dtLocale->symbol == NULL || dtLocale->symbol->defPoint == NULL) {
+      // This means there was no declaration of the locale type.
+      if (dtLocale->symbol)
+        gTypeSymbols.remove(gTypeSymbols.index(dtLocale->symbol));
+
+      gAggregateTypes.remove(gAggregateTypes.index(dtLocale));
+
+      delete dtLocale;
+
+      dtLocale = NULL;
     }
   }
 }
@@ -284,6 +325,17 @@ static WellKnownFn sWellKnownFns[] = {
     FLAG_UNKNOWN
   },
 
+  {
+    "atomic_fence",
+    &gAtomicFenceFn,
+    FLAG_UNKNOWN
+  },
+
+  {
+    "chpl_after_forall_fence",
+    &gChplAfterForallFence,
+    FLAG_UNKNOWN
+  },
 };
 
 void gatherWellKnownFns() {

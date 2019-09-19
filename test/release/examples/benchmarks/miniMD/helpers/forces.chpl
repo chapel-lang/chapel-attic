@@ -15,6 +15,17 @@ class Force {
   proc compute(store : bool) : void {}
 }
 
+class Funcfl {
+  var eamFile : string;
+  var numDensity, numPotentials : int;
+  var deltaDensity, deltaPotential, cut, mass : real;
+  var zrSpace : domain(1);
+  var frhoSpace : domain(1);
+  var frho : [frhoSpace] real;
+  var rhor, zr : [zrSpace] real;
+} 
+
+
 // 'Embedded atom model'
 class ForceEAM : Force  {
   var numDensity, numPotentials : int;
@@ -35,20 +46,10 @@ class ForceEAM : Force  {
 
   var FP: [DistSpace] [perBinSpace] real;
               
-  class Funcfl {
-    var eamFile : string;
-    var numDensity, numPotentials : int;
-    var deltaDensity, deltaPotential, cut, mass : real;
-    var zrSpace : domain(1);
-    var frhoSpace : domain(1);
-    var frho : [frhoSpace] real;
-    var rhor, zr : [zrSpace] real;
-  } 
-
-  var funcfl : Funcfl;
+  var funcfl = new owned Funcfl();
 
   proc init(cf : real) {
-    this.initDone();
+    this.complete();
     // use the fluff domain already calculated for communication
     cutforcesq = cf*cf;
     coeff("Cu_u6.eam");
@@ -56,7 +57,6 @@ class ForceEAM : Force  {
   }
 
   proc coeff(fname : string) {
-    funcfl = new Funcfl();
     funcfl.eamFile = fname;
     var fchan = open(fname, iomode.r);
     var rd = fchan.reader();
@@ -212,7 +212,7 @@ class ForceEAM : Force  {
     list[1] = list[2];
   }
 
-  proc compute(store : bool) {
+  override proc compute(store : bool) {
     if debug then writeln("entering EAM compute...");
     var evdwl, vir : atomic real;
     virial = 0.0;
@@ -311,11 +311,11 @@ class ForceEAM : Force  {
 // Lennard-Jones potential
 class ForceLJ : Force {
   proc init(cf : real) {
-    this.initDone();
+    this.complete();
     cutforcesq = cf * cf;
   }
 
-  proc compute(store : bool) : void {
+  override proc compute(store : bool) : void {
     eng_vdwl = 0;
     virial = 0;
     var fTimer : Timer;

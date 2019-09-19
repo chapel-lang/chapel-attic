@@ -1,15 +1,30 @@
 language: c
+os:
+  - linux
 compiler:
   - gcc
 
-  # TODO: Fix clang build issue and enable for smoke tests.
-  # (thomasvandoren, 2014-09-08)
-  # - clang
-before_script:
-  - sudo apt-get update -qq
-  - sudo apt-get install -qq bc tcsh
+matrix:
+  include:
+    - name: "make check"
+      env: NIGHTLY_TEST_SETTINGS=true QTHREAD_AFFINITY=no HWLOC_HIDE_ERRORS=1 CHPL_SMOKE_SKIP_DOC=true TEST_COMMAND="./util/buildRelease/smokeTest"
+
+    - name: "make check-chpldoc && make docs"
+      env: NIGHTLY_TEST_SETTINGS=true CHPL_SMOKE_SKIP_MAKE_CHECK=true TEST_COMMAND="./util/buildRelease/smokeTest"
+
+    - name: "check annotations"
+      env: TEST_COMMAND="make test-venv && CHPL_HOME=$PWD ./util/run-in-venv.bash ./util/test/check_annotations.py"
+      git:
+        depth: 100000
+
+    - name: "look for bad runtime calls"
+      env: TEST_COMMAND="./util/devel/lookForBadRTCalls"
+      addons:
+        apt:
+          packages:
+          - cscope
+
 script:
-  - ./util/buildRelease/smokeTest
-env:
-  - CHPL_DEVELOPER=true
-  - NIGHTLY_TEST_SETTINGS=true
+  - (eval "$TEST_COMMAND")
+
+sudo: false

@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2018 Cray Inc.
+ * Copyright 2004-2019 Cray Inc.
  * Other additional copyright holders may be indicated within.
  *
  * The entirety of this work is licensed under the Apache License,
@@ -101,7 +101,7 @@ bool AutoDestroyScope::handlingFormalTemps(const Expr* stmt) const {
 // If the refStmt is a goto then we need to recurse
 // to the block that contains the target of the goto
 void AutoDestroyScope::insertAutoDestroys(FnSymbol* fn, Expr* refStmt,
-                                          std::set<VarSymbol*> ignored) {
+                                          const std::set<VarSymbol*>& ignored) {
   GotoStmt*               gotoStmt   = toGotoStmt(refStmt);
   bool                    recurse    = (gotoStmt != NULL) ? true : false;
   BlockStmt*              forTarget  = findBlockForTarget(gotoStmt);
@@ -140,9 +140,19 @@ void AutoDestroyScope::insertAutoDestroys(FnSymbol* fn, Expr* refStmt,
   mLocalsHandled = true;
 }
 
+// If 'refStmt' is in a shadow variable's initBlock(),
+// return that svar's deinitBlock(). Otherwise return NULL.
+static BlockStmt* shadowVarsDeinitBlock(Expr* refStmt) {
+  if (ShadowVarSymbol* svar = toShadowVarSymbol(refStmt->parentSymbol))
+    if (refStmt->parentExpr == svar->initBlock())
+      return svar->deinitBlock();
+
+  return NULL;
+}
+
 void AutoDestroyScope::variablesDestroy(Expr*      refStmt,
                                         VarSymbol* excludeVar,
-                                        std::set<VarSymbol*> ignored) const {
+                                        const std::set<VarSymbol*>& ignored) const {
   // Handle the primary locals
   if (mLocalsHandled == false) {
     Expr*  insertBeforeStmt = refStmt;
@@ -153,11 +163,19 @@ void AutoDestroyScope::variablesDestroy(Expr*      refStmt,
     // But always insert the destruction calls in reverse declaration order.
     // Do not get tricked by sequences of unreachable code
     if (refStmt->next == NULL) {
-      if (mParent != NULL && isGotoStmt(refStmt) == false) {
+      if (mParent != NULL && !isGotoStmt(refStmt)) {
         SET_LINENO(refStmt);
         // Add a PRIM_NOOP to insert before
         noop = new CallExpr(PRIM_NOOP);
-        refStmt->insertAfter(noop);
+        if (BlockStmt* deinitBlock = shadowVarsDeinitBlock(refStmt)) {
+          // 'deinitBlock' may already have deinit() of the shadow var.
+          // The shadow var was probably the last thing that was initialized
+          // in its initBlock(). So it should be the first to be DEinitialized
+          // in the deinitBlock. Everything else, then, should go after that.
+          deinitBlock->insertAtTail(noop);
+        } else {
+          refStmt->insertAfter(noop);
+        }
         insertBeforeStmt = noop;
       }
     }

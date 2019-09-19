@@ -28,7 +28,6 @@ The Chapel implementation is composed of two categories of code:
 
    third-party/
      chpl-venv        python packages supporting chpldoc & tests
-       subprocess32   Back port of python3 subprocess to python2   Python
        argparse       Back port of argparse to < python2.7         Python
        PyYAML         YAML parser and emitter for Python           MIT
        Sphinx         Python documentation generator               BSD
@@ -48,7 +47,6 @@ The Chapel implementation is composed of two categories of code:
      hwloc            portable NUMA compute node utilities         new BSD
      jemalloc         alternative memory allocator                 BSD-like
      llvm             CLANG C parsing/optional back-end compiler   U of I/NCSA
-     massivethreads   alternative lightweight tasking option       2-clause BSD
      qthread          alternative lightweight tasking option       new BSD
      re2              optional regular expression parsing library  new BSD
      utf8-decoder     used for runtime UTF-8 string decoding       MIT
@@ -76,7 +74,6 @@ The Chapel implementation is composed of two categories of code:
      hwloc            only used when CHPL_HWLOC is 'hwloc'
      jemalloc         only used when CHPL_MEM is 'jemalloc'
      llvm             only used when CHPL_LLVM is 'llvm'
-     massivethreads   only used when CHPL_TASKS is 'massivethreads'
      qthread          only used when CHPL_TASKS is 'qthreads'
      re2              only used when CHPL_REGEXP is 're2'
      utf8-decoder     bundled into the Chapel runtime to decode UTF-8 strings
@@ -85,7 +82,7 @@ The Chapel implementation is composed of two categories of code:
    For packages that are used based on a CHPL_* setting, note that this
    setting may either be explicitly or implicitly set. Additionally,
    some packages are only used if a speculative build was successful.
-   See https://chapel-lang.org/docs/latest/usingchapel/chplenv.html to
+   See https://chapel-lang.org/docs/usingchapel/chplenv.html to
    see which packages are used by default and which ones are built
    speculatively. You can also check your CHPL_* settings by running
    $CHPL_HOME/util/printchplenv after Chapel has been built

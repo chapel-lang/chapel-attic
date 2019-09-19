@@ -1,2 +1,1 @@
--sprintWarnings=false
--sprintWarnings=false -suseSparseMaterials=false
+orig-dir/lulesh.compopts

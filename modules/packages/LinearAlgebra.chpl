@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2018 Cray Inc.
+ * Copyright 2004-2019 Cray Inc.
  * Other additional copyright holders may be indicated within.
  *
  * The entirety of this work is licensed under the Apache License,
@@ -17,21 +17,130 @@
  * limitations under the License.
  */
 
-/* Linear Algebra Module
+/*
 
 A high-level interface to linear algebra operations and procedures.
-
-.. note::
-  This is an early prototype package module. As a result, interfaces may change
-  over the next release.
 
 Compiling with Linear Algebra
 -----------------------------
 
-The linear algebra module uses the :mod:`BLAS` module.
-In order to compile a Chapel program with this module, be sure
-to have a BLAS implementation available on your system. See the :mod:`BLAS`
-documentation for further details.
+Programs using the :mod:`LinearAlgebra` module can be built with no additional
+dependencies `if` they do not use any procedures that rely on :mod:`BLAS` or
+:mod:`LAPACK`. Procedure dependencies are specified in procedure documentation
+below.
+
+If a program calls a procedure that depends on :mod:`BLAS` or :mod:`LAPACK`, the
+headers and library will need to be available during compilation, typically
+through compiler flags and/or environment variables.
+
+Some procedures have implementations both with `and` without dependencies. By
+default, the implementation with dependencies will be selected. Users can
+explicitly opt out of using the :mod:`BLAS` and :mod:`LAPACK` dependent
+implementations by setting the ``blasImpl`` and ``lapackImpl`` flags to ``none``.
+
+**Building programs with no dependencies**
+
+.. code-block:: chpl
+
+  // example1.chpl
+  var A = Matrix([0.0, 1.0, 1.0],
+                 [1.0, 0.0, 1.0],
+                 [1.0, 1.0, 0.0]);
+  var I = eye(3,3);
+  var B = A + I;
+
+The program above has no dependencies and can therefore be compiled without
+the ``BLAS`` or ``LAPACK`` headers and libraries available:
+
+.. code-block:: bash
+
+  chpl example1.chpl
+
+If this program had used a procedure with a dependency such as
+:proc:`cholesky` (depends on ``LAPACK``), compilation without ``LAPACK``
+headers and libraries available would result in a compilation error.
+
+**Building programs with dependencies**
+
+.. code-block:: chpl
+
+  // example2.chpl
+  var A = Matrix([2.0, 1.0],
+                 [1.0, 2.0]);
+  var (eigenvalues, eigenvectors) = eig(A, right=true);
+
+The program above uses :proc:`eig`, which depends on :mod:`LAPACK`.
+Compilation without ``LAPACK`` headers and libraries available would result in
+a compilation error.
+
+Following the instructions from the :mod:`LAPACK` module
+documentation, the above program could be compiled if ``LAPACK`` is available
+on the system and specified with the following compilation flags:
+
+.. code-block:: bash
+
+  # Building with LAPACK dependency
+  chpl -I$PATH_TO_LAPACKE_INCLUDE_DIR \
+       -L$PATH_TO_LIBGFORTRAN -lgfortran \
+       -L$PATH_TO_LAPACK_BINARIES -llapacke -llapack -lrefblas \
+       example2.chpl
+
+**Building programs with optional dependencies**
+
+.. code-block:: chpl
+
+  // example3.chpl
+  var A = Matrix(3,5);
+  A = 2;
+  var AA = A.dot(A.T);
+
+
+The program above uses :proc:`dot`, which has two available implementations:
+one that depends on  :mod:`BLAS` and one that is written in Chapel.  The
+program will default to using the more performant ``BLAS`` implementation
+of matrix-matrix multiplication.
+
+Following the instructions from the
+:mod:`BLAS` module documentation, the above program could be compiled if
+``BLAS`` is available on the system and specified with the following
+compilation flags:
+
+.. code-block:: bash
+
+  # Building with BLAS dependency
+  chpl -I$PATH_TO_CBLAS_DIR \
+       -L$PATH_TO_BLAS_LIBS -lblas \
+       example3.chpl
+
+.. note::
+
+  Users can set environment variables like ``LDFLAGS`` for ``-L`` arguments and
+  ``CFLAGS`` for ``-I`` arguments, to avoid throwing these flags every time.
+
+  Additionally, the required linker flags (``-l``) may vary depending on the
+  ``BLAS`` and ``LAPACK`` implementations being used.
+
+
+To opt out of using the ``BLAS`` implementation, users can add the ``--set
+blasImpl=none`` flag, so that ``BLAS`` is no longer a dependency:
+
+.. code-block:: bash
+
+  # Building with BLAS dependency explicitly disabled
+  chpl --set blasImpl=none example3.chpl
+
+Similarly, users can opt out of of ``LAPACK`` implementations with the ``--set
+lapackImpl=none`` flag. Setting both flags to ``none`` will always choose the
+Chapel implementation when available, and will emit a compiler error
+when no native implementation is available:
+
+.. code-block:: bash
+
+  # Building with all dependencies explicitly disabled
+  chpl --set lapackImpl=none --set blasImpl=none example3.chpl
+
+See the documentation of :mod:`BLAS` or :mod:`LAPACK` for
+more details on these flags.
 
 .. _LinearAlgebraInterface:
 
@@ -50,19 +159,10 @@ arrays) will work with any other Chapel library that works with arrays.
   This documentation uses the terms `matrix` to refer to `2D arrays`, and
   `vector` to refer to `1D arrays`.
 
-**Indexing**
+**Domain offsets**
 
-All functions that return new arrays will return arrays over 1-based indices,
-unless otherwise specified.
-
-**Matrix multiplication**
-
-:proc:`dot` is the general matrix multiplication function provided in this module.
-This function supports any combination of scalars, vectors (1D arrays), and
-matrices (2D arrays). See the :proc:`dot` documentation for more information.
-
-The :proc:`dot` function, along with others may be given a matrix-specific
-operator in future releases.
+All functions that return arrays will inherit their domains from the input
+array if possible.  Otherwise they will return arrays with 1-based indices.
 
 **Row vs Column vectors**
 
@@ -81,57 +181,45 @@ specified in the function's documentation. Other domain maps
 are supported through submodules, such ``LinearAlgebra.Sparse`` for the
 ``CS`` layout.
 
-**Promotion flattening**
-
-Promotion flattening is an unintended consequence of Chapel's
-:ref:`promotion feature <ug-promotion>`, when a multi-dimensional array assignment
-gets type-inferred as a 1-dimensional array of the same size, effectively
-flattening the array dimensionality. This can result in unexpected behavior in
-programs such as this:
-
-.. code-block:: chapel
-
-  var A = Matrix(4, 4),
-      B = Matrix(4, 4);
-  // A + B is a promoted operation, and C becomes a 1D array
-  var C = A + B;
-  // This code would then result in an error due to rank mismatch:
-  C += A;
-
-To avoid this, you can avoid relying on inferred-types for new arrays:
-
-.. code-block:: chapel
-
-  var A = Matrix(4, 4),
-      B = Matrix(4, 4);
-  // C's type is not inferred and promotion flattening is not a problem
-  var C: [A.domain] A.eltType = A + B;
-  // Works as expected
-  C += A;
-
-Alternatively, you can use the LinearAlgebra helper routines, which create
-and return a new array:
-
-.. code-block:: chapel
-
-  var A = Matrix(4, 4),
-      B = Matrix(4, 4);
-  // matPlus will create a new array with an explicit type
-  var C = matPlus(A, B);
-  // Works as expected
-  C += A;
-
-Promotion flattening is not expected to be an issue in future releases.
-
 */
 
 module LinearAlgebra {
 
 use Norm; // TODO -- merge Norm into LinearAlgebra
-use BLAS;
-use LAPACK;
+use BLAS only;
+use LAPACK only lapack_memory_order, isLAPACKType;
+
+/* Determines if using native Chapel implementations */
+private param usingBLAS = BLAS.header != '';
+private param usingLAPACK = LAPACK.header != '';
 
 // TODO: compilerError if matrices are distributed
+
+//
+// Error hierarchy
+//
+
+/* Base ``Error`` type for ``LinearAlgebra`` errors. */
+class LinearAlgebraError : Error {
+    /* Stores message to be emitted upon uncaught throw */
+    var info: string;
+
+    pragma "no doc"
+    proc init() { }
+
+    pragma "no doc"
+    proc init(info: string) {
+      this.info = info;
+    }
+
+    pragma "no doc"
+    override proc message() {
+      if info.isEmpty() then
+        return "LinearAlgebra error";
+      else
+        return "LinearAlgebra error : " + info;
+    }
+}
 
 //
 // Matrix and Vector Initializers
@@ -230,7 +318,7 @@ proc Matrix(Dom: domain, type eltType=real) where Dom.rank == 2 {
    ``A`` can be sparse (CS) or dense.
 */
 proc Matrix(A: [?Dom] ?Atype, type eltType=Atype)
-  where Dom.rank == 2 && isDefaultRectangularArr(A)
+  where isDenseMatrix(A)
 {
   var M: [Dom] eltType = A: eltType;
   return M;
@@ -241,7 +329,7 @@ pragma "no doc"
 proc Matrix(A: [?Dom] ?Atype, type eltType=Atype)
   where Dom.rank == 2 && Sparse.isCSArr(A)
 {
-  var M: [Dom._value.parentDom] eltType;
+  var M: [Dom.parentDom] eltType;
 
   forall (i,j) in Dom {
     M[i, j] = A[i, j]: eltType;
@@ -255,7 +343,7 @@ pragma "no doc"
 proc Matrix(A: [?Dom] ?Atype, type eltType=Atype)
   where Dom.rank == 2 && isDefaultSparseArr(A)
 {
-  var M: [Dom._value.parentDom] eltType;
+  var M: [Dom.parentDom] eltType;
   forall (i,j) in Dom {
     M[i,j] = A[i,j]: eltType;
   }
@@ -263,7 +351,7 @@ proc Matrix(A: [?Dom] ?Atype, type eltType=Atype)
 }
 
 pragma "no doc"
-proc Matrix(Arrays...?n) {
+proc Matrix(const Arrays: ?t  ...?n) where isArrayType(t) && t.rank == 1 {
   type eltType = Arrays(1).eltType;
   return Matrix((...Arrays), eltType=eltType);
 }
@@ -291,7 +379,7 @@ proc Matrix(Arrays...?n) {
          */
 
 */
-proc Matrix(const Arrays...?n, type eltType) {
+proc Matrix(const Arrays: ?t ...?n, type eltType) where isArrayType(t) && t.rank == 1 {
   // TODO -- assert all array domains are same length
   //         Can this be done via type query?
 
@@ -317,7 +405,7 @@ private proc _eyeDiagonal(ref A: [?Dom] ?eltType) {
 }
 
 /* Return a square identity matrix over domain ``{1..m, 1..m}`` */
-proc eye(m, type eltType=real) {
+proc eye(m: integral, type eltType=real) {
   var A: [{1..m, 1..m}] eltType;
   _eyeDiagonal(A);
   return A;
@@ -325,7 +413,7 @@ proc eye(m, type eltType=real) {
 
 
 /* Return an identity matrix over domain ``{1..m, 1..n}`` */
-proc eye(m, n, type eltType=real) {
+proc eye(m: integral, n: integral, type eltType=real) {
   var A: [{1..m, 1..n}] eltType;
   _eyeDiagonal(A);
   return A;
@@ -343,6 +431,31 @@ proc eye(Dom: domain(2), type eltType=real) {
 //
 // Matrix Operations
 //
+
+
+/* Sets the value of a diagonal in a matrix. If the matrix is sparse,
+    indices on the diagonal will be added to its domain
+
+    ``k > 0``, represents an upper diagonal starting
+    from the ``k``th column, ``k == 0`` represents the main
+    diagonal, ``k < 0`` represents a lower diagonal starting
+    from the ``-k``th row. ``k`` is 0-indexed.
+*/
+proc setDiag (ref X: [?D] ?eltType, in k: int = 0, val: eltType = 0)
+              where isDenseMatrix(X) {
+  var start, end = 0;
+  if (k >= 0) { // upper or main diagonal
+    start = 1;
+    end = D.shape(1) - k;
+  }
+  else { // lower diagonal
+    start = 1 - k;
+    end = D.shape(1);
+  }
+  forall row in {start..end} {
+    X(row, row+k) = val;
+  }
+}
 
 pragma "no doc"
 inline proc transpose(D: domain(1)) {
@@ -375,7 +488,7 @@ proc _array.T where this.domain.rank == 1 { return transpose(this); }
       a vector to this function will return that vector unchanged
 
 */
-proc transpose(A: [?Dom] ?eltType) where isDefaultRectangularArr(A) && Dom.rank == 2 {
+proc transpose(A: [?Dom] ?eltType) where isDenseMatrix(A) {
   if Dom.shape(1) == 1 then
     return reshape(A, transpose(Dom));
   else if Dom.shape(2) == 1 then
@@ -391,51 +504,37 @@ proc transpose(A: [?Dom] ?eltType) where isDefaultRectangularArr(A) && Dom.rank 
 }
 
 /* Transpose vector or matrix */
-proc _array.T where isDefaultRectangularArr(this) && this.domain.rank == 2
+proc _array.T where isDenseMatrix(this)
 {
   return transpose(this);
 }
 
-/* Add matrices, maintaining dimensions, deprecated for ``_array.plus`` */
-proc matPlus(A: [?Adom] ?eltType, B: [?Bdom] eltType) where isDefaultRectangularArr(A) && isDefaultRectangularArr(B) {
-  compilerWarning('matPlus has been deprecated for _array.plus, ' +
-                  'try: A.plus(B)');
-  return A.plus(B);
-}
-
-/* Add matrices, maintaining dimensions */
-proc _array.plus(A: [?Adom]) where isDefaultRectangularArr(A) && isDefaultRectangularArr(this) {
+/* Element-wise addition. Same as ``A + B``. */
+proc _array.plus(A: [?Adom] ?eltType) where isDenseArr(A) && isDenseArr(this) {
   if Adom.rank != this.domain.rank then compilerError("Unmatched ranks");
   if Adom.shape != this.domain.shape then halt("Unmatched shapes");
   var C: [Adom] eltType = this + A;
   return C;
 }
 
-/* Subtract matrices, maintaining dimensions, deprecated for ``_array.minus``*/
-proc matMinus(A: [?Adom] ?eltType, B: [?Bdom] eltType) where isDefaultRectangularArr(A) && isDefaultRectangularArr(B) {
-  compilerWarning('matMinus has been deprecated for _array.plus, ' +
-                  'try: A.minus(B)');
-  return A.minus(B);
-}
-
-/* Subtract matrices, maintaining dimensions */
-proc _array.minus(A: [?Adom]) where isDefaultRectangularArr(A) && isDefaultRectangularArr(this) {
+/* Element-wise subtraction. Same as ``A - B``. */
+proc _array.minus(A: [?Adom] ?eltType) where isDenseArr(A) && isDenseArr(this) {
   if Adom.rank != this.domain.rank then compilerError("Unmatched ranks");
   if Adom.shape != this.domain.shape then halt("Unmatched shapes");
   var C: [Adom] eltType = this - A;
   return C;
 }
 
-/* Element-wise multiplication, maintaining dimensions */
-proc _array.times(A: [?Adom]) where isDefaultRectangularArr(A) && isDefaultRectangularArr(this) {
+/* Element-wise multiplication. Same as ``A * B``. */
+proc _array.times(A: [?Adom]) where isDenseArr(A) && isDenseArr(this) {
   if Adom.rank != this.domain.rank then compilerError("Unmatched ranks");
   if Adom.shape != this.domain.shape then halt("Unmatched shapes");
   var C: [Adom] eltType = this * A;
   return C;
 }
 
-/* Element-wise division, maintaining dimensions */
-proc _array.elementDiv(A: [?Adom]) where isDefaultRectangularArr(A) && isDefaultRectangularArr(this) {
+/* Element-wise division. Same as ``A / B``. */
+proc _array.elementDiv(A: [?Adom]) where isDenseArr(A) && isDenseArr(this) {
   if Adom.rank != this.domain.rank then compilerError("Unmatched ranks");
   if Adom.shape != this.domain.shape then halt("Unmatched shapes");
   var C: [Adom] eltType = this / A;
@@ -446,11 +545,19 @@ proc _array.elementDiv(A: [?Adom]) where isDefaultRectangularArr(A) && isDefault
     Generic matrix multiplication, ``A`` and ``B`` can be a matrix, vector, or
     scalar.
 
-    When ``A`` is a vector and ``B`` is a matrix, this function implicitly
-    computes ``dot(transpose(A), B)``, which may not be as efficient as
-    passing ``A`` and ``B`` in the reverse order.
+    .. note::
+
+      When ``A`` is a vector and ``B`` is a matrix, this function implicitly
+      computes ``dot(transpose(A), B)``, which may not be as efficient as
+      passing ``A`` and ``B`` in the reverse order.
+
+    .. note::
+
+      Dense matrix-matrix and matrix-vector multiplication will utilize the
+      :mod:`BLAS` module for improved performance, if available. Compile with
+      ``--set blasImpl=none`` to opt out of the :mod:`BLAS` implementation.
 */
-proc dot(A: [?Adom] ?eltType, B: [?Bdom] eltType) where isDefaultRectangularArr(A) && isDefaultRectangularArr(B) {
+proc dot(A: [?Adom] ?eltType, B: [?Bdom] eltType) where isDenseArr(A) && isDenseArr(B) {
   // vector-vector
   if Adom.rank == 1 && Bdom.rank == 1 then
     return inner(A, B);
@@ -459,14 +566,23 @@ proc dot(A: [?Adom] ?eltType, B: [?Bdom] eltType) where isDefaultRectangularArr(
     return matMult(A, B);
 }
 
-/* Compute the dot-product */
-proc _array.dot(A: []) where isDefaultRectangularArr(this) && isDefaultRectangularArr(A) {
+/* Compute the dot-product
+
+  .. note::
+
+    Dense matrix-matrix and matrix-vector multiplication will utilize the
+    :mod:`BLAS` module for improved performance, if available. Compile with
+    ``--set blasImpl=none`` to opt out of the :mod:`BLAS` implementation.
+
+*/
+proc _array.dot(A: []) where isDenseArr(this) && isDenseArr(A) {
+  use LinearAlgebra only;
   return LinearAlgebra.dot(this, A);
 }
 
 
 pragma "no doc"
-/* Element-wise scalar multiplication */
+/* Element-wise scalar multiplication. */
 proc dot(A: [?Adom] ?eltType, b) where isNumeric(b) {
   var C: A.type = A * b;
   return C;
@@ -493,17 +609,17 @@ private proc matMult(A: [?Adom] ?eltType, B: [?Bdom] eltType) {
   else if Adom.rank == 2 && Bdom.rank == 2 then
     return _matmatMult(A, B);
   else
-    compilerError("Rank sizes are not 1 or 2");
+    compilerError("Ranks are not 1 or 2");
 }
 
 
 pragma "no doc"
 /* matrix-vector multiplication */
 private proc _matvecMult(A: [?Adom] ?eltType, X: [?Xdom] eltType, trans=false)
-  where isBLASType(eltType)
+  where BLAS.isBLASType(eltType) && usingBLAS
 {
   if Adom.rank != 2 || Xdom.rank != 1 then
-    compilerError("Rank sizes are not 2 and 1");
+    compilerError("Ranks are not 2 and 1");
   if !trans {
     if Adom.shape(2) != Xdom.shape(1) then
       halt("Mismatched shape in matrix-vector multiplication");
@@ -520,7 +636,7 @@ private proc _matvecMult(A: [?Adom] ?eltType, X: [?Xdom] eltType, trans=false)
              else {Adom.dim(1)};
 
   var Y: [Ydom] eltType;
-  gemv(A, X, Y, 1:eltType, 0:eltType, opA=op);
+  BLAS.gemv(A, X, Y, 1:eltType, 0:eltType, opA=op);
   return Y;
 }
 
@@ -528,34 +644,80 @@ private proc _matvecMult(A: [?Adom] ?eltType, X: [?Xdom] eltType, trans=false)
 pragma "no doc"
 /* matrix-matrix multiplication */
 private proc _matmatMult(A: [?Adom] ?eltType, B: [?Bdom] eltType)
-  where isBLASType(eltType)
+  where BLAS.isBLASType(eltType) && usingBLAS
 {
   if Adom.rank != 2 || Bdom.rank != 2 then
-    compilerError("Rank sizes are not 2");
+    compilerError("Ranks are not 2");
   if Adom.shape(2) != Bdom.shape(1) then
     halt("Mismatched shape in matrix-matrix multiplication");
 
   var C: [Adom.dim(1), Bdom.dim(2)] eltType;
-  gemm(A, B, C, 1:eltType, 0:eltType);
+  BLAS.gemm(A, B, C, 1:eltType, 0:eltType);
   return C;
 }
 
+pragma "no doc"
+/* Returns ``true`` if the domain is distributed */
+private proc isDistributed(a) param {
+  return !isSubtype(a.domain.dist.type, DefaultDist);
+}
 
-/* Inner product of 2 vectors */
-proc inner(A: [?Adom], B: [?Bdom]) {
+/* Inner product of 2 vectors. */
+proc inner(const ref A: [?Adom] ?eltType, const ref B: [?Bdom]) {
   if Adom.rank != 1 || Bdom.rank != 1 then
-    compilerError("Rank sizes are not 1");
+    compilerError("Ranks are not 1");
   if Adom.size != Bdom.size then
     halt("Mismatched size in inner multiplication");
 
-  return + reduce(A[..]*B[..]);
+  var result: eltType = 0;
+
+  if !isDistributed(A) {
+    result = + reduce (A*B);
+  }
+  else {
+    // Replaces `+ reduce (A*B)` for improved distributed performance
+
+    var localResults: [Locales.domain] eltType = 0;
+
+    coforall l in Locales do on l {
+      const maxThreads = if dataParTasksPerLocale==0
+                         then here.maxTaskPar else dataParTasksPerLocale;
+      const localDomain = A.localSubdomain();
+      const iterPerThread = divceil(localDomain.size, maxThreads);
+      var localResult: eltType = 0;
+      var threadResults: [0..#maxThreads] eltType = 0;
+
+      coforall tid in 0..#maxThreads {
+        const startid = localDomain.low + tid * iterPerThread;
+        const temp_endid = startid + iterPerThread - 1;
+        const endid = if localDomain.high < temp_endid
+                      then  localDomain.high else temp_endid;
+        var myResult: eltType = 0;
+        for ind in startid..endid {
+          myResult += A.localAccess(ind) * B.localAccess(ind);
+        }
+        threadResults[tid] = myResult;
+      }
+
+      for tr in threadResults {
+        localResult += tr;
+      }
+      localResults[here.id] = localResult;
+    }
+
+    for r in localResults {
+      result += r;
+    }
+  }
+
+  return result;
 }
 
 
-/* Outer product of 2 vectors */
+/* Outer product of 2 vectors. */
 proc outer(A: [?Adom] ?eltType, B: [?Bdom] eltType) {
   if Adom.rank != 1 || Bdom.rank != 1 then
-    compilerError("Rank sizes are not 1");
+    compilerError("Ranks are not 1");
 
   var C: [{Adom.dim(1), Bdom.dim(1)}] eltType;
   forall (i,j) in C.domain do
@@ -565,12 +727,12 @@ proc outer(A: [?Adom] ?eltType, B: [?Bdom] eltType) {
 
 
 pragma "no doc"
-/* Generic matrix-vector multiplication */
+/* Generic matrix-vector multiplication. */
 proc _matvecMult(A: [?Adom] ?eltType, X: [?Xdom] eltType, trans=false)
-  where !isBLASType(eltType)
+  where !usingBLAS || !BLAS.isBLASType(eltType)
 {
   if Adom.rank != 2 || Xdom.rank != 1 then
-    compilerError("Rank sizes are not 2 and 1");
+    compilerError("Ranks are not 2 and 1");
 
   var Ydom = if trans then {Adom.dim(2)}
              else {Adom.dim(1)};
@@ -597,10 +759,10 @@ proc _matvecMult(A: [?Adom] ?eltType, X: [?Xdom] eltType, trans=false)
 pragma "no doc"
 /* Generic matrix-matrix multiplication */
 proc _matmatMult(A: [?Adom] ?eltType, B: [?Bdom] eltType)
-  where !isBLASType(eltType)
+  where !usingBLAS || !BLAS.isBLASType(eltType)
 {
   if Adom.rank != 2 || Bdom.rank != 2 then
-    compilerError("Rank sizes are not 2 and 2");
+    compilerError("Ranks are not 2 and 2");
 
   var C: [Adom.dim(1), Bdom.dim(2)] eltType;
 
@@ -611,9 +773,48 @@ proc _matmatMult(A: [?Adom] ?eltType, B: [?Bdom] eltType)
   return C;
 }
 
+/*
+  Returns the inverse of ``A`` square matrix A.
 
-/* Return the matrix ``A`` to the ``bth`` power, where ``b`` is a positive
-   integral type. */
+
+    .. note::
+
+      This procedure depends on the :mod:`LAPACK` module, and will generate a
+      compiler error if ``lapackImpl`` is ``none``.
+*/
+proc inv (ref A: [?Adom] ?eltType, overwrite=false) where usingLAPACK {
+  if Adom.rank != 2 then
+    halt("Wrong rank for matrix inverse");
+
+  if !isSquare(A) then
+    halt("Matrix inverse only supports square matrices");
+
+  const n = Adom.shape(1);
+  var ipiv : [1..n] c_int;
+
+  if (!overwrite) {
+    var A_clone = A;
+    LAPACK.getrf(lapack_memory_order.row_major, A_clone, ipiv);
+    LAPACK.getri(lapack_memory_order.row_major, A_clone, ipiv);
+    return A_clone;
+  }
+
+  LAPACK.getrf(lapack_memory_order.row_major, A, ipiv);
+  LAPACK.getri(lapack_memory_order.row_major, A, ipiv);
+
+  return A;
+}
+
+/*
+  Return the matrix ``A`` to the ``bth`` power, where ``b`` is a positive
+  integral type.
+
+  .. note::
+
+    ``matPow`` will utilize the :mod:`BLAS` module for improved performance, if
+    available. Compile with ``--set blasImpl=none`` to opt out of the
+    :mod:`BLAS` implementation.
+*/
 proc matPow(A: [], b) where isNumeric(b) {
   // TODO -- flatten recursion into while-loop
   if !isIntegral(b) then
@@ -622,27 +823,33 @@ proc matPow(A: [], b) where isNumeric(b) {
   if !isSquare(A) then
     halt("Array not square");
 
-  return _expBySquaring(A, b);
+  return _expBySquaring(A, b).value;
 }
 
+pragma "no doc"
+// This is a workaround for undesired use
+// of runtime-type of the input array x below
+// in the return type. See also issue #9438.
+record _wrap {
+  var value;
+}
 
 pragma "no doc"
 /* Exponentiate by squaring recursively */
-private proc _expBySquaring(x: ?t, n): t {
-    // TODO -- _expBySquaring(pinv(x), -n);
-    if n < 0  then halt("Negative powers not yet supported");
-    else if n == 0  then return eye(x.domain, x.eltType);
-    else if n == 1  then return x;
-    else if n%2 == 0  then return _expBySquaring(dot(x, x), n / 2);
-    else return dot(x, _expBySquaring(dot(x, x), (n - 1) / 2));
+private proc _expBySquaring(x: ?t, n): _wrap(t) {
+  // TODO -- _expBySquaring(pinv(x), -n);
+  if n < 0  then halt("Negative powers not yet supported");
+  else if n == 0  then return new _wrap(eye(x.domain, x.eltType));
+  else if n == 1  then return new _wrap(x);
+  else if n%2 == 0  then return _expBySquaring(dot(x, x), n / 2);
+  else return new _wrap(dot(x, _expBySquaring(dot(x, x), (n - 1) / 2).value));
 }
 
-
 /* Return cross-product of 3-element vectors ``A`` and ``B`` with domain of
-  ``A`` */
+  ``A``. */
 proc cross(A: [?Adom] ?eltType, B: [?Bdom] eltType) {
   if Adom.rank != 1 || Bdom.rank != 1 then
-    compilerError("Rank sizes are not 1");
+    compilerError("Ranks are not 1");
   if Adom.size != 3 || Bdom.size != 3 then
     halt("cross() expects arrays of 3 elements");
 
@@ -779,7 +986,7 @@ private proc _diag_mat(A:[?Adom] ?eltType){
  */
 proc tril(A: [?D] ?eltType, k=0) {
   if D.rank != 2 then
-    compilerError("Rank size is not 2");
+    compilerError("Rank is not 2");
   var L = Matrix(A);
   forall (i, j) in D do
     if (i < j-k) then L[i, j] = 0: eltType;
@@ -826,35 +1033,36 @@ proc tril(A: [?D] ?eltType, k=0) {
  */
 proc triu(A: [?D] ?eltType, k=0) {
   if D.rank != 2 then
-    compilerError("Rank size is not 2");
+    compilerError("Rank is not 2");
   var U = Matrix(A);
-  const zero = 0: eltType;
   forall (i, j) in D do
-    if (i > j-k) then U[i, j] = zero;
+    if (i > j-k) then U[i, j] = 0;
   return U;
 }
 
 
 
-/* Return `true` if matrix is diagonal */
-proc isDiag(A: [?D] ?eltType) {
-  if D.rank != 2 then
-    compilerError("Rank size is not 2");
+/* Return `true` if matrix is diagonal. */
+proc isDiag(A: [?D] ?eltType) where isDenseMatrix(A) {
+  return _isDiag(A);
+}
 
-  const zero = 0: eltType;
+private proc _isDiag(A: [?D] ?eltType) {
+  if D.rank != 2 then
+    compilerError("Rank is not 2");
 
   // Check if any element not along the diagonal is nonzero
   for (i, j) in D {
-    if i != j && A[i, j] != zero then return false;
+    if i != j && A[i, j] != 0 then return false;
   }
   return true;
 }
 
 
 /* Return `true` if matrix is Hermitian */
-proc isHermitian(A: [?D]) {
+proc isHermitian(A: [?D]) where isDenseMatrix(A) {
   if D.rank != 2 then
-    compilerError("Rank size is not 2");
+    compilerError("Rank is not 2");
   if !isSquare(A) then
     return false;
 
@@ -868,9 +1076,9 @@ proc isHermitian(A: [?D]) {
 
 
 /* Return `true` if matrix is symmetric */
-proc isSymmetric(A: [?D]) : bool {
+proc isSymmetric(A: [?D]) where isDenseMatrix(A) {
   if D.rank != 2 then
-    compilerError("Rank size is not 2");
+    compilerError("Rank is not 2");
   if !isSquare(A) then
     return false;
 
@@ -890,10 +1098,9 @@ proc isSymmetric(A: [?D]) : bool {
  */
 proc isTril(A: [?D] ?eltType, k=0) : bool {
   if D.rank != 2 then
-    compilerError("Rank size is not 2");
-  const zero = 0: eltType;
+    compilerError("Rank is not 2");
   for (i, j) in D do
-    if (i < j-k) && (A[i, j] != zero) then
+    if (i < j-k) && (A[i, j] != 0) then
       return false;
   return true;
 }
@@ -905,10 +1112,9 @@ proc isTril(A: [?D] ?eltType, k=0) : bool {
  */
 proc isTriu(A: [?D] ?eltType, k=0) : bool {
   if D.rank != 2 then
-    compilerError("Rank size is not 2");
-  const zero = 0: eltType;
+    compilerError("Rank is not 2");
   for (i, j) in D do
-    if (i > j-k) && (A[i, j] != zero) then
+    if (i > j-k) && (A[i, j] != 0) then
       return false;
   return true;
 }
@@ -917,7 +1123,7 @@ proc isTriu(A: [?D] ?eltType, k=0) : bool {
 /* Return `true` if matrix is square */
 proc isSquare(A: [?D]) {
   if D.rank != 2 then
-    compilerError("Rank size is not 2");
+    compilerError("Rank is not 2");
   const (M, N) = A.shape;
   return M == N;
 }
@@ -925,7 +1131,7 @@ proc isSquare(A: [?D]) {
 
 /* Return the trace (sum of diagonal elements) of ``A`` */
 proc trace(A: [?D] ?eltType) {
-  if D.rank != 2 then compilerError("Rank size not 2");
+  if D.rank != 2 then compilerError("Ranks not 2");
 
   const (m, n) = A.shape;
   const d = if m < n then 1 else 2;
@@ -937,26 +1143,238 @@ proc trace(A: [?D] ?eltType) {
   return trace;
 }
 
+private proc _lu (in A: [?Adom] ?eltType) {
+  const n = Adom.shape(1);
+  const LUDom = {1..n, 1..n};
+
+  // TODO: Reduce memory usage
+  var L, U, LU: [LUDom] eltType;
+
+  var ipiv: [{1..n}] int = [i in {1..n}] i;
+  
+  var numSwap: int = 0;
+
+  for i in 1..n { 
+
+    var max = A[i,i], swaprow = i;
+    for row in (i+1)..n {
+      if (abs(A[row,i]) > abs(max)) {
+        max = A[row,i];
+        swaprow = row;
+      }
+    }
+    if (swaprow != i) {
+      A[i,..] <=> A[swaprow,..];
+      L[i,..] <=> L[swaprow,..];
+      ipiv[i] <=> ipiv[swaprow];
+      numSwap+=1;
+    }
+
+    forall k in i..n {
+      var sum = + reduce (L[i,..] * U[..,k]);
+      U[i,k] = A[i,k] - sum;
+    }
+
+    L[i,i] = 1;
+
+    forall k in (i+1)..n {
+      var sum = + reduce (L[k,..] * U[..,i]);
+      L[k,i] = (A[k,i] - sum) / U[i,i];
+    }
+  } 
+
+  LU = L + U;
+  forall i in 1..n {
+    LU(i,i) = U(i,i);
+  }
+
+  return (LU,ipiv,numSwap);
+}
+
+/*
+  Compute an LU factorization of square matrix `A` 
+  using partial pivoting, such that `A = P * L * U` where P
+  is a permutation matrix. Return a tuple of size 2 `(LU, ipiv)`.
+  
+  `L` and `U` are stored in the same matrix `LU` where 
+  the unit diagonal elements of L are not stored.
+  
+  `ipiv` contains the pivot indices such that row i of `A` 
+  was interchanged with row `ipiv(i)`.
+  
+*/
+proc lu (A: [?Adom] ?eltType) {
+  if Adom.rank != 2 then
+    halt("Wrong rank for LU factorization");
+
+  if Adom.shape(1) != Adom.shape(2) then
+    halt("LU factorization only supports square matrices");
+
+  var (LU, ipiv, numSwap) = _lu(A);
+  return (LU,ipiv);
+}
+
+/* Return a new array as the permuted form of `A` according to 
+    permutation array `ipiv`.*/
+private proc permute (ipiv: [] int, A: [?Adom] ?eltType, transpose=false) {
+  const n = Adom.shape(1);
+  
+  var B: [Adom] eltType;
+  
+  if Adom.rank == 1 {
+    if transpose {
+      forall (i,pi) in zip(1..n, ipiv) {
+        B[i] = A[pi];
+      }
+    }
+    else {
+      forall (i,pi) in zip(1..n, ipiv) {
+        B[pi] = A[i];
+      }
+    }
+  }
+  else if Adom.rank == 2 {
+    if transpose {
+      forall (i,pi) in zip(1..n, ipiv) {
+        B[i, ..] = A[pi, ..];
+      }
+    }
+    else {
+      forall (i,pi) in zip(1..n, ipiv) {
+        B[pi, ..] = A[i, ..];
+      }
+    }
+  }
+  return B;
+}
+
+/* Return the determinant of a square matrix.
+
+    .. note::
+
+      This procedure performs LU factorization to compute the 
+      determinant. In certain cases, e.g. having a lower/upper
+      triangular matrix, it is more desirable to compute the 
+      determinant manually.
+*/
+
+proc det (A: [?Adom] ?eltType) {
+  if Adom.rank != 2 then
+    halt("Wrong rank for computing determinant");
+
+  if Adom.shape(1) != Adom.shape(2) then
+    halt("Determinant can only be computed from square matrices");
+
+  var (LU,ipiv,numSwap) = _lu(A);
+  const pdet = if numSwap % 2 == 0 then 1 else -1;
+
+  // L[i,i] always = 1, so we only need to take the 
+  // diagonal product of U
+
+  return (* reduce [i in Adom.dim(1)] LU[i,i]) * pdet;
+}
+
+/* Return the solution ``x`` to the linear system `` L * x = b `` 
+    where ``L`` is a lower triangular matrix. Setting `unit_diag` to true
+    will assume the diagonal elements as `1` and will not be referenced 
+    within this procedure.
+*/
+proc solve_tril (const ref L: [?Ldom] ?eltType, const ref b: [?bdom] eltType, 
+                  unit_diag = true) {
+  const n = Ldom.shape(1);
+  var y = b;
+  
+  for i in 1..n {
+    const sol = if unit_diag then y(i) else y(i) / L(i,i);
+    y(i) = sol;
+    
+    if (i < n) {
+      forall j in (i+1)..n {
+        y(j) -= L(j,i) * sol;
+      }
+    }
+  }
+  
+  return y;
+}
+
+/* Return the solution ``x`` to the linear system `` U * x = b `` 
+    where ``U`` is an upper triangular matrix.
+*/
+proc solve_triu (const ref U: [?Udom] ?eltType, const ref b: [?bdom] eltType) {
+  const n = Udom.shape(1);
+  var y = b;
+  
+  for i in 1..n by -1 {
+    const sol = y(i) / U(i,i);
+    y(i) = sol;
+    
+    if (i > 1) {
+      forall j in 1..(i-1) by -1 {
+        y(j) -= U(j,i) * sol;
+      }
+    }
+  }
+  
+  return y;
+}
+
+/* Return the solution ``x`` to the linear system ``A * x = b``.
+*/
+proc solve (A: [?Adom] ?eltType, b: [?bdom] eltType) {
+  var (LU, ipiv) = lu(A);
+  b = permute (ipiv, b, true);
+  var z = solve_tril(LU, b);
+  var x = solve_triu(LU, z);
+  return x;
+}
+
 
 /* Perform a Cholesky factorization on matrix ``A``.  ``A`` must be square.
    Argument ``lower`` indicates whether to return the lower or upper
    triangular factor.  Matrix ``A`` is not modified.  Returns an array with
    the same shape as argument ``A`` with the lower or upper triangular
    Cholesky factorization of ``A``.
+
+    .. note::
+
+      This procedure depends on the :mod:`LAPACK` module, and will generate a
+      compiler error if ``lapackImpl`` is ``none``.
  */
-proc cholesky(A: [] ?t, lower = true) where A.rank == 2 &&
-                                            (isRealType(t) ||
-                                             isComplexType(t)) {
+proc cholesky(A: [] ?t, lower = true)
+  where A.rank == 2 && isLAPACKType(t) && usingLAPACK
+{
   if !isSquare(A) then
     halt("Matrix passed to cholesky must be square");
 
   var copy = A;
   const uploStr = if lower then "L" else "U";
-  potrf(lapack_memory_order.row_major, uploStr, copy);
+  LAPACK.potrf(lapack_memory_order.row_major, uploStr, copy);
 
   // tril and triu make/return an extra copy.  Should we zero the unused
   // triangle of the array manually instead to avoid the copy?
   return if lower then tril(copy) else triu(copy);
+}
+
+
+pragma "no doc"
+proc cholesky(A: [] ?t, lower = true)
+  where A.rank == 2 && isLAPACKType(t) && !usingLAPACK
+{
+  compilerError("cholesky() requires LAPACK");
+}
+
+
+/* Find the eigenvalues of matrix ``A``. ``A`` must be square.
+
+    .. note::
+
+      This procedure depends on the :mod:`LAPACK` module, and will generate a
+      compiler error if ``lapackImpl`` is ``none``.
+
+*/
+proc eigvals(A: [] ?t) where isRealType(t) && A.domain.rank == 2 && usingLAPACK {
+  return eig(A, left=false, right=false);
 }
 
 
@@ -977,9 +1395,14 @@ proc cholesky(A: [] ?t, lower = true) where A.rank == 2 &&
    * If ``left`` and ``right`` are both ``false`` only the eigenvalues are
      computed, and returned as a single array.
 
+    .. note::
+
+      This procedure depends on the :mod:`LAPACK` module, and will generate a
+      compiler error if ``lapackImpl`` is ``none``.
+
  */
-proc eigvals(A: [] ?t, param left = false, param right = false)
-  where isRealType(t) && A.domain.rank == 2 {
+proc eig(A: [] ?t, param left = false, param right = false)
+  where isRealType(t) && A.domain.rank == 2 && usingLAPACK {
 
   proc convertToCplx(wr: [] t, wi: [] t) {
     const n = wi.numElements;
@@ -1026,13 +1449,13 @@ proc eigvals(A: [] ?t, param left = false, param right = false)
 
   if !left && !right {
     var vl, vr: [1..1, 1..n] t;
-    geev(lapack_memory_order.row_major, 'N', 'N', copy, wr, wi, vl, vr);
+    LAPACK.geev(lapack_memory_order.row_major, 'N', 'N', copy, wr, wi, vl, vr);
     var eigVals = convertToCplx(wr, wi);
     return eigVals;
   } else if left && !right {
     var vl: [1..n, 1..n] t;
     var vr: [1..1, 1..n] t;
-    geev(lapack_memory_order.row_major, 'V', 'N', copy, wr, wi, vl, vr);
+    LAPACK.geev(lapack_memory_order.row_major, 'V', 'N', copy, wr, wi, vl, vr);
 
     var eigVals = convertToCplx(wr, wi);
     var vlcplx = flattenCplxEigenVecs(wi, vl);
@@ -1041,7 +1464,7 @@ proc eigvals(A: [] ?t, param left = false, param right = false)
   } else if right && !left {
     var vl: [1..1, 1..n] t;
     var vr: [1..n, 1..n] t;
-    geev(lapack_memory_order.row_major, 'N', 'V', copy, wr, wi, vl, vr);
+    LAPACK.geev(lapack_memory_order.row_major, 'N', 'V', copy, wr, wi, vl, vr);
 
     var eigVals = convertToCplx(wr, wi);
     var vrcplx = flattenCplxEigenVecs(wi, vr);
@@ -1051,7 +1474,7 @@ proc eigvals(A: [] ?t, param left = false, param right = false)
     // left && right
     var vl: [1..n, 1..n] t;
     var vr: [1..n, 1..n] t;
-    geev(lapack_memory_order.row_major, 'V', 'V', copy, wr, wi, vl, vr);
+    LAPACK.geev(lapack_memory_order.row_major, 'V', 'V', copy, wr, wi, vl, vr);
 
     var eigVals = convertToCplx(wr, wi);
     var vlcplx = flattenCplxEigenVecs(wi, vl);
@@ -1061,12 +1484,148 @@ proc eigvals(A: [] ?t, param left = false, param right = false)
   }
 }
 
+/*
+  Singular Value Decomposition.
+
+  Factorizes the `m x n` matrix ``A`` such that:
+
+
+  .. math::
+
+    \mathbf{A} = \textbf{U} \cdot \Sigma \cdot \mathbf{V^H}
+
+  where
+
+    - :math:`\mathbf{U}` is an `m x m` unitary matrix,
+    - :math:`\Sigma` is a diagonal `m x n` matrix,
+    - :math:`\mathbf{V}` is an `n x n` unitary matrix, and
+      :math:`\mathbf{V^H}` is the Hermitian transpose.
+
+  This procedure returns a tuple of ``(U, s, Vh)``, where ``s`` is a vector
+  containing the diagonal elements of :math:`\Sigma`, known as the
+  singular values.
+
+  For example:
+
+  .. code-block:: chapel
+
+    var A = Matrix([3, 2,  2],
+                   [2, 3, -2],
+                   eltType=real);
+    var (U, s, Vh) = svd(A);
+
+  ``LinearAlgebraError`` will be thrown if the SVD computation does not
+  converge or an illegal argument, such as a matrix containing a ``NAN`` value,
+  is given.
+
+  .. note::
+
+   A temporary copy of ``A`` will be created within this computation.
+
+  .. note::
+
+    This procedure depends on the :mod:`LAPACK` module, and will generate a
+    compiler error if ``lapackImpl`` is ``none``.
+*/
+proc svd(A: [?Adom] ?t) throws
+  where isLAPACKType(t) && usingLAPACK && Adom.rank == 2
+{
+
+  const (m, n) = A.shape;
+  var minDim = min(m, n);
+
+  /* real(32) or real(64) for singular values and superb */
+  type realType = if t == complex(128) || t == real(64) then real(64)
+                  else real(32);
+
+  // TODO: Support argument to allow overwriting A as performance optimization
+  // Copy over A since it gets destroyed during SVD
+  var Acopy: [Adom] t = A;
+
+  // Results
+
+  // Stores singular values, sorted
+  var s: [1..minDim] realType;
+  // Unitary matrix, U
+  var u: [1..m, 1..m] t;
+  // Unitary matrix V^T (or V^H)
+  var vt: [1..n, 1..n] t;
+
+  // if return code 'info' > 0, then this stores unconverged superdiagonal
+  // elements of upper bidiagonal matrix 'B' whose diagonal is in 's'.
+  var superb: [1..minDim-1] realType;
+
+  // TODO: Support option for gesdd (trading memory usage for speed)
+  const info = LAPACK.gesvd(lapack_memory_order.row_major, 'A', 'A', Acopy, s, u, vt, superb);
+
+  if info > 0 {
+    var msg = 'SVD computation did not converge. Number of superdiagonals of the intermediate bidiagonal that did not converge to zero: ' + info:string;
+    throw new owned LinearAlgebraError(msg);
+  } else if info < 0 {
+    var msg = 'SVD received an illegal argument in LAPACK.gesvd() argument position: ' + info:string;
+    throw new owned LinearAlgebraError(msg);
+  }
+
+
+  return (u, s, vt);
+}
+
+/* 
+  Compute the approximate solution to ``A * x = b`` using the Jacobi method.
+  iteration will stop when ``maxiter`` is reached or error is smaller than
+  ``tol``, whichever comes first. Return the number of iterations performed.
+  
+  .. note::
+    ``X`` is passed as a reference, meaning the initial solution guess can be
+    stored in ``X`` before calling the procedure, and the approximate solution 
+    will be stored in the same array.
+    
+    Dense and CSR arrays are supported.
+*/
+proc jacobi(A: [?Adom] ?eltType, ref X: [?Xdom] eltType, 
+            b: [Xdom] eltType, tol = 0.0001, maxiter = 1000) {
+  if Adom.rank != 2 || X.rank != 1 || b.rank != 1 then
+    halt("Wrong shape of input matrix or vector");
+  if !isSquare(A) then
+    halt("Matrix A is not a square");
+  if Adom.shape(1) != Xdom.shape(1) then
+    halt("Mismatch shape between matrix side length and vector length");
+
+  var itern = 0, err: eltType = 1;
+
+  var t: [Xdom] eltType = 0;
+
+  while (itern < maxiter) {
+    itern = itern + 1;
+    forall i in Adom.dim(1) {
+      var sigma = 0.0;
+      for j in Adom.dim(2) {
+        if i!=j then sigma += A(i,j) * X(j);
+      }
+      t(i) = (b(i) - sigma) / A(i,i);
+    }
+    err = max reduce abs(t - X);
+    X = t;
+    if err < tol {
+      break;
+    }
+  }
+  return itern;
+}
+
+
+pragma "no doc"
+proc eig(A: [] ?t, param left = false, param right = false)
+  where isRealType(t) && A.domain.rank == 2 && !usingLAPACK {
+  compilerError("eigvals() requires LAPACK");
+}
+
 
 /* Return the Kronecker Product of matrix ``A`` and matrix ``B``.
    If the size of A is ``x * y`` and of B is ``a * b`` then size of the resulting
    matrix will be ``(x * a) * (y * b)`` */
 proc kron(A: [?ADom] ?eltType, B: [?BDom] eltType) {
-  if ADom.rank != 2 || BDom.rank != 2 then compilerError("Rank size not 2");
+  if ADom.rank != 2 || BDom.rank != 2 then compilerError("Ranks not 2");
 
   const (rowA, colA) = A.shape;
   const (rowB, colB) = B.shape;
@@ -1094,13 +1653,60 @@ proc kron(A: [?ADom] ?eltType, B: [?BDom] eltType) {
 //
 // Type helpers
 //
-private proc isDefaultRectangularDom (D: domain) param where D._value: DefaultRectangularDom { return true; }
-private proc isDefaultRectangularDom (D: domain) param { return false; }
-private proc isDefaultRectangularArr (A: []) param { return isDefaultRectangularDom(A.domain); }
 
-private proc isDefaultSparseDom(D: domain) param where D._value: DefaultSparseDom { return true; }
-private proc isDefaultSparseDom(D: domain) param { return false; }
-private proc isDefaultSparseArr(A: []) param { return isDefaultSparseDom(A.domain); }
+// TODO: Add this to public interface eventually
+pragma "no doc"
+/* Returns ``true`` if the array is dense N-dimensional non-distributed array. */
+proc isDenseArr(A: [?D]) param : bool {
+  return isDenseDom(D);
+}
+
+// TODO: Add this to public interface eventually
+pragma "no doc"
+/* Returns ``true`` if the domain is dense N-dimensional non-distributed domain. */
+proc isDenseDom(D: domain) param : bool {
+  return isRectangularDom(D);
+}
+
+// TODO: Add this to public interface eventually
+pragma "no doc"
+/* Returns ``true`` if the array is N-dimensional non-distributed array. */
+proc isLocalArr(A: [?D]) param : bool {
+  return isLocalDom(D);
+}
+
+// TODO: Add this to public interface eventually
+pragma "no doc"
+/* Returns ``true`` if the domain is dense N-dimensional non-distributed domain. */
+proc isLocalDom(D: domain) param : bool {
+  return (D.dist.type == defaultDist.type || D.dist.type < ArrayViewRankChangeDist);
+}
+
+// TODO: Add this to public interface eventually
+pragma "no doc"
+/* Returns ``true`` if the array is dense 2-dimensional non-distributed array. */
+proc isDenseMatrix(A: []) param : bool {
+  return A.rank == 2 && isDenseArr(A) && isLocalArr(A);
+}
+
+// Work-around for #8543
+pragma "no doc"
+proc type _array.rank param {
+  var x: this;
+  return x.rank;
+}
+
+pragma "no doc"
+/* Returns ``true`` if the domain is ``DefaultSparse`` */
+private proc isDefaultSparseDom(D: domain) param {
+  return isSubtype(_to_borrowed(D.dist.type), DefaultDist) && isSparseDom(D);
+}
+
+pragma "no doc"
+/* Returns ``true`` if the array is ``DefaultSparse`` */
+private proc isDefaultSparseArr(A: []) param {
+  return isDefaultSparseDom(A.domain);
+}
 
 
 
@@ -1145,9 +1751,9 @@ A common usage of this interface might look like this:
   // var A: [D] int;
 
   // Add indices to the sparse domain along the diagonal
-  D += (0,0);
   D += (1,1);
   D += (2,2);
+  D += (3,3);
 
   // Set all nonzero indices to the value of 1
   A = 1;
@@ -1201,7 +1807,7 @@ module Sparse {
     nonzeros as ``Dom``
   */
   proc CSRDomain(Dom: domain) where Dom.rank == 2 && isCSDom(Dom) {
-    var csrDom: sparse subdomain(Dom._value.parentDom) dmapped CS();
+    var csrDom: sparse subdomain(Dom.parentDom) dmapped CS(sortedIndices=false);
     csrDom += Dom;
     return csrDom;
   }
@@ -1209,7 +1815,7 @@ module Sparse {
   pragma "no doc"
   /* Return a CSR domain based on domain: ``Dom`` - Dense case */
   proc CSRDomain(Dom: domain(2)) where Dom.rank == 2 {
-    var csrDom: sparse subdomain(Dom) dmapped CS();
+    var csrDom: sparse subdomain(Dom) dmapped CS(sortedIndices=false);
     return csrDom;
   }
 
@@ -1229,7 +1835,9 @@ module Sparse {
 
   pragma "no doc"
   /* Return a CSR matrix over domain: ``Dom`` - Dense case */
-  proc CSRMatrix(Dom: domain, type eltType=real) where Dom.rank == 2 && isDefaultRectangularDom(Dom) {
+  proc CSRMatrix(Dom: domain, type eltType=real) where Dom.rank == 2 &&
+                                                       isDenseDom(Dom) &&
+                                                       isLocalDom(Dom) {
     var csrDom = CSRDomain(Dom);
     var M: [csrDom] eltType;
     return M;
@@ -1244,20 +1852,19 @@ module Sparse {
     If ``A`` is sparse (CSR), the returned sparse matrix will be a copy of ``A``
     casted to ``eltType``
    */
-  proc CSRMatrix(A: [?Dom] ?Atype, type eltType=Atype) where Dom.rank == 2 && isCSArr(A) {
+  proc CSRMatrix(A: [?Dom] ?Atype, type eltType=Atype) where isCSArr(A) {
     var M: [Dom] eltType = A: eltType;
     return M;
   }
 
   pragma "no doc"
   /* Return a CSR matrix with domain and values of ``A`` - Dense case */
-  proc CSRMatrix(A: [?Dom] ?Atype, type eltType=Atype) where Dom.rank == 2 && isDefaultRectangularArr(A) {
+  proc CSRMatrix(A: [?Dom] ?Atype, type eltType=Atype) where isDenseMatrix(A) {
     var D = CSRDomain(Dom);
     var M: [D] eltType;
 
-    const zero = 0: Atype;
     for (i,j) in Dom {
-      if A[i,j] != zero {
+      if A[i,j] != 0 {
         D += (i,j);
         M[i,j] += A[i,j];
       }
@@ -1287,15 +1894,15 @@ module Sparse {
     where indDom.rank == 1 && nnzDom.rank == 1 {
     const (M, N) = shape;
     const D = {1..M, 1..N};
-    var ADom: sparse subdomain(D) dmapped CS();
+    var ADom: sparse subdomain(D) dmapped CS(sortedIndices=false);
 
     ADom.startIdxDom = {1..indptr.size};
     ADom.startIdx = indptr;
     const (hasZero, zeroIndex) = indices.find(0);
     if hasZero {
-      ADom.nnz = zeroIndex-1;
+      ADom._nnz = zeroIndex-1;
     } else {
-      ADom.nnz = indices.size;
+      ADom._nnz = indices.size;
     }
     ADom.nnzDom = {1..indices.size};
     ADom.idx = indices;
@@ -1307,9 +1914,11 @@ module Sparse {
       Generic matrix multiplication, ``A`` and ``B`` can be a scalar, dense
       vector, or sparse matrix.
 
-      When ``A`` is a vector and ``B`` is a matrix, this function implicitly
-      computes ``dot(transpose(A), B)``, which may not be as efficient as
-      passing ``A`` and ``B`` in the reverse order.
+      .. note::
+
+        When ``A`` is a vector and ``B`` is a matrix, this function implicitly
+        computes ``dot(transpose(A), B)``, which may not be as efficient as
+        passing ``A`` and ``B`` in the reverse order.
 
   */
   proc dot(A: [?Adom] ?eltType, B: [?Bdom] eltType) where isSparseArr(B) || isSparseArr(A) {
@@ -1338,17 +1947,19 @@ module Sparse {
       return _csrmatmatMult(A, B);
     }
     else {
-      compilerError("Rank sizes are not 1 or 2");
+      compilerError("Ranks are not 1 or 2");
     }
   }
 
   /* Compute the dot-product */
   proc _array.dot(A: []) where isCSArr(A) || isCSArr(this) {
+    use LinearAlgebra only;
     return LinearAlgebra.Sparse.dot(this, A);
   }
 
   /* Compute the dot-product */
   proc _array.dot(a) where isNumeric(a) && isCSArr(this) {
+    use LinearAlgebra only;
     return LinearAlgebra.dot(this, a);
   }
 
@@ -1359,7 +1970,7 @@ module Sparse {
   {
 
     if Adom.rank != 2 || Xdom.rank != 1 then
-      compilerError("Rank sizes are not 2 and 1");
+      compilerError("Ranks are not 2 and 1");
 
     const Ydom = if trans then {Adom.dim(2)}
                     else {Adom.dim(1)};
@@ -1422,13 +2033,15 @@ module Sparse {
 
     var C = CSRMatrix((M, N), data, indices, indPtr);
 
-    // TODO: Check if array is not using sorted indices, when that's possible
-    sortIndices(C);
+    if C.domain.sortedIndices {
+      sortIndices(C);
+    }
 
     return C;
   }
 
 
+  pragma "no doc"
   /* Populate indPtr and total nnz (last element of indPtr) */
   proc pass1(ref A: [?ADom] ?eltType, ref B: [?BDom] eltType, ref indPtr) {
     // TODO: Parallelize - mask -> atomic ints,
@@ -1470,6 +2083,7 @@ module Sparse {
     }
   }
 
+  pragma "no doc"
   /* Populate indices and data */
   proc pass2(ref A: [?ADom] ?eltType, ref B: [?BDom] eltType, ref indPtr, ref indices, ref data) {
     // TODO: Parallelize - next, sums -> task-private stacks
@@ -1565,16 +2179,12 @@ module Sparse {
 
   /* Transpose CSR domain */
   proc transpose(D: domain) where isCSDom(D) {
-    var indices: [1..0] 2*D.idxType;
-    for i in D.dim(1) {
-      for j in D.dimIter(2, i) {
-        indices.push_back((j, i));
-      }
-    }
+    const parentDT = transpose(D.parentDom);
+    var Dom: sparse subdomain(parentDT) dmapped CS(sortedIndices=false);
 
-    const parentDT = transpose(D._value.parentDom);
-    var Dom: sparse subdomain(parentDT) dmapped CS();
-    Dom += indices;
+    var idxBuffer = Dom.makeIndexBuffer(size=D.numIndices);
+    for (i,j) in D do idxBuffer.add((j,i));
+    idxBuffer.commit();
     return Dom;
   }
 
@@ -1594,51 +2204,37 @@ module Sparse {
   /* Transpose CSR matrix */
   proc _array.T where isCSArr(this) { return transpose(this); }
 
-  /* Element-wise addition */
-  proc _array.plus(A) where isCSArr(this) && isCSArr(A) {
-    if this.domain._value.parentDom != A.domain._value.parentDom then
-      halt('Cannot add sparse arrays with non-matching parent domains');
-
-    // Create copy of 'this'
-    var BDom = this.domain;
-    var B: [BDom] this.eltType;
-    forall (i,j) in B.domain do B[i,j] = this[i,j];
-
-    // If domain indices do not match, bulk add A's indices to B
-    if this.domain != A.domain {
-      BDom += A.domain;
+  /* Element-wise addition. */
+  proc _array.plus(A: [?Adom] ?eltType) where isCSArr(this) && isCSArr(A) {
+    if Adom.rank != this.domain.rank then compilerError("Unmatched ranks");
+    if this.domain.shape != Adom.shape then halt("Unmatched shapes");
+    var sps = CSRDomain(Adom.parentDom);
+    sps += this.domain;
+    sps += Adom;
+    var S: [sps] eltType;
+    forall (i,j) in sps {
+      S[i,j] = this[i,j] + A[i,j];
     }
-
-    // Do in-place addition of A into B
-    forall (i,j) in A.domain do B[i,j] += A[i,j];
-
-    return B;
+    return S;
   }
 
-  /* Element-wise subtraction */
-  proc _array.minus(A) where isCSArr(this) && isCSArr(A) {
-    if this.domain._value.parentDom != A.domain._value.parentDom then
-      halt('Cannot add sparse arrays with non-matching parent domains');
-
-    // Create copy of 'this'
-    var BDom = this.domain;
-    var B: [BDom] this.eltType;
-    forall (i,j) in B.domain do B[i,j] = this[i,j];
-
-    // If domain indices do not match, bulk add A's indices to B
-    if this.domain != A.domain {
-      BDom += A.domain;
+  /* Element-wise subtraction. */
+  proc _array.minus(A: [?Adom] ?eltType) where isCSArr(this) && isCSArr(A) {
+    if Adom.rank != this.domain.rank then compilerError("Unmatched ranks");
+    if this.domain.shape != Adom.shape then halt("Unmatched shapes");
+    var sps = CSRDomain(Adom.parentDom);
+    sps += this.domain;
+    sps += Adom;
+    var S: [sps] eltType;
+    forall (i,j) in sps {
+      S[i,j] = this[i,j] - A[i,j];
     }
-
-    // Do in-place addition of A into B
-    forall (i,j) in A.domain do B[i,j] -= A[i,j];
-
-    return B;
+    return S;
   }
 
-  /* Element-wise multiplication */
+  /* Element-wise multiplication. */
   proc _array.times(A) where isCSArr(this) && isCSArr(A) {
-    if this.domain._value.parentDom != A.domain._value.parentDom then
+    if this.domain.parentDom != A.domain.parentDom then
       halt('Cannot subtract sparse arrays with non-matching parent domains');
 
     // Create copy of 'this'
@@ -1657,9 +2253,9 @@ module Sparse {
     return B;
   }
 
-  /* Element-wise division */
+  /* Element-wise division. */
   proc _array.elementDiv(A) where isCSArr(this) && isCSArr(A) {
-    if this.domain._value.parentDom != A.domain._value.parentDom then
+    if this.domain.parentDom != A.domain.parentDom then
       halt('Cannot element-wise divide sparse arrays with non-matching parent domains');
 
     // Create copy of 'this'
@@ -1685,7 +2281,7 @@ module Sparse {
   }
 
   /* Return an identity matrix over sparse domain ``Dom`` */
-  proc eye(Dom, type eltType=real) where isCSDom(Dom) {
+  proc eye(Dom: domain, type eltType=real) where isCSDom(Dom) {
     const (m,n) = Dom.shape;
     var D = CSRDomain(Dom.parentDom);
     const idx = if m <= n then 1 else 2;
@@ -1698,14 +2294,114 @@ module Sparse {
     }
     return A;
   }
+  
+  pragma "no doc"
+  proc jacobi(A: [?Adom] ?eltType, ref X: [?Xdom] eltType, 
+              b: [Xdom] eltType, tol = 0.0001, maxiter = 1000) where isCSArr(A) {
+    if Adom.rank != 2 || X.rank != 1 || b.rank != 1 then
+      halt("Wrong shape of input matrix or vector");
+    if Adom.shape(1) != Adom.shape(2) then
+      halt("Matrix A is not a square");
+    if Adom.shape(1) != Xdom.shape(1) then
+      halt("Mismatch shape between matrix side length and vector length");
+  
+    var itern = 0, err: eltType = 1;
+  
+    var t: [Xdom] eltType = 0;
+  
+    while (itern < maxiter) {
+      itern = itern + 1;
+      forall i in Adom.dim(1) {
+        var sigma = 0.0;
+        for j in Adom.dimIter(2,i) {
+          if i!=j then sigma += A(i,j) * X(j);
+        }
+        t(i) = (b(i) - sigma) / A(i,i);
+      }
+      err = max reduce abs(t - X);
+      X = t;
+      if err < tol {
+        break;
+      }
+    }
+    return itern;
+  }
+
+  pragma "no doc"
+  proc setDiag (ref X: [?D] ?eltType, in k: int = 0, val: eltType = 0)
+                where isSparseArr(X) {
+      if D.rank != 2 then
+        halt("Wrong rank for setDiag");
+
+      if D.shape(1) != D.shape(2) then
+        halt("setDiag only supports square matrices");
+
+      var start, end = 0;
+      if (k >= 0) { // upper or main diagonal
+        start = 1;
+        end = D.shape(1) - k;
+      }
+      else { // lower diagonal
+        start = 1 - k;
+        end = D.shape(1);
+      }
+      var indices : [start..end] (D.idxType, D.idxType);
+      forall ind in {start..end} {
+        indices[ind] = (ind, ind+k);
+      }
+      D.bulkAdd(indices, dataSorted=true, isUnique=true, preserveInds=false);
+      forall ind in indices {
+        X(ind) = val;
+      }
+  }
+
+
+  /* Return ``true`` if sparse matrix is diagonal. Supports CSR and COO arrays. */
+  proc isDiag(A: [?D] ?eltType) where isSparseArr(A) {
+    return _isDiag(A);
+  }
+
+
+  /* Return ``true`` if matrix is Hermitian. Supports CSR and COO arrays. */
+  proc isHermitian(A: [?D]) where isSparseArr(A) {
+    if D.rank != 2 then
+      compilerError("Rank is not 2");
+    if !isSquare(A) then
+      return false;
+
+    for (i, j) in D {
+      if A[i, j] != conjg(A[j, i]) then return false;
+    }
+    return true;
+  }
+
+
+  /* Return ``true`` if sparse matrix is symmetric. Supports CSR and COO arrays. */
+  proc isSymmetric(A: [?D]) where isSparseArr(A): bool {
+    if D.rank != 2 then
+      compilerError("Rank is not 2");
+    if !isSquare(A) then
+      return false;
+
+    for (i, j) in D {
+      if A[i, j] != A[j, i] then return false;
+    }
+    return true;
+  }
+
 
   //
   // Type helpers
   //
+
+
   pragma "no doc"
-  proc isCSArr(A: []) param { return isCSType(A.domain._value.dist.type); }
+  /* Returns ``true`` if the array is dmapped to ``CS`` layout. */
+  proc isCSArr(A: []) param { return isCSType(A.domain.dist.type); }
+
   pragma "no doc"
-  proc isCSDom(D: domain) param { return isCSType(D._value.dist.type); }
+  /* Returns ``true`` if the domain is dmapped to ``CS`` layout. */
+  proc isCSDom(D: domain) param { return isCSType(D.dist.type); }
 
 } // submodule LinearAlgebra.Sparse
 

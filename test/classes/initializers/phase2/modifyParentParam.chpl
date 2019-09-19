@@ -10,12 +10,12 @@ class C {
 class D : C {
   proc init(param x : int) {
     super.init(x);
-    this.initDone();
+    this.complete();
     // Error message should say something about phase 1 or 2
     this.x = 42;
   }
 }
 
-var myD = new D(10);
+var myD = new unmanaged D(10);
 writeln(myD);
 delete myD;

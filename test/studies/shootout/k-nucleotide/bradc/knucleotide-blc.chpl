@@ -5,7 +5,7 @@
    derived from the GNU C++ version by Branimir Maksimovic
 */
 
-use Sort;
+use Map, Sort;
 
 config param tableSize = 2**16,
              columns = 61;
@@ -38,7 +38,7 @@ proc main(args: [] string) {
 
   // Make everything uppercase
   forall d in data do
-    d -= (ascii("a") - ascii("A"));
+    d -= ("a".toByte() - "A".toByte());
 
   writeFreqs(data, 1);
   writeFreqs(data, 2);
@@ -58,14 +58,17 @@ proc writeFreqs(data, param nclSize) {
   // TODO: Shouldn't this work?
   //
   //  var arr = [(k,v) in zip(freqs.domain, freqs)] (v,k);
-  var arr = for (k,v) in zip(freqs.domain, freqs) do (v,k);
+  var arr = for (k,v) in freqs.items() do (v,k);
 
   //  var arr: [1..freqs.size] 2*int;
   //  for (a, k, v) in zip(arr, freqs.domain, freqs) do
   //    a = (v, k);
-  quickSort(arr, comparator=reverseComparator);
 
-  for (f, s) in arr do
+  // arr.sorted() creates another (temporary) array
+  // ideally, would like "for (f,s) in
+  //   ( for (s,f) in zip(freqs.domain, freqs) do (f,s) ).sorted(...)"
+
+  for (f, s) in arr.sorted(comparator=reverseComparator) do
    writef("%s %.3dr\n", decode(s, nclSize), 
            (100.0 * f) / (data.size - nclSize));
   writeln();
@@ -73,16 +76,15 @@ proc writeFreqs(data, param nclSize) {
 
 
 proc writeCount(data, param str) {
-  const freqs = calculate(data, str.length),
-        d = hash(str.toBytes(), 1, str.length);
+  const freqs = calculate(data, str.numBytes),
+        d = hash(str.toBytes(), 1, str.numBytes);
 
-  writeln(freqs[d], "\t", decode(d, str.length));
+  writeln(freqs[d], "\t", decode(d, str.numBytes));
 }
 
 
 proc calculate(data, param nclSize) {
-  var freqDom: domain(int),
-      freqs: [freqDom] int;
+  var freqs = new map(int, int);
 
   //
   // TODO: Could we combine these local hash tables with a reduce
@@ -91,15 +93,14 @@ proc calculate(data, param nclSize) {
 
   var lock$: sync bool = true;
   const numTasks = here.maxTaskPar;
-  coforall tid in 1..numTasks {
-    var myDom: domain(int),
-        myArr: [myDom] int;
+  coforall tid in 1..numTasks with (ref freqs) {
+    var myMap = new map(int, int);
 
     for i in tid..(data.size-nclSize) by numTasks do
-      myArr[hash(data, i, nclSize)] += 1;
+      myMap[hash(data, i, nclSize)] += 1;
 
     lock$;        // acquire lock
-    for (k,v) in zip(myDom, myArr) do
+    for (k,v) in myMap.items() do
       freqs[k] += v;
     lock$ = true; // release lock
   }
@@ -115,9 +116,9 @@ const toChar: [0..3] string = ["A", "C", "T", "G"];
 var toNum: [0..127] int;
 
 forall i in toChar.domain do
-  toNum[ascii(toChar[i])] = i;
+  toNum[toChar[i].toByte()] = i;
 //
-// Too terse (?): toNum[ascii(toChar)] = toChar.domain;
+// Too terse (?): toNum[toChar.toByte()] = toChar.domain;
 
 
 inline proc decode(in data, param nclSize) {
@@ -145,16 +146,16 @@ inline proc hash(str, beg, param size) {
 
 
 proc string.toBytes() {
-  var bytes: [1..this.length] uint(8);
-  for (b, i) in zip(bytes, 1..) do
-    b = ascii(this[i]);
-  return bytes;
+  var byteArr: [1..this.numBytes] uint(8);
+  for (b, i) in zip(byteArr, 1..) do
+    b = this.byte(i);
+  return byteArr;
 }
 
 
 inline proc startsWithThree(data) {
-  return data[1] == ascii(">") && 
-         data[2] == ascii("T") && 
-         data[3] == ascii("H");
+  return data[1] == ">".toByte() &&
+         data[2] == "T".toByte() &&
+         data[3] == "H".toByte();
 }
 

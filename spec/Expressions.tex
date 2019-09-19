@@ -11,9 +11,10 @@ expression:
   variable-expression
   enum-constant-expression
   call-expression
+  type-expression
   iteratable-call-expression
   member-access-expression
-  constructor-call-expression
+  new-expression
   query-expression
   cast-expression
   lvalue-expression
@@ -43,7 +44,7 @@ and additionally as follows:
 \item tuple and tuple expand \rsec{Tuples}
 \item locale access \rsec{Querying_the_Locale_of_a_Variable}
 \item mapped domain \rsec{Domain_Maps}
-\item constructor calls \rsec{Class_New}
+\item initializer calls \rsec{Class_New}
 \item \chpl{nil} \rsec{Class_nil_value}
 \end{itemize}
 
@@ -62,6 +63,7 @@ literal-expression:
   real-literal
   imaginary-literal
   string-literal
+  bytes-literal
   range-literal
   domain-literal
   array-literal
@@ -237,7 +239,7 @@ places in the future.
 A cast is specified with the following syntax:
 \begin{syntax}
 cast-expression:
-  expression : type-specifier
+  expression : type-expression
 \end{syntax}
 The expression is converted to the specified type.  A cast expression invokes
 the corresponding explicit conversion~(\rsec{Explicit_Conversions}).  A
@@ -283,9 +285,6 @@ example, not all \sntx{call-expression}s are lvalues.
 \index{expressions!precedence}
 \index{expressions!associativity}
 
-The following table summarizes operator and expression precedence and
-associativity.  Operators and expressions listed earlier have higher
-precedence than those listed later.
 \begin{center}
 \begin{tabular}{|l|l|l|}
 \hline
@@ -295,7 +294,15 @@ precedence than those listed later.
 \verb@()@ & & function call or access \\
 \verb@[]@ & & function call or access \\
 \hline
-\verb@new@ & right & constructor call \\
+\verb@new@ & right & initializer call \\
+\hline
+\verb@owned@ & right & apply management strategy to a class \\
+\verb@shared@ &   & \\
+\verb@borrowed@ &   & \\
+\verb@unmanaged@ &   & \\
+\hline
+postfix \verb@?@ & left & compute a nilable class type \\
+postfix \verb@!@ &   & assert non-nilable and borrow \\
 \hline
 \verb@:@ & left & cast \\
 \hline
@@ -305,7 +312,7 @@ precedence than those listed later.
 \verb@scan@ & & scan \\
 \verb@dmapped@ & & domain map application \\
 \hline
-\verb@!@ & \multirow{2}{*}{right} & logical negation \\
+prefix \verb@!@ & \multirow{2}{*}{right} & logical negation \\
 \verb@~@ & & bitwise negation \\
 \hline
 \verb@*@ & \multirow{3}{*}{left} & multiplication \\
@@ -327,7 +334,7 @@ unary \verb@-@ & & negation \\
 \verb@+@ & \multirow{2}{*}{left} & addition \\
 \verb@-@ & & subtraction \\
 \hline
-\verb@..@ & left & range construction \\
+\verb@..@ & left & range initialization \\
 \hline
 \verb@<=@ & \multirow{4}{*}{left} & less-than-or-equal-to comparison \\
 \verb@>=@ & & greater-than-or-equal-to comparison \\
@@ -341,11 +348,11 @@ unary \verb@-@ & & negation \\
 \hline
 \verb@||@ & left & short-circuiting logical or \\
 \hline
-\verb@in@ & left & forall expression \\
-\hline
 \verb@by@ & \multirow{3}{*}{left} & range/domain stride application \\
 \verb@#@ & & range count application \\
 \verb@align@ & & range alignment \\
+\hline
+\verb@in@ & left & forall expression \\
 \hline
 \verb@if then else@ & \multirow{5}{*}{left} & conditional expression \\
 \verb@forall do@ & & forall expression \\
@@ -357,6 +364,10 @@ unary \verb@-@ & & negation \\
 \hline
 \end{tabular}
 \end{center}
+
+The above table summarizes operator and expression precedence and
+associativity.  Operators and expressions listed earlier have higher
+precedence than those listed later.
 
 \begin{rationale}
 In general, our operator precedence is based on that of the C family
@@ -883,8 +894,6 @@ overloading~(\rsec{Function_Overloading}).
 
 The bitwise complement operators are predefined as follows:
 \begin{chapel}
-proc ~(a: bool): bool
-
 proc ~(a: int(8)): int(8)
 proc ~(a: int(16)): int(16)
 proc ~(a: int(32)): int(32)
@@ -1158,9 +1167,6 @@ proc <(a: uint(64), b: int(64)): bool
 
 proc <(a: real(32), b: real(32)): bool
 proc <(a: real(64), b: real(64)): bool
-
-proc <(a: imag(32), b: imag(32)): bool
-proc <(a: imag(64), b: imag(64)): bool
 \end{chapel}
 The result of \chpl{a < b} is true if \chpl{a} is less than \chpl{b};
 otherwise the result is false.
@@ -1186,9 +1192,6 @@ proc >(a: uint(64), b: int(64)): bool
 
 proc >(a: real(32), b: real(32)): bool
 proc >(a: real(64), b: real(64)): bool
-
-proc >(a: imag(32), b: imag(32)): bool
-proc >(a: imag(64), b: imag(64)): bool
 \end{chapel}
 The result of \chpl{a > b} is true if \chpl{a} is greater
 than \chpl{b}; otherwise the result is false.
@@ -1214,9 +1217,6 @@ proc <=(a: uint(64), b: int(64)): bool
 
 proc <=(a: real(32), b: real(32)): bool
 proc <=(a: real(64), b: real(64)): bool
-
-proc <=(a: imag(32), b: imag(32)): bool
-proc <=(a: imag(64), b: imag(64)): bool
 \end{chapel}
 The result of \chpl{a <= b} is true if \chpl{a} is less than or equal
 to \chpl{b}; otherwise the result is false.
@@ -1242,9 +1242,6 @@ proc >=(a: uint(64), b: int(64)): bool
 
 proc >=(a: real(32), b: real(32)): bool
 proc >=(a: real(64), b: real(64)): bool
-
-proc >=(a: imag(32), b: imag(32)): bool
-proc >=(a: imag(64), b: imag(64)): bool
 \end{chapel}
 The result of \chpl{a >= b} is true if \chpl{a} is greater than or
 equal to \chpl{b}; otherwise the result is false.
@@ -1349,6 +1346,19 @@ in \chpl{a} matches exactly the sequence of characters in \chpl{b};
 otherwise the result is false.  The result of \chpl{a \!= b} is
 equivalent to \chpl{\!(a == b)}.
 
+\section{Class Operators}
+\label{Class_Operators}
+
+The keywords \chpl{owned}, \chpl{shared}, \chpl{borrowed}, and
+\chpl{unmanaged} act as a prefix unary operator when specifying the management
+strategy for a class type. See~\rsec{Class_Types}.
+
+The unary postfix operator \chpl{?} results in the nilable variant of a
+class type. See~\rsec{Nilable_Classes}.
+
+The unary postfix operator \chpl{!} asserts that the receiver is not
+storing \chpl{nil} and borrows from it. See~\rsec{Nilable_Classes}.
+
 \section{Miscellaneous Operators}
 \label{Miscellaneous_Operators}
 
@@ -1362,30 +1372,29 @@ overloading~(\rsec{Function_Overloading}).
 \index{operators!concatenation!string}
 \index{operators!+ (string)@\chpl{+} (string)}
 
-The string concatenation operator \chpl{+} is predefined over numeric, boolean,
-and enumerated types with strings. It casts its operands to string type and
-concatenates them together.
+The string concatenation operator \chpl{+} is predefined for string
+arguments and returns a new string that is the concatenation of its
+arguments:
+
+\begin{chapel}
+proc +(s0: string, s1: string): string
+\end{chapel}
 
 \begin{chapelexample}{string-concat.chpl}
-The code
-\begin{chapelnoprint}
-var i:int = 3;
-writeln(
-\end{chapelnoprint}
+The code:
 \begin{chapel}
-"result: "+i
+var x: string = "hi";
+var y: string = " there";
+var z = x + y;
 \end{chapel}
 \begin{chapelnoprint}
-);
+writeln(z);
 \end{chapelnoprint}
 \begin{chapeloutput}
-result: 3
+hi there
 \end{chapeloutput}
-where \chpl{i} is an integer appends the string representation of \chpl{i} to the
-string literal \chpl{"result: "}.  If \chpl{i} is \chpl{3}, then the resulting string
-would be \chpl{"result: 3"}.
-\begin{chapelnoprint}
-\end{chapelnoprint}
+will cause \chpl{z} to be a new string containing the value \chpl{"hi
+there"}.
 \end{chapelexample}
 
 \subsection{The By Operator}
@@ -1513,11 +1522,18 @@ for-expression:
   `for' index-var-declaration `in' iteratable-expression `do' expression
   `for' iteratable-expression `do' expression
 \end{syntax}
-The for expression executes a for loop (\rsec{The_For_Loop}),
+A for expression is an iterator that executes a for loop (\rsec{The_For_Loop}),
 evaluates the body expression on each iteration of the loop,
-and returns the resulting values as a collection.
-The size and shape of that collection
-are determined by the iteratable-expression.
+and yields each resulting value.
+
+When a for expression is used to initialize a variable, such as
+\begin{chapel}
+var X = for iterableExpression() do computeValue();
+\end{chapel}
+the variable will be inferred to have an array type.
+The array's domain is defined by the \sntx{iterable-expression}
+following the same rules as for promotion, both in the regular
+case \rsec{Promotion} and in the zipper case \rsec{Zipper_Promotion}.
 
 \subsection{Filtering Predicates in For Expressions}
 \label{Filtering_Predicates_For}
@@ -1525,9 +1541,13 @@ are determined by the iteratable-expression.
 \index{expressions!for@\chpl{for}!filtering predicates}
 
 A conditional expression that is immediately enclosed in a for
-expression and does not require an else clause filters the iterations of the for expression.
+expression and does not require an else clause filters the iterations
+of the for expression.
 The iterations for which the condition does not hold
 are not reflected in the result of the for expression.
+
+When a for expression with a filtering predicate is captured into
+a variable, the resulting array has a 1-based one-dimensional domain.
 
 \begin{chapelexample}{yieldPredicates.chpl}
 The code

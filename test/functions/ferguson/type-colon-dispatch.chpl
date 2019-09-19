@@ -34,65 +34,72 @@ proc foo(type t) {
 proc foo(type t:R) {
   writeln("R");
 }
-proc foo(type t:Parent) {
+proc foo(type t:borrowed Parent) {
   writeln("Parent");
 }
-proc foo(type t:GenericParent) {
+proc foo(type t:borrowed GenericParent) {
   writeln("GenericParent");
 }
-proc foo(type t:GenericChild(int)) {
+proc foo(type t:borrowed GenericChild(int)) {
   writeln("GenericChild(int)");
 }
-proc foo(type t:object) {
+proc foo(type t:borrowed object) {
   writeln("object");
 }
 writeln("foo");
 foo(int);
 foo(int(8));
+foo(uint);
 foo(real);
 foo(R(complex));
-foo(Parent);
-foo(Child);
-foo(MyClass);
-foo(GenericParent(int));
-foo(GenericChild(int));
-foo(GenericChild(real));
+foo(borrowed Parent);
+foo(borrowed Child);
+foo(borrowed MyClass);
+foo(borrowed GenericParent(int));
+foo(borrowed GenericChild(int));
+foo(borrowed GenericChild(real));
 writeln();
 
-proc bar(type t) where t:int {
+proc bar(type t) where isSubtype(t,int) {
   writeln("int");
 }
-proc bar(type t) where (t:integral && !t:int) {
+proc bar(type t) where (isSubtype(t,integral) && !isSubtype(t,int)) {
   writeln("integral");
 }
-proc bar(type t) where !(t:int || t:integral || t:R || t:Parent ||
-                         t:GenericParent || t:object) {
+proc bar(type t) where !(isSubtype(t,int) || isSubtype(t,integral) ||
+                         isSubtype(t,R) || isSubtype(t,borrowed Parent) ||
+                         isSubtype(t,borrowed GenericParent) ||
+                         isSubtype(t,borrowed object)) {
   writeln("any type");
 }
-proc bar(type t) where t:R {
+proc bar(type t) where isSubtype(t,R) {
   writeln("R");
 }
-proc bar(type t) where t:Parent {
+proc bar(type t) where isSubtype(t,borrowed Parent) {
   writeln("Parent");
 }
-proc bar(type t) where (t:GenericParent && !t:GenericChild(int)) {
+proc bar(type t) where (isSubtype(t,borrowed GenericParent) &&
+                        !isSubtype(t,borrowed GenericChild(int))) {
   writeln("GenericParent");
 }
-proc bar(type t) where t:GenericChild(int) {
+proc bar(type t) where isSubtype(t,borrowed GenericChild(int)) {
   writeln("GenericChild(int)");
 }
-proc bar(type t) where (t:object && !t:Parent && !t:GenericParent) {
+proc bar(type t) where (isSubtype(t,borrowed object) &&
+                        !isSubtype(t,borrowed Parent) &&
+                        !isSubtype(t,borrowed GenericParent)) {
   writeln("object");
 }
 
 writeln("bar");
 bar(int);
 bar(int(8));
+bar(uint);
 bar(real);
 bar(R(complex));
-bar(Parent);
-bar(Child);
-bar(MyClass);
-bar(GenericParent(int));
-bar(GenericChild(int));
-bar(GenericChild(real));
+bar(borrowed Parent);
+bar(borrowed Child);
+bar(borrowed MyClass);
+bar(borrowed GenericParent(int));
+bar(borrowed GenericChild(int));
+bar(borrowed GenericChild(real));

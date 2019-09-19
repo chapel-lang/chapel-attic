@@ -1,21 +1,12 @@
 pragma "safe"
 module zzz {
 
-use OwnedObject;
+
 
 class MyClass {
   var x:int;
 }
 
-
-/*(The question is, if you mutated a ref to a borrow, would  the other borrow
-  checking rules catch an error, or would it cause a gap in the checking?)
- */
-proc bad1(ref r:MyClass) {
-
-  var owny = new Owned(new MyClass(1));
-  r = owny.borrow();
-}
 
 /* 
    Another question: What if a method on a global variable of record or class
@@ -23,21 +14,20 @@ proc bad1(ref r:MyClass) {
  */
 
 record R {
-  var borrow:MyClass;
+  var borrow:borrowed MyClass?;
 }
 var global:R;
 
-proc bad2(arg:MyClass) {
+proc bad2(arg:borrowed MyClass) {
   // This is bad because global.borrow has infinite lifetime and
   // arg does not.
   global.borrow = arg;
 }
 
 proc test() {
-  var owned = new Owned(new MyClass(1));
+  var myowned = new owned MyClass(1);
 
-  var borrow = owned.borrow();
-  bad1(borrow);
+  var borrow = myowned.borrow();
   bad2(borrow);
 }
 
@@ -46,29 +36,29 @@ writeln(global);
 
 
 record RBorrowAndOwn {
-  var borrowed:MyClass;
+  var _borrowed:borrowed MyClass;
 
   pragma "owned"
-  var owned:MyClass;
+  var myowned:unmanaged MyClass;
 
   proc readOwned() {
-    return owned;
+    return _to_borrowed(myowned);
   }
 }
 
 proc RBorrowAndOwn.deinit() {
-  delete owned;
+  delete myowned;
 }
 
-proc makeR(borrow:MyClass) {
-  return new RBorrowAndOwn(borrow, new MyClass(10*borrow.x));
+proc makeR(borrow:borrowed MyClass) {
+  return new RBorrowAndOwn(borrow, new unmanaged MyClass(10*borrow.x));
 }
 
 proc badF3() {
-  var c = new MyClass(1);
+  var c = new borrowed MyClass(1);
   var r = makeR(c);
   {
-    var r2 = makeR(r.borrowed);
+    var r2 = makeR(r._borrowed);
     return r2;
   }
 }

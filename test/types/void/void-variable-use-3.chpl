@@ -1,7 +1,7 @@
 class c {
-  var v: void;
+  var v: nothing;
 }
 
-var foo = new c();
+var foo = new unmanaged c();
 writeln(foo.v);
 delete foo;

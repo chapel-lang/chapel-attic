@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2018 Cray Inc.
+ * Copyright 2004-2019 Cray Inc.
  * Other additional copyright holders may be indicated within.
  *
  * The entirety of this work is licensed under the Apache License,
@@ -100,7 +100,7 @@ module ChapelUtil {
   pragma "no default functions"
   extern record chpl_main_argument {
     var argc: int(64);
-    var argv: _ddata(string);
+    // var argv: c_ptr(c_string);
     var return_value: int(32);
   }
 
@@ -108,8 +108,11 @@ module ChapelUtil {
     __primitive("=", lhs, rhs);
   }
 
+  proc chpl__initCopy(x:chpl_main_argument) return x;
+
   proc chpl_convert_args(arg: chpl_main_argument) {
     var local_arg = arg;
+    pragma "fn synchronization free"
     extern proc chpl_get_argument_i(ref args:chpl_main_argument, i:int(32)):c_string;
     // This is odd.  Why are the strings inside the array getting destroyed?
     pragma "no auto destroy"
@@ -121,6 +124,22 @@ module ChapelUtil {
     }
 
     return array;
+  }
+
+  proc chpl_get_mli_connection(arg: chpl_main_argument) {
+    var local_arg = arg;
+    pragma "fn synchronization free"
+    extern proc chpl_get_argument_i(ref args:chpl_main_argument, i:int(32)):c_string;
+    var flag: c_string = chpl_get_argument_i(local_arg,
+                                             (local_arg.argc-2): int(32));
+    if (flag != "--chpl-mli-socket-loc") {
+      halt("chpl_get_mli_connection called with unexpected arguments, missing "
+           + "'--chpl-mli-socket-loc <connection>', instead got " +
+           flag: string);
+    }
+    var result: c_string = chpl_get_argument_i(local_arg,
+                                               (local_arg.argc-1): int(32));
+    return result;
   }
 
   //
@@ -135,10 +154,10 @@ module ChapelUtil {
 
   proc chpl_addModule(moduleName: c_string, deinitFun: c_fn_ptr) {
     chpl_moduleDeinitFuns =
-      new chpl_ModuleDeinit(moduleName, deinitFun, chpl_moduleDeinitFuns);
+      new unmanaged chpl_ModuleDeinit(moduleName, deinitFun, chpl_moduleDeinitFuns);
   }
 
-  proc chpl_deinitModules() {
+  export proc chpl_deinitModules() {
     extern proc printf(fmt:c_string);
     extern proc printf(fmt:c_string, arg:c_string);
     extern proc chpl_execute_module_deinit(deinitFun:c_fn_ptr);
@@ -147,7 +166,7 @@ module ChapelUtil {
       printf(c"Deinitializing Modules:\n");
     var prev = chpl_moduleDeinitFuns;
     while prev {
-      const curr = prev;
+      const curr = prev!;
       if printModuleDeinitOrder then
         printf(c"  %s\n", curr.moduleName);
       chpl_execute_module_deinit(curr.deinitFun);

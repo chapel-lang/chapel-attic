@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2018 Cray Inc.
+ * Copyright 2004-2019 Cray Inc.
  * Other additional copyright holders may be indicated within.
  * 
  * The entirety of this work is licensed under the Apache License,
@@ -287,7 +287,7 @@ proc densify(subs, wholes, userErrors = true)
   return result;
 }
 
-proc densify(s: range(?,?B,?), w: range(?IT,?,true), userErrors=true) : range(IT,B,true)
+proc densify(s: range(?,boundedType=?B), w: range(?IT,?,stridable=true), userErrors=true) : range(IT,B,true)
 {
   _densiEnsureBounded(s);
   _densiIdxCheck(s.idxType, IT, (s,w).type);
@@ -328,7 +328,7 @@ proc densify(s: range(?,?B,?), w: range(?IT,?,true), userErrors=true) : range(IT
   }
 }
 
-proc densify(sArg: range(?,?B,?S), w: range(?IT,?,false), userErrors=true) : range(IT,B,S)
+proc densify(sArg: range(?,boundedType=?B,stridable=?S), w: range(?IT,?,stridable=false), userErrors=true) : range(IT,B,S)
 {
   _densiEnsureBounded(sArg);
   _densiIdxCheck(sArg.idxType, IT, (sArg,w).type);
@@ -406,7 +406,7 @@ proc unDensify(denses, wholes, userErrors = true)
   return result;
 }
 
-proc unDensify(dense: range(?,?B,?), whole: range(?IT,?,true)) : range(IT,B,true)
+proc unDensify(dense: range(?,boundedType=?B), whole: range(?IT,?,stridable=true)) : range(IT,B,true)
 {
   _undensEnsureBounded(dense);
   if whole.boundedType == BoundedRangeType.boundedNone then
@@ -431,7 +431,7 @@ proc unDensify(dense: range(?,?B,?), whole: range(?IT,?,true)) : range(IT,B,true
   return low .. high by stride;
 }
 
-proc unDensify(dense: range(?,?B,?S), whole: range(?IT,?,false)) : range(IT,B,S)
+proc unDensify(dense: range(?,boundedType=?B,stridable=?S), whole: range(?IT,?,stridable=false)) : range(IT,B,S)
 {
   if !whole.hasLowBound() then
     compilerError("unDensify(): the 'whole' argument, when not stridable, must have a low bound");
@@ -471,6 +471,88 @@ proc setupTargetLocalesArray(ref targetLocDom, targetLocArr, specifiedLocArr) {
   }
 }
 
+// Compute the active dimensions of this assignment. For example, LeftDims
+// could be (1..1, 1..10) and RightDims (1..10, 1..1). This indicates that
+// a rank change occurred and that the inferredRank should be '1', the
+// LeftActives = (2,), the RightActives = (1,)
+proc bulkCommComputeActiveDims(LeftDims, RightDims) {
+  param LeftRank  = LeftDims.size;
+  param RightRank = RightDims.size;
+  param minRank   = min(LeftRank, RightRank);
+
+  var inferredRank = 0;
+
+  // Tuple used instead of an array because returning an array would
+  // recursively invoke array assignment (and therefore bulk-transfer).
+  var LeftActives, RightActives : minRank * int;
+
+  var li = 1, ri = 1;
+  proc advance() {
+    // Advance to positions in each domain where the sizes are equal.
+    while LeftDims(li).size == 1 && LeftDims(li).size != RightDims(ri).size do li += 1;
+    while RightDims(ri).size == 1 && RightDims(ri).size != LeftDims(li).size do ri += 1;
+
+    assert(LeftDims(li).size == RightDims(ri).size);
+  }
+
+  do {
+    advance();
+    inferredRank += 1;
+
+    LeftActives(inferredRank)  = li;
+    RightActives(inferredRank) = ri;
+
+    li += 1;
+    ri += 1;
+  } while li <= LeftRank && ri <= RightRank;
+
+  return (LeftActives, RightActives, inferredRank);
+}
+
+// Translates the indices of 'srcSlice' from the context of 'srcDom' to the
+// context of 'targetDom'.
+//
+// The rank of 'srcDom' may differ from that of 'targetDom' if a rank change is
+// involved.
+//
+// Note: Assumes that the total number of indices is the same in both 'srcDom'
+// and 'targetDom'
+proc bulkCommTranslateDomain(srcSlice : domain, srcDom : domain, targetDom : domain) {
+  if srcSlice.rank != srcDom.rank then
+    compilerError("bulkCommTranslateDomain: source slice and source domain must have identical rank");
+
+  const (SrcActives, TargetActives, inferredRank) = bulkCommComputeActiveDims(srcDom.dims(), targetDom.dims());
+
+  // Consider assignment between two rank changes:
+  //   var A, B : [1..10, 1..10] int;
+  //   A[1, ..] = B[.., 1];
+  //
+  // Here 'srcDom' will be {1..1, 1..10} and 'targetDom' will be {1..10, 1..1}.
+  // 'bulkCommComputeActiveDims' will tell us which dimensions of 'srcDom' need
+  // to be translated in to specific dimensions of 'targetDom'. In this case,
+  // we need to translate from srcDom's second dimension into targetDom's first
+  // dimension.
+  //
+  // The remaining dimensions in 'targetDom' are left untouched in the
+  // assumption they were 'squashed' by the rank change.
+  //
+  // If the given slice is stridable but its context is not, then the result
+  // will need to be stridable as well. For example:
+  // {1..20 by 4} in {1..20} to {101..120} = {101..120 by 4}
+  param needsStridable = targetDom.stridable || srcSlice.stridable;
+  var rngs : targetDom.rank*range(targetDom.idxType, stridable=needsStridable);
+  rngs = targetDom.dims();
+
+  for i in 1..inferredRank {
+    const SD    = SrcActives(i);
+    const TD    = TargetActives(i);
+    const dense = densify(srcSlice.dim(SD), srcDom.dim(SD));
+    rngs(TD)    = unDensify(dense, targetDom.dim(TD));
+  }
+
+  return {(...rngs)};
+}
+
 //
 // bulkCommConvertCoordinate() converts
 //   point 'ind' within 'bView'
@@ -503,7 +585,7 @@ proc bulkCommConvertCoordinate(ind, bView:domain, aView:domain)
   var result: rank * idxType;
   for param i in 1..rank {
     const ar = AD(i), br = BD(i);
-    if boundsChecking then assert(br.member(b(i)));
+    if boundsChecking then assert(br.contains(b(i)));
     result(i) = ar.orderToIndex(br.indexOrder(b(i)));
   }
   return result;
